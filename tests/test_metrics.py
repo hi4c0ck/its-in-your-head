@@ -1,42 +1,36 @@
-import os
-import tempfile
+"""OWNER test placeholders — replace as the pipeline gets implemented.
+
+Green at hand-off: assert that the owner surface exists and raises
+NotImplementedError, so the baseline proves the structure without
+asserting on un-written behavior.
+"""
+import importlib
 
 
-def test_schema_and_store(tmp_path, monkeypatch):
-    """Run the worker's storage path against a temp HERMES_HOME plugin-data root."""
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    import importlib
+def test_enqueue_accepts_events():
     import metrics
     importlib.reload(metrics)
-    import plugins.plugin_storage as ps
-    importlib.reload(ps) if hasattr(ps, "__spec__") else None
-    from plugins.plugin_storage import plugin_db
-    conn = plugin_db("its-in-your-head")
-    metrics.ensure_schema(conn)
-    from embedder import sketch
-    ev = {"type": "turn.start", "session_id": "s1", "user_message": "hi", "ts": 1.0,
-          "embedding": sketch("hi")}
-    conn.execute(
-        """INSERT INTO events (ts, type, session_id, user_message, embedding)
-           VALUES (?,?,?,?,?)""", (1.0, "turn.start", "s1", "hi", ev["embedding"]),
-    )
-    conn.commit()
-    n, = conn.execute("SELECT COUNT(*) FROM events").fetchone()
-    assert n == 1
+    before = metrics._queue.qsize()
+    metrics.enqueue({"type": "turn.start", "ts": 0.0})
+    assert metrics._queue.qsize() == before + 1
+    metrics._queue.get_nowait()
 
 
-def test_plugin_api_routes(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-    import importlib
-    import dashboard.plugin_api as api
-    importlib.reload(api)
-    app = FastAPI()
-    app.include_router(api.router)
-    client = TestClient(app)
-    r = client.get("/metrics")
-    assert r.status_code == 200
-    assert set(r.json()) == {"events", "total_tokens", "last_event"}
-    assert client.get("/heatmap").status_code == 200
-    assert client.get("/recent").status_code == 200
+def test_sketch_is_an_owner_slot():
+    import embedder
+    importlib.reload(embedder)
+    try:
+        embedder.sketch("hi")
+        raise AssertionError("sketch should be NotImplemented until owner codes it")
+    except NotImplementedError:
+        pass
+
+
+def test_worker_is_an_owner_slot():
+    import metrics
+    importlib.reload(metrics)
+    try:
+        metrics.start_worker()
+        raise AssertionError("start_worker should be NotImplemented until owner codes it")
+    except NotImplementedError:
+        pass

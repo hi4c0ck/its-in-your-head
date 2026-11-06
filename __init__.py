@@ -1,68 +1,44 @@
 """It's in Your Head — registration.
 
-Observer hooks only: capture on the hot path is enqueue-only (microseconds);
-embedding + aggregation happens in the metrics worker thread.
+Infra skeleton: hooks are wired per the manifest; the hook BODIES are OWNER
+WORK. Contract (official docs, /docs/developer-guide/plugins):
+- register(ctx) runs once at startup; a crash disables the plugin, Hermes continues.
+- Hook callbacks are fire-and-forget observers accepting **kwargs.
+- Hot-path rule: capture + enqueue only; heavy work belongs to a background worker.
+
+See ARCHITECTURE.md for locked decisions, slot defaults, and doc pointers.
 """
 import logging
-import time
-
-try:  # hermes namespaced plugin import (known parent package)
-    from . import metrics
-except ImportError:  # top-level import (tests / standalone dev)
-    import metrics
 
 logger = logging.getLogger(__name__)
 
 
 def _on_pre_llm_call(**kwargs):
-    try:
-        metrics.enqueue({
-            "type": "turn.start",
-            "session_id": kwargs.get("session_id"),
-            "model": kwargs.get("model"),
-            "user_message": kwargs.get("user_message") or "",
-            "ts": time.time(),
-        })
-    except Exception:
-        logger.exception("iitoh: pre_llm_call capture failed")
+    """OWNER SLOT: prompt capture. kwargs include session_id, user_message,
+    conversation_history, is_first_turn, model, platform.
+    Enqueue only — microseconds on the hot path. This is the only hook that can
+    also inject {"context": ...} back into the prompt (the "proxy" power)."""
+    pass
 
 
 def _on_post_api_request(**kwargs):
-    try:
-        usage = kwargs.get("usage") or {}
-        metrics.enqueue({
-            "type": "api.call",
-            "session_id": kwargs.get("session_id"),
-            "model": kwargs.get("model"),
-            "duration_s": kwargs.get("api_duration"),
-            "finish_reason": kwargs.get("finish_reason"),
-            "prompt_tokens": usage.get("prompt_tokens") if isinstance(usage, dict) else None,
-            "completion_tokens": usage.get("completion_tokens") if isinstance(usage, dict) else None,
-            "total_tokens": usage.get("total_tokens") if isinstance(usage, dict) else None,
-            "ts": time.time(),
-        })
-    except Exception:
-        logger.exception("iitoh: post_api_request capture failed")
+    """OWNER SLOT: per-provider-call metrics. kwargs include usage,
+    api_duration, finish_reason, and the turn_id/api_request_id/api_call_count
+    correlation fields."""
+    pass
 
 
 def _on_api_request_error(**kwargs):
-    try:
-        err = kwargs.get("error") or {}
-        metrics.enqueue({
-            "type": "api.error",
-            "session_id": kwargs.get("session_id"),
-            "model": kwargs.get("model"),
-            "status_code": kwargs.get("status_code"),
-            "reason": kwargs.get("reason"),
-            "ts": time.time(),
-        })
-    except Exception:
-        logger.exception("iitoh: api_request_error capture failed")
+    """OWNER SLOT: error ticks. kwargs include status_code, retry_count,
+    retryable, reason, error."""
+    pass
 
 
 def register(ctx):
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_api_request", _on_post_api_request)
     ctx.register_hook("api_request_error", _on_api_request_error)
-    metrics.start_worker()
-    logger.info("its-in-your-head: observer hooks + metrics worker registered")
+    # OWNER: add metrics.start_worker() here when the worker is coded.
+    # Lazy-DB rule: never open the plugin DB at register() time — doctor runs
+    # register() under a temp HERMES_HOME and deletes it (WinError 145 cleanup).
+    logger.info("its-in-your-head: observer hooks registered (skeleton)")
