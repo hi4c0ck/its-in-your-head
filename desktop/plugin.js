@@ -128,6 +128,17 @@ function fmtClock(ts) {
   return p(d.getHours()) + ':' + p(d.getMinutes())
 }
 
+// PULSE-START
+// Pure PULSE matrix helpers (no DOM/canvas): column mapping + cell values.
+// Column mapping (F1): the visible order is LIVE / GOAL / GOOD / FRICTION
+// per the original design (pulse/matrix.py). The server's `columns` list
+// still carries the legacy 'unlabeled' entry, but no row carries an
+// `unlabeled` cell — unlabeled tools report state='learning' on their
+// goal/good/friction cells (row.state / row.labeled), so 'unlabeled'
+// folds into those cells and is dropped from the visible columns.
+// LIVE is derived client-side from the per-row `live` counts the response
+// already carries (calls_started/calls_completed/errors) — no engine
+// field is needed and none is invented here.
 function pulseCellValue(cell) {
   if (!cell || typeof cell !== 'object') return null
   const v = cell.value
@@ -135,6 +146,31 @@ function pulseCellValue(cell) {
     ? Math.min(1, Math.max(0, v))
     : null
 }
+
+function pulseColumns(pulse) {
+  const semantic = ['goal', 'good', 'friction']
+  const fromServer = pulse && Array.isArray(pulse.columns)
+    ? pulse.columns.filter((c) => semantic.indexOf(c) !== -1)
+    : []
+  const rest = fromServer.length
+    ? semantic.filter((c) => fromServer.indexOf(c) !== -1)
+    : semantic
+  return ['live', ...rest]
+}
+
+// LIVE value: squash unbounded activity counts onto 0..1 (1 call -> 0.5,
+// saturating towards 1) so the cell shares the alpha encoding of the
+// similarity cells. No recorded activity -> null (neutral/blank), which
+// also marks the row as not live for the muted row styling below.
+function pulseLiveValue(row) {
+  const live = row && typeof row.live === 'object' ? row.live : null
+  if (!live) return null
+  const total = [live.calls_started, live.calls_completed, live.errors]
+    .reduce((s, v) => s + (typeof v === 'number' && Number.isFinite(v) ? v : 0), 0)
+  if (total <= 0) return null
+  return 1 - 1 / (1 + total)
+}
+// PULSE-END
 
 function drawPulse(canvas, pulse) {
   const c2d = canvas.getContext('2d')
@@ -151,10 +187,10 @@ function drawPulse(canvas, pulse) {
   // Missing cells (e.g. a column the row does not carry) stay neutral.
   const colors = resolveColors(canvas)
   const dpr = window.devicePixelRatio || 1
-  const columns =
-    pulse && Array.isArray(pulse.columns) && pulse.columns.length > 0
-      ? pulse.columns
-      : ['goal', 'good', 'friction', 'unlabeled']
+  // Columns: LIVE first (derived from row.live), then GOAL / GOOD /
+  // FRICTION. The legacy 'unlabeled' server entry folds into the
+  // goal/good/friction cell states (see pulseColumns) and is not shown.
+  const columns = pulseColumns(pulse)
   const rows = pulse && Array.isArray(pulse.rows) ? pulse.rows : []
   const pad = 2 * dpr
   const laneW = Math.max(1, canvas.width - 2 * pad)
@@ -169,17 +205,23 @@ function drawPulse(canvas, pulse) {
   rows.slice(0, maxRows).forEach((row, ri) => {
     const y = pad + ri * rowH
     const tool = String(row.tool_name || row.tool || '—')
+    // A row is live when the response records activity for it (row.live
+    // counts); live rows are highlighted, rows with no activity yet are
+    // muted — same accent/alpha encoding, no new colors.
+    const liveV = pulseLiveValue(row)
+    const isLive = liveV !== null
     c2d.fillStyle = colors.accent
-    c2d.globalAlpha = 0.85
+    c2d.globalAlpha = isLive ? 0.85 : 0.35
     c2d.fillText(tool.slice(0, 16), pad, y + rowH / 2)
     c2d.globalAlpha = 1
     columns.forEach((col, ci) => {
-      const v = pulseCellValue(row[col])
+      const v = col === 'live' ? liveV : pulseCellValue(row[col])
       const x = pad + labelW + ci * cellW
       const gap = Math.max(dpr, cellW * 0.08)
       if (v !== null && v > 0) {
         c2d.fillStyle = col === 'friction' ? colors.danger : colors.accent
         c2d.globalAlpha = 0.12 + 0.88 * v
+        if (!isLive) c2d.globalAlpha *= 0.45
         c2d.fillRect(x + gap, y + gap,
           Math.max(gap, cellW - 2 * gap), Math.max(gap, rowH - 2 * gap))
       }
