@@ -85,11 +85,33 @@ def _norm_ddl(s: str) -> str:
 
 def check_c3() -> list[str]:
     errs = []
-    m1 = re.search(r'SCHEMA\s*=\s*"""(.*?)"""', _read(ROOT / "metrics.py"), re.DOTALL)
+    metrics_text = _read(ROOT / "metrics.py")
+    api_text = _read(ROOT / "dashboard" / "plugin_api.py")
+    mig_text = _read(ROOT / "storage" / "migration.py") \
+        if (ROOT / "storage" / "migration.py").exists() else ""
+    # v0.1.1 single-source: canonical DDL lives in storage.migration;
+    # metrics.SCHEMA and dashboard._DDL must be aliases of it (no copies).
+    mig_m = re.search(r'EVENTS_DDL\s*=', mig_text) \
+        and re.search(r'CREATE TABLE IF NOT EXISTS events', mig_text)
+    metrics_alias = re.search(
+        r'SCHEMA\s*=\s*(?:_migration\.)?EVENTS_DDL', metrics_text)
+    api_alias = re.search(
+        r'_DDL\s*=\s*(?:_migration\.)?EVENTS_DDL', api_text)
+    if mig_m and metrics_alias and api_alias:
+        # Single source present: also ensure neither file carries a second
+        # CREATE TABLE events copy that could drift.
+        for name, text in (("metrics.py", metrics_text),
+                           ("dashboard/plugin_api.py", api_text)):
+            if len(re.findall(r'CREATE TABLE IF NOT EXISTS events', text)):
+                errs.append(
+                    f"C3: duplicate CREATE TABLE events copy in {name} "
+                    "(single source is storage.migration.EVENTS_DDL)")
+        return errs
+    # Fallback: legacy twin-copy comparison.
+    m1 = re.search(r'SCHEMA\s*=\s*"""(.*?)"""', metrics_text, re.DOTALL)
     if not m1:
         errs.append("C3: SCHEMA block not found in metrics.py")
         return errs
-    api_text = _read(ROOT / "dashboard" / "plugin_api.py")
     m2 = re.search(r'_(?:SCHEMA|DDL|SCHEMA_COPY)\s*=\s*"""(.*?)"""', api_text, re.DOTALL)
     if not m2:
         # allow inline executescript literal

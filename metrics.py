@@ -34,10 +34,12 @@ from pathlib import Path
 try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from . import embedder
     from .storage import database as _database
+    from .storage import migration as _migration
     from . import engine as _engine
 except ImportError:
     import embedder
     from storage import database as _database
+    from storage import migration as _migration
     try:
         import engine as _engine
     except ImportError:  # engine is optional plumbing; worker still persists
@@ -57,49 +59,9 @@ PRUNE_EVERY = 50         # prune check every N worker batches
 BATCH_MAX = 64           # max events flushed per commit
 QUEUE_GET_TIMEOUT = 0.5  # worker idle poll (s)
 
-# SCHEMA — source of truth for the storage layout. Duplicated deliberately in
-# dashboard/plugin_api.py: the dashboard mount must not import this worker
-# module, and it can't rely on the worker's lazy connection having run.
-# Keep the two copies in sync.
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS events (
-    id                INTEGER PRIMARY KEY,
-    ts                REAL NOT NULL,
-    type              TEXT NOT NULL,
-    session_id        TEXT,
-    turn_id           TEXT,
-    api_request_id    TEXT,
-    model             TEXT,
-    provider          TEXT,
-    api_duration      REAL,
-    finish_reason     TEXT,
-    prompt_tokens     INTEGER,
-    completion_tokens INTEGER,
-    total_tokens      INTEGER,
-    status_code       INTEGER,
-    retry_count       INTEGER,
-    retryable         INTEGER,
-    error_type        TEXT,
-    error_message     TEXT,
-    user_chars        INTEGER,
-    user_message      TEXT,
-    sketch            BLOB,
-    tool_name         TEXT,
-    task_id           TEXT,
-    tool_call_id      TEXT,
-    duration_ms       REAL,
-    result_type       TEXT,
-    result_chars      INTEGER,
-    status            TEXT,
-    finished          INTEGER,
-    reasoning_chars   INTEGER,
-    reasoning_deltas  INTEGER,
-    final_chars       INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts);
-CREATE INDEX IF NOT EXISTS idx_events_type ON events (type);
-CREATE INDEX IF NOT EXISTS idx_events_tool ON events (tool_name, ts);
-"""
+# SCHEMA — alias of the single canonical DDL (storage.migration.EVENTS_DDL).
+# Kept as a module-level name for existing callers/tests; do not copy the DDL.
+SCHEMA = _migration.EVENTS_DDL
 
 _COLUMNS = [
     "ts", "type", "session_id", "turn_id", "api_request_id", "model",
@@ -114,7 +76,6 @@ _INSERT = ("INSERT INTO events (" + ", ".join(_COLUMNS) + ") VALUES ("
            + ", ".join(":" + c for c in _COLUMNS) + ")")
 
 _queue: "queue.Queue" = queue.Queue()
-_db_path_override: "Path | str | None" = None  # test-only
 
 _worker_lock = threading.Lock()
 _worker_thread: "threading.Thread | None" = None
@@ -129,9 +90,8 @@ def enqueue(event: dict) -> None:
 
 
 def set_db_path(path: "Path | str") -> None:
-    """TEST ONLY: point storage at a local file instead of plugin_db()."""
-    global _db_path_override
-    _db_path_override = path
+    """TEST ONLY: point storage at a local file instead of plugin_db().
+    Forwards to storage.database.set_override — the single override (P2)."""
     _database.set_override(path)
 
 
@@ -193,7 +153,7 @@ def _row_from_event(ev: dict) -> dict:
 def _persist_batch(batch: list) -> None:
     conn = _connect()
     try:
-        conn.executescript(SCHEMA)
+        _migration.schema_bootstrap(conn, SCHEMA)
         for ev in batch:
             conn.execute(_INSERT, _row_from_event(ev))
         conn.commit()
@@ -205,7 +165,7 @@ def _prune() -> None:
     try:
         conn = _connect()
         try:
-            conn.executescript(SCHEMA)
+            _migration.schema_bootstrap(conn, SCHEMA)
             conn.execute(
                 "DELETE FROM events WHERE id <= "
                 "(SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?)",

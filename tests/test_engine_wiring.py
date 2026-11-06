@@ -158,14 +158,16 @@ def test_route_shapes_via_facades(tmp_path, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    # fresh engine, pointed at the tmp DB, wired as the module singleton
+    # fresh engine, pointed at the tmp DB, wired as the module singleton.
+    # P2: api.set_db_path forwards to the single storage override, so set
+    # it BEFORE feeding the engine (the registry resolves via storage).
+    api.set_db_path(tmp_path / "data.db")
     import engine
     eng = engine.Engine()
     monkeypatch.setattr(engine, "_engine", eng)
     eng.on_events([_user_turn(), _tool_end(tool="read_file")])
 
     api._ephemeral_settings.clear()
-    api.set_db_path(tmp_path / "data.db")
     api.set_ctx(None)
     app = FastAPI()
     app.include_router(api.router)

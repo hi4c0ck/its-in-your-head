@@ -7,8 +7,10 @@ rejected). Backend code runs in-gateway, so it can import hermes internals.
 
 First-use rule (doc pitfall): the dashboard mount CANNOT rely on the metrics
 worker's lazy connection having run, and it must not import the worker
-module — the schema is bootstrapped in-route. _DDL below is deliberately a
-copy of metrics.SCHEMA (source of truth: metrics.py) — keep the two in sync.
+module — the schema is bootstrapped in-route. _DDL below is an alias of
+storage.migration.EVENTS_DDL (single source; the dashboard imports only
+storage, never the worker). P2: DB path resolution/connect goes through
+storage.database exclusively — no dashboard-local override state.
 
 Error posture: DB unavailable / table absent / write-locked -> routes return
 the documented empty shapes (zeros, empty cells, []) so the desktop half
@@ -19,75 +21,38 @@ import sqlite3
 import time
 from pathlib import Path
 
+try:  # namespaced gateway import vs top-level (tests: dashboard.plugin_api)
+    from ..storage import database as _database
+    from ..storage import migration as _migration
+except ImportError:
+    from storage import database as _database
+    from storage import migration as _migration
+
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 PLUGIN_ID = "its-in-your-head"
 
-# Deliberate copy of metrics.SCHEMA (source of truth: metrics.py) — the
-# dashboard mount must not import the worker module. Keep in sync.
-_DDL = """
-CREATE TABLE IF NOT EXISTS events (
-    id                INTEGER PRIMARY KEY,
-    ts                REAL NOT NULL,
-    type              TEXT NOT NULL,
-    session_id        TEXT,
-    turn_id           TEXT,
-    api_request_id    TEXT,
-    model             TEXT,
-    provider          TEXT,
-    api_duration      REAL,
-    finish_reason     TEXT,
-    prompt_tokens     INTEGER,
-    completion_tokens INTEGER,
-    total_tokens      INTEGER,
-    status_code       INTEGER,
-    retry_count       INTEGER,
-    retryable         INTEGER,
-    error_type        TEXT,
-    error_message     TEXT,
-    user_chars        INTEGER,
-    user_message      TEXT,
-    sketch            BLOB,
-    tool_name         TEXT,
-    task_id           TEXT,
-    tool_call_id      TEXT,
-    duration_ms       REAL,
-    result_type       TEXT,
-    result_chars      INTEGER,
-    status            TEXT,
-    finished          INTEGER,
-    reasoning_chars   INTEGER,
-    reasoning_deltas  INTEGER,
-    final_chars       INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts);
-CREATE INDEX IF NOT EXISTS idx_events_type ON events (type);
-CREATE INDEX IF NOT EXISTS idx_events_tool ON events (tool_name, ts);
-"""
+# Single canonical DDL lives in storage.migration; _DDL is an alias kept for
+# existing callers/tests. Do not copy the DDL here.
+_DDL = _migration.EVENTS_DDL
 
 router = APIRouter()
 
-_db_path_override: "Path | str | None" = None  # test-only
-
 
 def set_db_path(path: "Path | str") -> None:
-    """TEST ONLY: point the routes at a local file instead of plugin_db()."""
-    global _db_path_override
-    _db_path_override = path
+    """TEST ONLY: point the routes at a local file instead of plugin_db().
+    Forwards to storage.database.set_override — the single override (P2);
+    the worker/storage connect() then targets the same file."""
+    _database.set_override(path)
 
 
 def _connect() -> sqlite3.Connection:
-    if _db_path_override is not None:
-        conn = sqlite3.connect(str(_db_path_override))
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
-    # Lazy, per-request: plugin_db hands back a fresh WAL connection with
-    # check_same_thread=False; the dashboard reader and the worker writer
-    # coexist because WAL. Never cached — one open handle would outlive the
-    # gateway's lifetime in ways the lazy rule forbids.
-    from plugins.plugin_storage import plugin_db
-    return plugin_db(PLUGIN_ID)
+    # Lazy, per-request via the single storage resolver: fresh WAL
+    # connection each time (never cached — one open handle would outlive
+    # the gateway's lifetime in ways the lazy rule forbids). Migration runs
+    # in-route via schema_bootstrap, never at register/import time.
+    return _database.connect()
 
 
 def _query(sql: str, params: tuple = ()):
@@ -98,7 +63,7 @@ def _query(sql: str, params: tuple = ()):
     except Exception:
         return None
     try:
-        conn.executescript(_DDL)  # in-route bootstrap (IF NOT EXISTS)
+        _migration.schema_bootstrap(conn, _DDL)  # in-route migrate/bootstrap
         return conn.execute(sql, params).fetchall()
     except sqlite3.Error:
         return None
@@ -354,7 +319,7 @@ def _drift_shape() -> dict:
     try:
         conn = _connect()
         try:
-            conn.executescript(_DDL)
+            _migration.schema_bootstrap(conn, _DDL)
             row = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name='portrait_history'").fetchone()
@@ -442,7 +407,7 @@ def _reset_dataset() -> dict:
     except Exception:
         return {"wiped": counts, "reset": True}
     try:
-        conn.executescript(_DDL)
+        _migration.schema_bootstrap(conn, _DDL)
         cur = conn.execute("DELETE FROM events")
         counts["events"] = cur.rowcount if cur.rowcount is not None else 0
         row = conn.execute(
