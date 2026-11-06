@@ -41,6 +41,10 @@ its-in-your-head/               # unified package = one installable folder = OSS
    background worker.
 5. Storage: WAL SQLite via `plugins.plugin_storage.plugin_db("its-in-your-head")`
    -> `plugin-data/its-in-your-head/data.db` — never in the plugin dir.
+6. Streaming reasoning deltas ON (owner: "we 100% use this feature") —
+   `plugins.stream_reasoning_deltas: true` is required in every profile config
+   that runs this plugin; raw model thinking then reaches the plugin, so the
+   README privacy section MUST disclose it. Enforced by config guard gate 4.
 
 ## Owner slots (defaults live in the code comments; override freely)
 
@@ -67,10 +71,10 @@ its-in-your-head/               # unified package = one installable folder = OSS
   streams); `on_stream_end` = the assembled final text (the store point).
   **Reasoning deltas are NOT exposed to plugins by default**: `on_stream_delta`
   only carries `kind="reasoning"` when the user opts in via
-  `plugins: stream_reasoning_deltas: true`. Privacy posture: keep that OFF by
-  default (raw model thinking is sensitive; matches our zero-overload,
-  local-only promise) — if you ever surface a "thinking" signal, the README
-  privacy section must disclose the opt-in. Registering any streaming hook
+  `plugins: stream_reasoning_deltas: true`. LOCKED (decision 6): we use this feature 100% — the config guard
+  (verify loop gate 4) enforces `plugins.stream_reasoning_deltas: true` in the
+  running profile; raw model thinking now reaches the plugin, so the README
+  privacy section must disclose it. Registering any streaming hook
   requires BOTH: register in `__init__.py` AND add to `provides_hooks` in
   plugin.yaml (drift check).
 - **Desktop** (`desktop/plugin.js`): heat canvas (ResizeObserver + theme vars,
@@ -103,3 +107,8 @@ its-in-your-head/               # unified package = one installable folder = OSS
 2. `<hermes venv python> -m pytest -q` -> green
 3. Desktop: save -> hot reload (linked junction) or Rescan -> pane visible, no
    error toast
+4. Config guard (reasoning-delta feature, locked ON):
+   `hermes -p plugin-studio config get plugins.stream_reasoning_deltas` -> `true`.
+   Missing/absent = `on_stream_delta` kind="reasoning" SILENTLY no-ops (no error,
+   no data) — re-apply with `hermes -p plugin-studio config set
+   plugins.stream_reasoning_deltas true`.
