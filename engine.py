@@ -149,6 +149,11 @@ class Engine:
         except Exception:
             return None
 
+    def capsule_state(self) -> dict:
+        """Per-tool activity-capsule vectors (S7 seam goal evidence)."""
+        with self._lock:
+            return {t: list(dq) for t, dq in self._capsules.items()}
+
     def pulse_view(self) -> dict:
         thr = {k: v for k, v in self._thresholds.items() if v is not None}
         capsules = None

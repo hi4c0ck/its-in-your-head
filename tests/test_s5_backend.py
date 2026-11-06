@@ -273,7 +273,10 @@ def test_mirror_summary_and_subcommands_text(tmp_path):
         assert not out.lstrip().startswith("{")
 
 
-def test_mirror_adaptation_read_only_text(tmp_path):
+def test_mirror_adaptation_on_off_rules(tmp_path):
+    """S7 semantics supersede S5's read-only pin: on/off toggle
+    adaptation.enabled (persisted via ctx config), rules lists the
+    deterministic rule definitions."""
     import commands
     _client(tmp_path)
     ctx = FakeCtx()
@@ -282,11 +285,13 @@ def test_mirror_adaptation_read_only_text(tmp_path):
     status = handler("adaptation status")
     assert "off" in status
     on = handler("adaptation on")
-    assert "off" in on  # reports the C4 value; engine lands in S7
+    assert "on" in on and "persisted" in on
+    assert ctx._config.get("adaptation.enabled") is True
+    off = handler("adaptation off")
+    assert "off" in off
+    assert ctx._config.get("adaptation.enabled") is False
     rules = handler("adaptation rules")
-    assert "none" in rules
-    # read-only: no config write happened
-    assert ctx._config == {}
+    assert "adaptation rules" in rules
 
 
 def test_mirror_unknown_subcommand_usage(tmp_path):

@@ -182,3 +182,134 @@ def test_route_shapes_via_facades(tmp_path, monkeypatch):
 
     d = client.get("/drift").json()
     assert d["available"] is True and len(d["series"]) == 6
+
+
+# --- S7 adaptation seam (parent, PG3 merge) -------------------------------
+
+SEAM_TEXT = "search the web for the paper towel aisle layout"
+_VEC = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+_ORTH = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+
+def _seed_qualifying_store(eng, vec=None):
+    """Store + capsule evidence for web_search; vectors fixed so cosine
+    similarities are exact (1.0 match / 0.0 orthogonal)."""
+    from collections import deque
+    v = list(vec or _VEC)
+    tool = "web_search"
+    for _ in range(2):
+        eng.protos.add_good(tool, list(v))
+        eng.protos.add_friction(tool, list(v))
+    eng.protos.add_objective_friction(tool, list(v))
+    eng._capsules[tool] = deque([{"vector": list(v)}])
+    return tool
+
+
+def _patch_encoder(monkeypatch, matched=_VEC, unmatched=_ORTH):
+    """Deterministic prompt vectors: rules Tier-0 encode returns `matched`
+    for the seam text, `unmatched` for anything else."""
+    from perception import encoder as _enc
+
+    class _Fixed:
+        def encode(self, texts):
+            out = []
+            for t in texts:
+                out.append(list(matched) if str(t) == SEAM_TEXT
+                           else list(unmatched))
+            return out
+
+    monkeypatch.setattr(_enc.Tier0SketchBackend, "encode",
+                        _Fixed().encode)
+
+
+@pytest.fixture(autouse=True)
+def _clean_injection():
+    from adaptation import injection
+    injection.clear_state()
+    yield
+    injection.clear_state()
+
+
+def test_seam_disabled_returns_none(tmp_path, monkeypatch):
+    """Locked default: adaptation disabled -> observer-only, no injection."""
+    import dashboard.plugin_api as api
+    api._ephemeral_settings.clear()
+    api.set_ctx(None)
+    import engine
+    _seed_qualifying_store(engine.get_engine())
+    _patch_encoder(monkeypatch)
+    import core.collector as collector
+    assert collector._on_pre_llm_call(
+        user_message=SEAM_TEXT, turn_id="s1:t1", session_id="s1") is None
+
+
+def test_seam_enabled_no_evidence_returns_none(tmp_path, monkeypatch):
+    import dashboard.plugin_api as api
+    api._ephemeral_settings.clear()
+    api.set_ctx(None)
+    api._ephemeral_settings["adaptation.enabled"] = True
+    import engine
+    engine.get_engine()  # empty store + capsules
+    import core.collector as collector
+    assert collector._on_pre_llm_call(
+        user_message=SEAM_TEXT, turn_id="s1:t1", session_id="s1") is None
+    api._ephemeral_settings.clear()
+
+
+def test_seam_enabled_fires_once_per_turn(tmp_path, monkeypatch):
+    import dashboard.plugin_api as api
+    api._ephemeral_settings.clear()
+    api.set_ctx(None)
+    api._ephemeral_settings["adaptation.enabled"] = True
+    import engine
+    tool = _seed_qualifying_store(engine.get_engine())
+    _patch_encoder(monkeypatch)
+    import core.collector as collector
+
+    out = collector._on_pre_llm_call(
+        user_message=SEAM_TEXT, turn_id="s1:t9", session_id="s1")
+    assert out is not None
+    assert "Prefer" in out["context"] and out["context"].endswith(".")
+    assert out["meta"]["tool"] == tool
+    assert out["meta"]["turn_id"] == "s1:t9"
+    # deduped for the same turn; refires on a new turn
+    assert collector._on_pre_llm_call(
+        user_message=SEAM_TEXT, turn_id="s1:t9", session_id="s1") is None
+    out2 = collector._on_pre_llm_call(
+        user_message=SEAM_TEXT, turn_id="s1:t10", session_id="s1")
+    assert out2 is not None
+    api._ephemeral_settings.clear()
+
+
+def test_seam_unrelated_prompt_returns_none(tmp_path, monkeypatch):
+    """No qualifying domain -> observer-only even when enabled."""
+    import dashboard.plugin_api as api
+    api._ephemeral_settings.clear()
+    api.set_ctx(None)
+    api._ephemeral_settings["adaptation.enabled"] = True
+    import engine
+    _seed_qualifying_store(engine.get_engine())
+    _patch_encoder(monkeypatch)  # other texts encode to the orthogonal vec
+    import core.collector as collector
+    assert collector._on_pre_llm_call(
+        user_message="rewire the docker compose file", turn_id="s1:t11",
+        session_id="s1") is None
+    api._ephemeral_settings.clear()
+
+
+def test_seam_fault_degrades_to_observer(tmp_path, monkeypatch):
+    """A fault inside the builder must never break the LLM call path."""
+    import dashboard.plugin_api as api
+    api._ephemeral_settings.clear()
+    api.set_ctx(None)
+    api._ephemeral_settings["adaptation.enabled"] = True
+
+    import core.collector as collector
+
+    def _boom(*a, **kw):
+        raise RuntimeError("injection down")
+
+    monkeypatch.setattr(collector, "build_injection", _boom)
+    assert collector._on_pre_llm_call(
+        user_message=SEAM_TEXT, turn_id="s1:t12", session_id="s1") is None
+    api._ephemeral_settings.clear()

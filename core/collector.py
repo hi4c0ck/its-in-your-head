@@ -13,15 +13,34 @@ import logging
 import time
 
 try:  # hermes namespaced import (gateway) vs top-level import (tests)
-    from .. import metrics
+    from .. import metrics, engine
     from . import events, settings
     from .session_state import SessionState
+    from ..adaptation.injection import build_injection
 except ImportError:
-    import metrics
+    import metrics, engine
     from core import events, settings
     from core.session_state import SessionState
+    from adaptation.injection import build_injection
 
 logger = logging.getLogger(__name__)
+
+
+def _adaptation_settings() -> dict:
+    """Live C4 snapshot for the S7 seam (ctx config + ephemeral + DEFAULTS).
+
+    The dashboard module owns the merged read (it received the plugin ctx
+    at register() via set_ctx); when it is unavailable, DEFAULTS apply and
+    the seam stays inert (adaptation disabled by default).
+    """
+    try:
+        try:
+            from ..dashboard import plugin_api as _papi
+        except ImportError:
+            from dashboard import plugin_api as _papi
+        return _papi._settings_current()
+    except Exception:
+        return dict(settings.DEFAULTS)
 
 STATE = SessionState()
 _settings_snapshot = dict(settings.DEFAULTS)
@@ -57,7 +76,13 @@ def _flush_reasoning(turn_id, session_id=None):
 # --- pre-existing hooks (behavior unchanged) ----------------------------
 
 def _on_pre_llm_call(**kwargs):
-    """Prompt capture (turn event). Observer-only: returns None."""
+    """Prompt capture (turn event) + S7 adaptation seam.
+
+    Observer-only by default. When the user has explicitly enabled prompt
+    adaptation, a single bounded fixed-template instruction
+    ({"context", "meta"}) is returned; otherwise None. Any fault in the
+    seam degrades to observer-only — the LLM call path is never broken."""
+    message = ""
     try:
         message = kwargs.get("user_message") or ""
         if not isinstance(message, str):
@@ -75,6 +100,23 @@ def _on_pre_llm_call(**kwargs):
         })
     except Exception:
         logger.exception("its-in-your-head: turn capture failed")
+    try:
+        snap = _adaptation_settings()
+        if snap.get("adaptation.enabled"):
+            eng = engine.get_engine()
+            pulse_state = {
+                "prototypes": eng.protos,
+                "capsules": eng.capsule_state(),
+            }
+            res = build_injection(
+                snap,
+                {"text": message, "turn_id": kwargs.get("turn_id")},
+                pulse_state,
+                turn_id=kwargs.get("turn_id"))
+            if res is not None:
+                return res
+    except Exception:
+        logger.exception("its-in-your-head: adaptation injection failed")
     return None
 
 
