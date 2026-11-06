@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  suite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The plugin test suite is hermetic: fake ctx doubles, lazy
+      # plugins.* imports, no gateway. Only these packages are needed.
+      - name: Install test deps
+        run: python -m pip install --upgrade pip && python -m pip install pytest fastapi httpx
+
+      - name: Contract gate (G5)
+        run: python tools/check_contracts.py
+
+      - name: Test suite (repo-local basetemp, pruned on pass)
+        run: python -m pytest -q
+
+      - name: Temp-budget gate (39 GB %TEMP% incident guard)
+        run: python tools/temp_budget_check.py .pytest-basetemp --max-mb 100
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Desktop pane syntax
+        run: node --check desktop/plugin.js
+
+      - name: Desktop contract tests
+        run: node tests/test_desktop_petstate.mjs
+
+      - name: Desktop theme-compat tests
+        run: node tests/test_desktop_themecompat.mjs
