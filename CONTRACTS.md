@@ -46,7 +46,9 @@ worker module — doc pitfall). G5 diffs the two normalized.
 Keys (land with S5; `adaptation.enabled` defaults **false**):
 `perception.enabled`, `observation.reasoning`, `observation.retain_days`,
 `pulse.prototype_cap`, `pulse.min_labeled`, `pulse.thresholds.{goal,good,friction}`,
-`adaptation.enabled`, `adaptation.rules[]`.
+`adaptation.enabled`, `adaptation.rules[]`,
+`perception.encoder` (S2 adjudication 2026-11-06: values `tier-0` | `tier-1-onnx`,
+default `tier-0`; Tier-1 ONNX revision/sha256 pin pending vendor download).
 
 ## C5 — hook matrix (live: pre_llm_call, post_api_request, api_request_error)
 
