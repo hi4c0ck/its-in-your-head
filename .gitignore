@@ -1,3 +1,18 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
 .pytest_cache/
+venv/
+.venv/
+*.log
+
+# OS noise (OSS repo — keep contributors happy)
+.DS_Store
+Thumbs.db
+
+# Local dev artifacts — plugin state/DBs NEVER commit (they live under plugin-data/, WAL mode)
+*.db
+*.db-wal
+*.db-shm
+plugin-data/
