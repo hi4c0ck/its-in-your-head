@@ -40,6 +40,18 @@ def register(ctx):
     ctx.register_hook("on_stream_end", _on_stream_end)
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("on_session_end", _on_session_end)
+    # S5 seam (parent-applied contract flag): /mirror commands + dashboard
+    # ctx wiring (GET/POST /settings read/write via ctx config API).
+    try:
+        from .commands import register_commands
+    except ImportError:
+        from commands import register_commands
+    register_commands(ctx)
+    try:
+        from .dashboard import plugin_api as _api
+    except ImportError:
+        from dashboard import plugin_api as _api
+    _api.set_ctx(ctx)
     # Start the background worker. Lazy-DB rule: the DB connection opens on
     # the first event, NEVER at register() time — doctor runs register() under
     # a temp HERMES_HOME and deletes it (WinError 145 cleanup on Windows).

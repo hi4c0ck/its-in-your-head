@@ -76,8 +76,12 @@ def test_recent_newest_first_and_shape(tmp_path):
     assert rows[1]["type"] == "error" and rows[1]["status_code"] == 503
     assert rows[2]["type"] == "api" and rows[2]["total_tokens"] == 100
     for row in rows:
-        assert set(row) == {"type", "ts", "model", "total_tokens",
-                            "finish_reason", "status_code"}
+        base = {"type", "ts", "model", "total_tokens",
+                "finish_reason", "status_code"}
+        # Pinned keys intact (subset) + only the C1-allowed additive
+        # /recent fields may appear (S5: tool phrasing for the ticker).
+        assert base <= set(row)
+        assert set(row) - base <= {"tool", "tool_name", "status_word"}
 
 
 def test_unknown_window_falls_back_to_24h(tmp_path):
