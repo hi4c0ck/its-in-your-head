@@ -1,0 +1,209 @@
+"""S2 Tier-1 model manifest tests (LANE A, hermetic — no network).
+
+Covers: manifest schema/shape, verify_onnx_model hash-mismatch refusal on
+fake files, encoder constants consistent with the manifest, and
+TIER1_MODEL_VERSION format. The manifest's file hashes may still be null
+(placeholder) in a fresh checkout — those tests only assert shape, never
+real hashes (no model binaries in git).
+"""
+import hashlib
+import importlib.util
+import json
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+MANIFEST_PATH = ROOT / "onnx" / "manifest.json"
+sys.path.insert(0, str(ROOT))
+
+from perception import encoder  # noqa: E402
+
+
+def _load_tool(name):
+    spec = importlib.util.spec_from_file_location(
+        name, ROOT / "tools" / f"{name}.py")
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _manifest():
+    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+
+
+def _fake_model_dir(tmp_path):
+    """Create fake artifacts + a manifest matching them."""
+    files = {}
+    for rel in ["onnx/model_int8.onnx", "tokenizer.json"]:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(f"fake-{rel}".encode())
+        files[rel] = {"sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+                      "size": p.stat().st_size}
+    manifest = {"files": files}
+    return tmp_path, manifest
+
+
+# --- manifest schema/shape -------------------------------------------------
+
+def test_manifest_exists_and_is_json():
+    assert MANIFEST_PATH.is_file()
+    _manifest()
+
+
+def test_manifest_schema_version_and_identity():
+    m = _manifest()
+    assert m["schema_version"] == 1
+    assert m["plugin_id"] == "its-in-your-head"
+    assert m["backend"] == "onnxruntime"
+    assert m["model_id"] == "onnx-community/paraphrase-multilingual-MiniLM-L12-v2-ONNX"
+    assert m["base_model"] == "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    assert m["execution_provider"] == "CPUExecutionProvider"
+    assert m["runtime"] == {"package": "onnxruntime", "constraint": ">=1.31.1,<1.32"}
+
+
+def test_manifest_license_recorded():
+    m = _manifest()
+    assert m["license"].lower() == "apache-2.0"
+
+
+def test_manifest_revision_is_immutable_sha():
+    m = _manifest()
+    assert re.fullmatch(r"[0-9a-f]{40}", m["revision"]), m["revision"]
+
+
+def test_manifest_files_shape():
+    m = _manifest()
+    assert "onnx/model_int8.onnx" in m["files"]  # int8 default
+    assert "onnx/model.onnx" in m["files"]        # fp32 alternative
+    for rel, meta in m["files"].items():
+        assert set(meta) == {"sha256", "size"}
+        sha = meta["sha256"]
+        assert sha is None or re.fullmatch(r"[0-9a-f]{64}", sha)
+        size = meta["size"]
+        assert size is None or (isinstance(size, int) and size > 0)
+
+
+def test_manifest_embedding_block():
+    m = _manifest()
+    assert m["embedding"] == {"dimension": 384, "max_sequence_length": 128,
+                              "pooling": "mean_attention_mask", "normalize": True}
+
+
+# --- encoder constants vs manifest ------------------------------------------
+
+def test_encoder_constants_match_manifest():
+    m = _manifest()
+    assert encoder.TIER1_MODEL_ID == m["model_id"]
+    assert encoder.TIER1_REVISION == m["revision"]
+    assert set(encoder.TIER1_ARTIFACTS) == set(m["files"])
+
+
+def test_tier1_model_version_format():
+    short = encoder.TIER1_REVISION[:12]
+    assert re.fullmatch(r"[0-9a-f]{12}", short)
+    assert encoder.TIER1_MODEL_VERSION == f"{encoder.TIER1_MODEL_ID}@rev-{short}"
+    assert encoder.TIER1_MODEL_VERSION.startswith("onnx-community/")
+
+
+def test_tier1_hf_base_matches_artifact_keys():
+    url = encoder.TIER1_HF_BASE.format(
+        model=encoder.TIER1_MODEL_ID, rev=encoder.TIER1_REVISION,
+        name="onnx/model_int8.onnx")
+    assert url.endswith("/resolve/" + encoder.TIER1_REVISION + "/onnx/model_int8.onnx")
+    assert "/onnx/onnx/" not in url
+
+
+# --- verify_onnx_model against fake files -----------------------------------
+
+def test_verify_accepts_matching_fake_files(tmp_path):
+    verify_mod = _load_tool("verify_onnx_model")
+    model_dir, manifest = _fake_model_dir(tmp_path)
+    assert verify_mod.verify(model_dir, manifest) == []
+
+
+def test_verify_refuses_hash_mismatch(tmp_path):
+    verify_mod = _load_tool("verify_onnx_model")
+    model_dir, manifest = _fake_model_dir(tmp_path)
+    (model_dir / "tokenizer.json").write_bytes(b"tampered")
+    errors = verify_mod.verify(model_dir, manifest)
+    assert any("mismatch" in e and "tokenizer.json" in e for e in errors)
+
+
+def test_verify_refuses_missing_file(tmp_path):
+    verify_mod = _load_tool("verify_onnx_model")
+    model_dir, manifest = _fake_model_dir(tmp_path)
+    (model_dir / "onnx" / "model_int8.onnx").unlink()
+    errors = verify_mod.verify(model_dir, manifest)
+    assert any("missing" in e for e in errors)
+
+
+def test_verify_refuses_missing_manifest_hash(tmp_path):
+    verify_mod = _load_tool("verify_onnx_model")
+    model_dir, manifest = _fake_model_dir(tmp_path)
+    manifest["files"]["tokenizer.json"]["sha256"] = None
+    errors = verify_mod.verify(model_dir, manifest)
+    assert any("no sha256" in e for e in errors)
+
+
+def test_verify_cli_exit_codes(tmp_path):
+    verify_mod = _load_tool("verify_onnx_model")
+    model_dir, manifest = _fake_model_dir(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert verify_mod.main(["--model-dir", str(model_dir),
+                            "--manifest", str(manifest_path)]) == 0
+    (model_dir / "tokenizer.json").write_bytes(b"tampered")
+    assert verify_mod.main(["--model-dir", str(model_dir),
+                            "--manifest", str(manifest_path)]) == 1
+
+
+# --- fetch --check refuses mismatching pre-existing hashes -------------------
+
+def test_fetch_check_refuses_mismatch(tmp_path):
+    fetch_mod = _load_tool("fetch_onnx_model")
+    model_dir, manifest = _fake_model_dir(tmp_path)
+    manifest["files"]["tokenizer.json"]["sha256"] = "0" * 64
+    errors = fetch_mod.check_hashes(model_dir, manifest)
+    assert any("mismatch" in e for e in errors)
+    manifest["files"]["tokenizer.json"]["sha256"] = (
+        hashlib.sha256((model_dir / "tokenizer.json").read_bytes()).hexdigest())
+    assert fetch_mod.check_hashes(model_dir, manifest) == []
+
+
+def test_safe_model_dirname():
+    fetch_mod = _load_tool("fetch_onnx_model")
+    assert fetch_mod.safe_model_dirname("a/b") == "a--b"
+
+
+# --- worker / pyproject shape -------------------------------------------------
+
+def test_worker_pyproject_constraints():
+    text = (ROOT / "onnx-worker" / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'name = "its-in-your-head-onnx"' in text
+    assert 'requires-python = ">=3.11,<3.15"' in text
+    assert "onnxruntime>=1.31.1,<1.32" in text
+    assert "onnxruntime-gpu" not in text
+    assert (ROOT / "onnx-worker" / "worker.py").is_file()
+    assert (ROOT / "onnx-worker" / "uv.lock").is_file()
+    lock = (ROOT / "onnx-worker" / "uv.lock").read_text(encoding="utf-8")
+    assert 'name = "onnxruntime"' in lock
+    assert "onnxruntime-gpu" not in lock
+
+
+def test_worker_protocol_ops_documented():
+    text = (ROOT / "onnx-worker" / "worker.py").read_text(encoding="utf-8")
+    for op in ('"embed"', '"ping"', '"shutdown"'):
+        assert op in text
+    assert "CPUExecutionProvider" in text
+    assert "mean_attention_mask" not in text  # pooling is code, not a string
+    assert "tokenizers" in text  # tokenizer.json via tokenizers lib, no transformers
+
+
+def test_manifest_no_model_binaries_in_repo():
+    # Only manifest.json under onnx/ — never model binaries.
+    assert sorted(p.name for p in (ROOT / "onnx").iterdir()) == ["manifest.json"]

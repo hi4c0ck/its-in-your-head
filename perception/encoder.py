@@ -40,16 +40,26 @@ BACKENDS = ("tier-0", "tier-1-onnx")
 TIER0_MODEL_VERSION = "tier0-sketch-v1"
 
 # Tier-1 pinned artifact (version-pinned; re-embed on any bump).
-TIER1_MODEL_ID = "sentence-transformers/paraphrase-multilingual-MiniLM-L6-v2"
-TIER1_REVISION = "pinned-v1"  # replace with a real HF revision hash on first download
-TIER1_MODEL_VERSION = f"{TIER1_MODEL_ID}@rev-{TIER1_REVISION}"
+# Decided model (plan P1): onnx-community ONNX export of the L12 multilingual
+# MiniLM — the L6 multilingual has no published ONNX artifacts. Revision is
+# the immutable HF commit SHA recorded in onnx/manifest.json; artifact keys
+# mirror the manifest `files` block (int8 default, fp32 alternative).
+TIER1_MODEL_ID = "onnx-community/paraphrase-multilingual-MiniLM-L12-v2-ONNX"
+TIER1_REVISION = "d4c06bf0d7680171ac30042a1387e1fdb7a90021"
+TIER1_MODEL_VERSION = f"{TIER1_MODEL_ID}@rev-{TIER1_REVISION[:12]}"
 TIER1_ARTIFACTS = {
-    "model.onnx": None,          # sha256 filled at first download / vendor time
+    "onnx/model_int8.onnx": None,   # sha256 in onnx/manifest.json
+    "onnx/model.onnx": None,        # fp32 alternative
     "tokenizer.json": None,
+    "tokenizer_config.json": None,
+    "config.json": None,
+    "special_tokens_map.json": None,
 }
 # Opt-in download base (used ONLY by download_tier1_model, never at encode-time).
 # The vendored/local path takes precedence; this is the explicit-user-action path.
-TIER1_HF_BASE = "https://huggingface.co/{model}/resolve/{rev}/onnx/{name}"
+# Artifact keys are manifest-relative (e.g. "onnx/model_int8.onnx"), so the
+# base is the repo root, not .../onnx/.
+TIER1_HF_BASE = "https://huggingface.co/{model}/resolve/{rev}/{name}"
 BATCH_SIZE = 64
 
 
