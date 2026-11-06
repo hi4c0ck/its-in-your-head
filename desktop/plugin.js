@@ -101,7 +101,10 @@ function resolveColors(canvas) {
   const accent = cs.getPropertyValue('--ui-accent').trim() || 'currentColor'
   const stroke = cs.getPropertyValue('--ui-stroke-secondary').trim() || 'transparent'
   let danger = ''
-  for (const v of ['--destructive', '--ui-danger', '--ui-error', '--danger']) {
+  // --destructive / --ui-danger / --ui-error / --danger are absent in the
+  // installed build (verified against its styles.css); probe the real
+  // tokens --dt-destructive / --color-destructive first.
+  for (const v of ['--dt-destructive', '--color-destructive', '--destructive', '--ui-danger', '--ui-error', '--danger']) {
     danger = cs.getPropertyValue(v).trim()
     if (danger) break
   }
@@ -126,6 +129,12 @@ function drawHeat(canvas, heat) {
   const c2d = canvas.getContext('2d')
   if (!c2d) return
   c2d.clearRect(0, 0, canvas.width, canvas.height)
+  // Heat encoding is surface-relative by construction: cells are painted in
+  // the host accent at 0.12..1.0 alpha over a cleared canvas, so the host
+  // surface itself is the blend base in both themes. The hottest cell (full
+  // accent; default build accent #0053fd) holds >=3:1 contrast on the light
+  // card (#fcfcfc) and the dark card (#161618) — see
+  // tests/test_desktop_themecompat.mjs. No theme-specific colors here.
   const colors = resolveColors(canvas)
   const dpr = window.devicePixelRatio || 1
   const hours = (heat && heat.hours) || 24
@@ -173,7 +182,7 @@ function IoLine({ ev }) {
     dot = 'var(--ui-accent)'
   } else if (ev.type === 'error') {
     tag = 'E'; body = ev.status_code ? String(ev.status_code) : 'error'
-    dot = 'var(--destructive, var(--ui-accent))'
+    dot = 'var(--dt-destructive, var(--destructive, var(--ui-accent)))'
   } else {
     return null
   }
@@ -406,8 +415,13 @@ function Strip({ source, rest }) {
   const popover = panel && jsxs('div', {
     style: {
       position: 'absolute', inset: 0, zIndex: 10,
-      background: 'var(--ui-popover, var(--ui-surface, transparent))',
-      border: '1px solid var(--ui-stroke-secondary)',
+      // --ui-popover / --ui-surface are ABSENT in the installed build
+      // (verified: no definition in its styles.css). The host's real popover
+      // token is --dt-popover (= color-mix 96% of --ui-bg-elevated, the same
+      // value the app uses for dropdown/dialog popovers), with --ui-bg-elevated
+      // and --dt-card behind it and a translucent color-mix as the last resort.
+      background: 'var(--dt-popover, var(--ui-bg-elevated, color-mix(in srgb, var(--dt-card, #fcfcfc) 96%, transparent)))',
+      border: '1px solid var(--ui-stroke-secondary, var(--dt-border, transparent))',
       color: 'var(--ui-text-secondary)',
       fontSize: 10, padding: '6px 8px', overflow: 'hidden',
       display: 'flex', flexDirection: 'column', gap: 4,
