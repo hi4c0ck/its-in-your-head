@@ -100,7 +100,7 @@ def test_legacy_migrates_via_worker_persist_path(tmp_path):
     try:
         assert "tool_name" in _columns(conn)
         assert "idx_events_tool" in _indexes(conn)
-        assert migration.get_schema_version(conn) == 2
+        assert migration.get_schema_version(conn) == 3
         rows = conn.execute(
             "SELECT type, tool_name, user_message FROM events ORDER BY id"
         ).fetchall()
@@ -124,7 +124,7 @@ def test_legacy_dashboard_route_migrates(tmp_path):
     try:
         assert "tool_name" in _columns(conn)
         assert "idx_events_tool" in _indexes(conn)
-        assert migration.get_schema_version(conn) == 2
+        assert migration.get_schema_version(conn) == 3
     finally:
         conn.close()
 
@@ -135,7 +135,7 @@ def test_fresh_bootstrap_and_second_call_is_noop(tmp_path, monkeypatch):
     conn = database.connect()
     try:
         assert migration.schema_bootstrap(conn) is True
-        assert migration.get_schema_version(conn) == 2
+        assert migration.get_schema_version(conn) == 3
         assert "tool_name" in _columns(conn)
         assert {"idx_events_ts", "idx_events_type", "idx_events_tool"} \
             <= _indexes(conn)
@@ -183,7 +183,7 @@ def test_override_unified_api_and_worker_same_file(tmp_path):
     assert database.resolve_path() == db_path
     conn = database.connect()
     try:
-        assert migration.get_schema_version(conn) == 2
+        assert migration.get_schema_version(conn) == 3
         assert "tool_name" in _columns(conn)
     finally:
         conn.close()
@@ -221,7 +221,7 @@ def test_failed_migration_rolls_back_completely(tmp_path, monkeypatch):
     try:
         assert migration.migrate(conn) is True
         assert "tool_name" in _columns(conn)
-        assert migration.get_schema_version(conn) == 2
+        assert migration.get_schema_version(conn) == 3
     finally:
         conn.close()
 

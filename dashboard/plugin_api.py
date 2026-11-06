@@ -423,7 +423,10 @@ def _portrait_shape() -> dict:
 
 def _drift_shape() -> dict:
     """Per-dim time-series sparkline arrays from stored portrait history.
-    Empty arrays until a portrait_history table exists (S3/S7 fill it)."""
+    Empty arrays until portrait_history holds rows. (v3: the table is
+    always created by the schema bootstrap, so availability means AT
+    LEAST ONE ROW — matching the engine drift_view contract; an empty
+    table is "no data", not an available empty series.)"""
     dims = _dimensions()
     shape = {"series": {d: [] for d in dims}, "available": False}
     try:
@@ -448,7 +451,9 @@ def _drift_shape() -> dict:
             for d in present:
                 shape["series"][d] = [
                     r[idx[d]] for r in rows if r[idx[d]] is not None]
-            shape["available"] = True
+            # Available only with at least one row (empty table = no data,
+            # mirroring engine.drift_view's bool(_history)).
+            shape["available"] = bool(rows)
         finally:
             conn.close()
     except Exception:

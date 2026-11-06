@@ -7,8 +7,19 @@ drop every worker batch. :func:`migrate` upgrades such databases in place —
 preserving existing rows — inside a single transaction.
 
 Versioning: ``meta(key TEXT PRIMARY KEY, value TEXT)`` with
-``schema_version`` = ``2`` for current-shape databases (fresh or migrated).
+``schema_version`` = ``3`` for current-shape databases (fresh or migrated).
 A database already at the expected version is a fast-path no-op.
+
+Schema v3 (F2 drift durability): adds the ``portrait_history`` table —
+one row per engine portrait-history entry (``ts`` + one REAL column per
+portrait dimension, column names exactly the six
+``perception.anchors.DIMENSIONS``, matching the dashboard ``/drift``
+fallback probe in ``dashboard/plugin_api._drift_shape``). Retention is
+bounded at ``PORTRAIT_HISTORY_MAX`` rows (mirrors the engine's
+``DRIFT_MAX`` in-memory deque bound), pruned on write to the most
+recent rows. v2 databases gain the table empty (existing events rows
+preserved); ``CREATE TABLE IF NOT EXISTS`` + missing-column ``ALTER``
+keep the upgrade idempotent.
 
 Import rules: this module is importable from both the worker (``metrics``)
 and the dashboard mount without importing either of them, and it performs
@@ -18,7 +29,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION  # alias
 
 _CREATE_EVENTS_TABLE = """CREATE TABLE IF NOT EXISTS events (
@@ -69,6 +80,49 @@ EVENTS_DDL = (
     + ";\n".join(_INDEX_STATEMENTS) + ";\n"
 )
 SCHEMA = EVENTS_DDL
+
+# Pinned portrait dimension column names (F2). Must stay in sync with
+# perception.anchors.DIMENSIONS and dashboard.plugin_api._dimensions();
+# a local copy is deliberate: this module must not import perception.
+PORTRAIT_HISTORY_DIMS = (
+    "directness",
+    "context_richness",
+    "exploration",
+    "analytical_depth",
+    "iteration",
+    "scope",
+)
+
+# Retention bound for portrait_history, mirroring the engine's
+# DRIFT_MAX in-memory deque bound; enforced by a delete-oldest prune
+# on every engine write (see engine._persist_history_entry).
+PORTRAIT_HISTORY_MAX = 512
+
+# One row per engine portrait-history entry: ts + one REAL per pinned
+# dimension (NULL = dimension had no value for that entry). Column names
+# and the ``ts`` ordering column are exactly what the /drift fallback
+# probe (dashboard.plugin_api._drift_shape) reads: present = dims ∩
+# columns, ordered by ts, values collected per dimension.
+_CREATE_PORTRAIT_HISTORY_TABLE = """CREATE TABLE IF NOT EXISTS portrait_history (
+    id                INTEGER PRIMARY KEY,
+    ts                REAL NOT NULL,
+    directness        REAL,
+    context_richness  REAL,
+    exploration       REAL,
+    analytical_depth  REAL,
+    iteration         REAL,
+    scope             REAL
+)"""
+
+_CREATE_PORTRAIT_HISTORY_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_portrait_history_ts "
+    "ON portrait_history (ts)"
+)
+
+PORTRAIT_HISTORY_DDL = (
+    _CREATE_PORTRAIT_HISTORY_TABLE + ";\n"
+    + _CREATE_PORTRAIT_HISTORY_INDEX + ";\n"
+)
 
 _META_TABLE_DDL = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
@@ -152,6 +206,22 @@ def _create_indexes(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
+def _create_portrait_history(conn: sqlite3.Connection) -> None:
+    """Create ``portrait_history`` if absent; add any missing dim columns.
+
+    ``CREATE TABLE IF NOT EXISTS`` covers the fresh/v2-upgrade cases; a
+    pre-existing table missing dim columns (partial hand-made table)
+    gets them via ``ALTER TABLE`` (existing rows preserved, new NULL).
+    """
+    conn.execute(_CREATE_PORTRAIT_HISTORY_TABLE)
+    existing = _table_columns(conn, "portrait_history")
+    for dim in PORTRAIT_HISTORY_DIMS:
+        if dim not in existing:
+            conn.execute(
+                f"ALTER TABLE portrait_history ADD COLUMN {dim} REAL")
+    conn.execute(_CREATE_PORTRAIT_HISTORY_INDEX)
+
+
 def migrate(conn: sqlite3.Connection,
             expected_version: int = CURRENT_SCHEMA_VERSION) -> bool:
     """Upgrade ``conn``'s database to ``expected_version`` in place.
@@ -160,10 +230,11 @@ def migrate(conn: sqlite3.Connection,
     no-op (returns False). Fresh databases get the canonical DDL; legacy
     databases (e.g. missing ``tool_name``) get the missing columns added via
     ``ALTER TABLE`` (existing rows preserved, new columns NULL) *before* the
-    indexes that reference them are created. All steps run in a single
-    transaction when the caller has not already opened one; any failure
-    rolls the whole migration back (no partial column/index/version state).
-    Returns True if work was done.
+    indexes that reference them are created. v2 -> v3 likewise gains the
+    ``portrait_history`` table (empty; existing events rows preserved).
+    All steps run in a single transaction when the caller has not already
+    opened one; any failure rolls the whole migration back (no partial
+    column/index/version state). Returns True if work was done.
     """
     version = _read_version(conn)
     if version is not None and version >= expected_version:
@@ -184,6 +255,7 @@ def migrate(conn: sqlite3.Connection,
         else:
             _add_missing_columns(conn, existing)
         _create_indexes(conn)
+        _create_portrait_history(conn)
         conn.execute(_META_TABLE_DDL)
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -220,6 +292,9 @@ __all__ = [
     "SCHEMA_VERSION",
     "EVENTS_DDL",
     "SCHEMA",
+    "PORTRAIT_HISTORY_DIMS",
+    "PORTRAIT_HISTORY_MAX",
+    "PORTRAIT_HISTORY_DDL",
     "get_schema_version",
     "migrate",
     "schema_bootstrap",

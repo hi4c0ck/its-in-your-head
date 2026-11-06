@@ -29,6 +29,23 @@ def _fresh_engine(tmp_path, monkeypatch):
         metrics.stop_worker()
     except Exception:
         pass
+    # Hygiene: turn events enqueued via the collector seam (notably by
+    # _user_turn_via_collector) must not outlive the test. Left queued,
+    # they are drained by a LATER test's worker under that test's DB path
+    # — and the worker-side engine feed now does F2 portrait_history
+    # DB I/O per turn, so a stale turn can create a DB file inside an
+    # unrelated test (deterministic order-dependent failure of
+    # test_register_wires_matrix_without_opening_db). Drain + reset.
+    while not metrics._queue.empty():
+        try:
+            metrics._queue.get_nowait()
+        except Exception:
+            break
+    try:
+        import engine as _engine_mod
+        _engine_mod._engine = None
+    except Exception:
+        pass
 
 
 def _eng():

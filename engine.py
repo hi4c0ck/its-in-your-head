@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import struct
 import threading
+import time
 from collections import deque
 
 try:  # hermes namespaced import (gateway) vs top-level import (tests)
@@ -66,6 +67,10 @@ class Engine:
             retain_days=int(s.get("observation.retain_days", 90)))
         self._capsules: dict[str, deque] = {}
         self._history: deque = deque(maxlen=DRIFT_MAX)
+        # F2: persisted portrait_history is rehydrated lazily on first
+        # portrait-history access (drift view / first user turn after
+        # restart) — never at Engine construction/register time.
+        self._history_loaded = False
         self.goal_text: str | None = None
         # Interpreted-track (agent/reasoning) evidence bookkeeping:
         # counts reasoning_seg updates that actually landed, so
@@ -227,8 +232,25 @@ class Engine:
             self.goal_text = text
             self.portrait.update_observed_from_text(text, self._get_backend())
             norm = self.portrait.normalized()
-            self._history.append(
-                {"ts": ev.get("ts"), "values": dict(norm.get("values") or {})})
+            ts = ev.get("ts")
+            entry = {
+                "ts": float(ts) if ts is not None else time.time(),
+                "values": {
+                    d: float(v)
+                    for d, v in dict(norm.get("values") or {}).items()
+                    if v is not None
+                },
+            }
+            # F2 writer+rehydrate in one connection (single bootstrap):
+            # on a post-restart first turn the persisted history loads
+            # first, then this entry appends after it in both views.
+            # Fault-isolated: a persist failure must not break perception;
+            # the engine degrades to in-memory-only history.
+            try:
+                self._append_history(entry)
+            except Exception:
+                logger.exception(
+                    "its-in-your-head: portrait_history persist failed")
         except Exception:
             logger.exception("its-in-your-head: engine user_turn feed failed")
 
@@ -240,6 +262,103 @@ class Engine:
             dq = self._capsules.setdefault(
                 key, deque(maxlen=CAPSULES_PER_TOOL))
             dq.append(capsule)
+
+    # -- F2 portrait_history durability ------------------------------------ #
+    @staticmethod
+    def _storage():
+        """(database, migration) modules, imported lazily.
+
+        No DB handle is opened at import/register time; the caller opens
+        one per call (same pattern as metrics._persist_batch).
+        """
+        try:  # namespaced gateway vs top-level (tests)
+            from .storage import database as _db
+            from .storage import migration as _mig
+        except ImportError:
+            from storage import database as _db
+            from storage import migration as _mig
+        return _db, _mig
+
+    @staticmethod
+    def _load_rows(conn) -> list:
+        """All portrait_history entries as {ts, values}, probe order."""
+        dims = _dims()
+        cols = ", ".join(dims)
+        rows = conn.execute(
+            f"SELECT ts, {cols} FROM portrait_history "
+            f"ORDER BY ts, id").fetchall()
+        return [{"ts": row[0],
+                 "values": {d: float(v) for d, v in zip(dims, row[1:])
+                            if v is not None}} for row in rows]
+
+    def _append_history(self, entry: dict) -> None:
+        """Rehydrate (if first access), append locally, then persist.
+
+        The local deque append is unconditional (perception must never
+        depend on storage); the persist is one write (insert + retention
+        prune). A persist failure raises — the caller (_on_user_turn)
+        catches and degrades to in-memory-only history.
+        """
+        self._ensure_history()  # never raises (degrades to empty/current)
+        self._history.append(entry)
+        self._persist_history_entry(entry)
+
+    def _ensure_history(self) -> None:
+        """Lazy rehydrate of ``_history`` from ``portrait_history``.
+
+        Runs once per process (flag-guarded), on first portrait-history
+        access — never at register/Engine construction. Rows load in
+        ``ts, id`` order (the probe's ordering); the deque's ``maxlen``
+        keeps only the most recent ``DRIFT_MAX`` entries. Any failure
+        degrades to the current (possibly empty) in-memory history.
+        """
+        if self._history_loaded:
+            return
+        self._history_loaded = True  # guard first: no retry loops
+        try:
+            _db, _mig = self._storage()
+            conn = _db.connect()
+            try:
+                _mig.schema_bootstrap(conn)
+                entries = self._load_rows(conn)
+            finally:
+                conn.close()
+            # Deque bound: keep only the most recent DRIFT_MAX, in order.
+            self._history.extend(entries[-DRIFT_MAX:])
+        except Exception:
+            logger.exception(
+                "its-in-your-head: portrait_history rehydrate failed")
+
+    def _persist_history_entry(self, entry: dict) -> None:
+        """Persist one portrait-history entry (one write per entry).
+
+        Retention: after the insert, rows beyond
+        ``migration.PORTRAIT_HISTORY_MAX`` (512, mirroring ``DRIFT_MAX``)
+        are pruned, keeping the most recent by ``id``. Caller wraps this
+        in try/except — a persist failure must not break perception.
+        """
+        _db, _mig = self._storage()
+        dims = _dims()
+        vals = entry.get("values") or {}
+        row = [float(entry["ts"])] + [
+            float(vals[d]) if vals.get(d) is not None else None
+            for d in dims
+        ]
+        conn = _db.connect()
+        try:
+            _mig.schema_bootstrap(conn)
+            conn.execute(
+                "INSERT INTO portrait_history (ts, "
+                + ", ".join(dims) + ") VALUES ("
+                + ", ".join(["?"] * (len(dims) + 1)) + ")",
+                row)
+            conn.execute(
+                "DELETE FROM portrait_history WHERE id NOT IN "
+                "(SELECT id FROM portrait_history ORDER BY id DESC LIMIT ?)",
+                (_mig.PORTRAIT_HISTORY_MAX,))
+            conn.commit()
+        finally:
+            conn.close()
 
     # -- zero-arg route facades -------------------------------------------- #
     def _session_state(self):
@@ -305,6 +424,10 @@ class Engine:
                 "user": dict(values), "agent": agent}
 
     def drift_view(self) -> dict:
+        # Lazy rehydrate: first drift access after a plugin-process
+        # restart loads the persisted portrait_history into the deque
+        # (in ts/id order, capped by the deque bound) before serving.
+        self._ensure_history()
         dims = _dims()
         series: dict[str, list] = {d: [] for d in dims}
         for entry in self._history:
@@ -323,6 +446,10 @@ class Engine:
         with self._lock:
             self._capsules.clear()
             self._history.clear()
+            # Explicit wipe: never resurrect pre-wipe rows from the DB.
+            # (The route's _reset_dataset() deletes portrait_history;
+            # marking loaded keeps this process view equal to that wipe.)
+            self._history_loaded = True
             self.goal_text = None
             self._interpreted_evidence_count = 0
             self._interpreted_last_ts = None
