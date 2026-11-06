@@ -1,8 +1,10 @@
-# It's in Your Head — structure & owner slots
+# It's in Your Head — structure, contracts, implementation map
 
-Briefing for the coding session. The manager (infra) laid down structure,
-contracts, manifest, test harness, and install wiring; functional code is
-owner work, per the slots below. Official references:
+Briefing for the coding session, kept current. The manager (infra) laid down
+structure, contracts, manifest, test harness, and install wiring; the
+functional slots below are IMPLEMENTED as of v0.1.0 (committed per slot; see
+git log) — the "owner slot" framing is retained only as a change-ownership
+map, not as a TODO list. Official references:
 - https://hermes-agent.nousresearch.com/docs/developer-guide/plugins
 - https://hermes-agent.nousresearch.com/docs/developer-guide/desktop-plugin-sdk
 - https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks
@@ -14,16 +16,21 @@ owner work, per the slots below. Official references:
 ```
 its-in-your-head/               # unified package = one installable folder = OSS repo root
 +-- plugin.yaml                 # manifest v2: id, version, provides_hooks (drift-checked vs register())
-+-- __init__.py                 # register(ctx): wires the 3 observer hooks — BODIES ARE OWNER SLOTS
-+-- embedder.py                 # embedding INTERFACE (sketch(text)->bytes); engine choice is an owner slot
-+-- metrics.py                  # pipeline skeleton: queue + worker/storage placeholders; lazy-DB rule documented
++-- __init__.py                 # register(ctx): wires the observer hooks (9-hook matrix, implemented)
++-- embedder.py                 # embedding INTERFACE (sketch(text)->bytes) + Tier-0 implementation (implemented)
++-- metrics.py                  # event pipeline: bounded queue + worker thread + storage (implemented)
++-- engine.py                   # process-level perception engine facade (portraits/pulse/drift views)
++-- adaptation/                 # deterministic rule engine + bounded injection builder (opt-in, off by default)
 +-- dashboard/
 |   +-- manifest.json           # { "name": "its-in-your-head", "api": "plugin_api.py" } — the backend mount
-|   +-- plugin_api.py           # FastAPI router stubs at /api/plugins/its-in-your-head/ (response shapes fixed)
+|   +-- plugin_api.py           # FastAPI router at /api/plugins/its-in-your-head/ (implemented, response shapes fixed)
++-- perception/                 # Tier-0 sketch + resemblance calibration + ONNX Tier-1 worker client/encoder
++-- onnx/ + onnx-worker/        # pinned Tier-1 manifest (revision + sha256 + sizes) and the isolated worker project
 +-- desktop/
-|   +-- plugin.js               # desktop half: pane registration (bottom dock, 96px) + strip placeholder
-+-- tests/                      # infra baseline (structure/contract tests, green) + owner placeholders
-+-- pytest.ini                  # importlib import mode + pythonpath (repo root is a Python package — required)
+|   +-- plugin.js               # desktop half: 96px strip pane, semantic PULSE/PORTRAIT/DRIFT views (implemented)
++-- pulse/ + storage/           # prototype store + WAL SQLite layer (migration-aware since v0.1.1)
++-- tests/                      # full suite (contract + behavior + desktop node checks), CI-gated
++-- pytest.ini                  # importlib import mode + pythonpath + repo-local basetemp + temp-budget retention
 +-- README.md / LICENSE (MIT) / .gitignore
 +-- ARCHITECTURE.md             # this file
 ```
@@ -33,8 +40,9 @@ its-in-your-head/               # unified package = one installable folder = OSS
 1. Unified package, staged in the `plugin-studio` profile; final distribution =
    open-source repo `hi4c0ck/its-in-your-head` + `hermes://` install link.
 2. Embedding: LIGHT, NO USER HARM — zero network per prompt; Tier-0 stdlib
-   sketch first, Tier-1 local ONNX MiniLM-L6 as a later swap behind the same
-   interface.
+   sketch first, Tier-1 local ONNX as a swap behind the same interface
+   (IMPLEMENTED: isolated PM-managed worker, pinned manifest, size-capped
+   atomic downloads, automatic Tier-0 fallback on any failure).
 3. UI: small pane (NOT a statusbar indicator), fixed ~96px strip, tabbable with
    other user panes.
 4. Hot-path rule: hooks capture/enqueue only; embedding + aggregation in a
@@ -46,7 +54,7 @@ its-in-your-head/               # unified package = one installable folder = OSS
    that runs this plugin; raw model thinking then reaches the plugin, so the
    README privacy section MUST disclose it. Enforced by config guard gate 4.
 
-## Owner slots (defaults live in the code comments; override freely)
+## Functional slots (IMPLEMENTED as of v0.1.0 — ownership map, change notes below)
 
 - **Hooks** (`__init__.py`): `pre_llm_call` (prompt capture + the only hook that
   can inject `{"context": ...}` — the "proxy" power), `post_api_request`
@@ -61,7 +69,7 @@ its-in-your-head/               # unified package = one installable folder = OSS
   can't rely on the worker).
 - **Embedding** (`embedder.py`): pick Tier-0 sketch params (n, DIM, norm) or
   Tier-1.
-- **Streaming output hooks (optional, post-MVP slot)**: `on_stream_start` /
+- **Streaming output hooks (IMPLEMENTED — reasoning capture live)**: `on_stream_start` /
   `on_stream_delta` / `on_stream_end` (+ `on_interim_message`) — the live-tick
   source for the strip. Doc semantics (verified 2026-11-06,
   /docs/user-guide/features/hooks "Streaming output hooks"): observer-only,
