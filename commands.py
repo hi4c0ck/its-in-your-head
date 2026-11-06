@@ -2,9 +2,11 @@
 
 Registration: register_commands(ctx) calls ctx.register_command("mirror", ...)
 once; subcommands (pulse|portrait|drift|context|reset|adaptation ...) are parsed
-from the trailing args. Output is compact plain text (the user-facing surface),
-never JSON dumps. Adaptation subcommands are read-only status until S7 lands
-the engine: on/off report the C4 adaptation.enabled value without writing.
+from trailing args. Output is compact plain text (the user-facing surface),
+never JSON dumps. S7: adaptation on/off toggle adaptation.enabled
+(persisted via ctx.set_config when available, else ephemeral), status
+reports the toggle + last applied injection, rules lists the
+deterministic rule definitions.
 
 Data comes from dashboard.plugin_api's sync shape helpers (guarded import —
 commands degrade to "no data" text, never raise into the dispatcher).
@@ -182,21 +184,79 @@ def _reset_text() -> str:
     return f"reset: wiped {events} events (config untouched)"
 
 
-def _adaptation_text(sub: str) -> str:
+def _adaptation_set(enabled: bool) -> str:
+    """Set adaptation.enabled via ctx.set_config when available, else
+    ephemeral (POST /settings persistence semantics)."""
+    value = bool(enabled)
+    word = "on" if value else "off"
+    ctx = _ctx
+    setter = getattr(ctx, "set_config", None)
+    if callable(setter):
+        try:
+            setter("adaptation.enabled", value)
+            return f"adaptation: {word} (persisted)"
+        except Exception:
+            pass
+    if _api is not None:
+        try:
+            _api._ephemeral_settings["adaptation.enabled"] = value
+        except Exception:
+            pass
+    return f"adaptation: {word} (ephemeral)"
+
+
+def _adaptation_rules_text() -> str:
+    try:
+        try:
+            from .adaptation import rules as _rules
+        except Exception:
+            from adaptation import rules as _rules  # type: ignore[no-redef]
+        defs = _rules.list_rule_definitions()
+    except Exception:
+        defs = []
+    if not defs:
+        return "adaptation rules: none"
+    lines = ["adaptation rules:"]
+    for d in defs:
+        lines.append(f"  - {d.get('name')}: {d.get('match')}")
+        lines.append(f"    template: {d.get('template')}")
+        ev = d.get("evidence")
+        if ev:
+            lines.append(f"    evidence: {', '.join(ev)}")
+    return "\n".join(lines)
+
+
+def _adaptation_status_text() -> str:
     current = _current_settings()
     enabled = current.get("adaptation.enabled", False)
     state = "on" if enabled else "off"
+    last = None
+    count = 0
+    try:
+        try:
+            from .adaptation import injection as _inj
+        except Exception:
+            from adaptation import injection as _inj  # type: ignore[no-redef]
+        last = _inj.last_application()
+        count = _inj.application_count()
+    except Exception:
+        pass
+    lines = [f"adaptation: {state} (injected {count} time(s))"]
+    if last is not None:
+        lines.append(f"  last: {last.get('rule_id')} -> {last.get('instruction')}")
+    else:
+        lines.append("  last: none")
+    return "\n".join(lines)
+
+
+def _adaptation_text(sub: str) -> str:
+    if sub == "on":
+        return _adaptation_set(True)
+    if sub == "off":
+        return _adaptation_set(False)
     if sub == "rules":
-        rules = current.get("adaptation.rules") or []
-        if not rules:
-            return "adaptation rules: none yet (engine lands in S7)"
-        return "adaptation rules:\n" + "\n".join(f"  - {_fmt(r)}" for r in rules)
-    if sub in ("on", "off"):
-        # Read-only until S7: report the C4 value, do not write.
-        return (f"adaptation: currently {state} — "
-                f"requested {sub} takes effect when the S7 engine lands")
-    # status / unknown subcommand
-    return f"adaptation: {state} (engine lands in S7; rules: none yet)"
+        return _adaptation_rules_text()
+    return _adaptation_status_text()
 
 
 def mirror_handler(raw_args: str = "", **kwargs) -> str:

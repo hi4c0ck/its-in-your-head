@@ -404,8 +404,33 @@ _CONTEXT_ROWS = [
 
 
 def _context_shape() -> dict:
-    """Provenance table shell (static model for now; S7 fills it)."""
-    return {"rows": [dict(r) for r in _CONTEXT_ROWS]}
+    """Provenance table; S7 fills the adaptation rows dynamically."""
+    rows = [dict(r) for r in _CONTEXT_ROWS]
+    try:
+        enabled = bool(_settings_current().get("adaptation.enabled", False))
+    except Exception:
+        enabled = False
+    last = None
+    try:
+        try:
+            from adaptation import injection as _inj
+        except Exception:
+            from ..adaptation import injection as _inj  # type: ignore
+        last = _inj.last_application()
+    except Exception:
+        last = None
+    for row in rows:
+        if row.get("item") == "plugin adaptation":
+            row["present"] = enabled
+            if enabled:
+                row["source"] = "adaptation engine"
+    rows.append({
+        "item": "injected instruction",
+        "visibility": "VISIBLE" if last is not None else "KNOWN",
+        "source": "pre_llm_call context injection; may persist in API sidecar",
+        "present": last is not None,
+    })
+    return {"rows": rows}
 
 
 def _reset_dataset() -> dict:
