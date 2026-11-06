@@ -13,18 +13,25 @@ import assert from 'node:assert/strict'
 const dir = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(dir, '..', 'desktop', 'plugin.js'), 'utf8')
 
-// Installed build: verified against
-// C:/Users/user/AppData/Local/hermes/hermes-agent/apps/desktop/src/styles.css
-// Findings: --ui-popover and --ui-surface are ABSENT (no definition anywhere
-// in src/); the real popover token is --dt-popover. Bare --border/--card/
-// --destructive/--ui-font-mono are likewise absent; --dt-border/--dt-card/
-// --dt-destructive/--dt-font-mono exist. This test re-derives the set from
-// that file when present so it stays honest if the build changes.
-const STYLES = 'C:/Users/user/AppData/Local/hermes/hermes-agent/apps/desktop/src/styles.css'
+// Token source (hermetic): CI cannot read a machine-local Hermes install, so
+// the build's defined-var set is pinned in tests/fixtures/desktop-theme-vars.txt
+// (snapshot of apps/desktop/src/styles.css, taken 2026-11-06). To re-derive
+// from a live build after a Hermes desktop update, run with:
+//   HERMES_DESKTOP_STYLES=<path-to-src/styles.css> node tests/test_desktop_themecompat.mjs
+// and regenerate the fixture when the build changes. Never fail open: no
+// source -> empty set -> non-fallback vars are caught, not silently passed.
+const FIXTURE = join(dir, 'fixtures', 'desktop-theme-vars.txt')
+const STYLES = process.env.HERMES_DESKTOP_STYLES
 let hostVars = new Set()
-if (existsSync(STYLES)) {
-  const css = readFileSync(STYLES, 'utf8')
+const styleSrc = STYLES && existsSync(STYLES) ? STYLES : null
+if (styleSrc) {
+  const css = readFileSync(styleSrc, 'utf8')
   for (const m of css.matchAll(/(--[a-zA-Z0-9-]+)\s*:/g)) hostVars.add(m[1])
+} else {
+  if (!existsSync(FIXTURE)) {
+    assert.fail('theme token source unavailable: set HERMES_DESKTOP_STYLES or restore tests/fixtures/desktop-theme-vars.txt')
+  }
+  hostVars = new Set(readFileSync(FIXTURE, 'utf8').split(/\r?\n/).filter(Boolean))
 }
 
 // 1. var() scan: name + whether a fallback comma follows at the same level.
