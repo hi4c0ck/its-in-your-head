@@ -27,11 +27,14 @@ def test_schema_and_store(tmp_path, monkeypatch):
 
 def test_plugin_api_routes(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from fastapi import FastAPI
     from fastapi.testclient import TestClient
     import importlib
     import dashboard.plugin_api as api
     importlib.reload(api)
-    client = TestClient(api.router)
+    app = FastAPI()
+    app.include_router(api.router)
+    client = TestClient(app)
     r = client.get("/metrics")
     assert r.status_code == 200
     assert set(r.json()) == {"events", "total_tokens", "last_event"}

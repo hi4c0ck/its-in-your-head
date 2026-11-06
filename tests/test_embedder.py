@@ -21,6 +21,8 @@ def test_similar_text_higher_cosine():
 
 
 def test_empty_and_short():
-    assert load(sketch("")).all.__all__ == 0.0 or True
+    # Empty input: no 3-grams fit -> zero vector (norm guard leaves it at 0).
+    assert all(x == 0.0 for x in load(sketch("")))
+    # 2-char input still yields space-bounded grams -> non-zero, normalized.
     v = load(sketch("ab"))
-    assert all(x == 0.0 for x in v) or sum(x * x for x in v) > 0
+    assert sum(x * x for x in v) > 0

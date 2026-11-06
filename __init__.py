@@ -6,7 +6,10 @@ embedding + aggregation happens in the metrics worker thread.
 import logging
 import time
 
-from . import metrics
+try:  # hermes namespaced plugin import (known parent package)
+    from . import metrics
+except ImportError:  # top-level import (tests / standalone dev)
+    import metrics
 
 logger = logging.getLogger(__name__)
 

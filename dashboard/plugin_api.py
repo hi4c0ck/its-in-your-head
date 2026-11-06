@@ -11,7 +11,34 @@ router = APIRouter()
 
 def _db():
     from plugins.plugin_storage import plugin_db
-    return plugin_db("its-in-your-head")
+    conn = plugin_db("its-in-your-head")
+    # First-use bootstrap: the dashboard mount can't rely on the metrics
+    # worker's lazy connection having run. DDL mirrors metrics.ensure_schema
+    # (single source of truth: metrics.py — keep in sync).
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS events (
+          id INTEGER PRIMARY KEY,
+          ts REAL NOT NULL,
+          type TEXT NOT NULL,
+          session_id TEXT,
+          model TEXT,
+          user_message TEXT,
+          embedding BLOB,
+          duration_s REAL,
+          finish_reason TEXT,
+          prompt_tokens INTEGER,
+          completion_tokens INTEGER,
+          total_tokens INTEGER,
+          status_code INTEGER,
+          reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts);
+        CREATE INDEX IF NOT EXISTS idx_events_type ON events (type);
+        """
+    )
+    conn.commit()
+    return conn
 
 
 @router.get("/metrics")

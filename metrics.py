@@ -9,7 +9,10 @@ import queue
 import threading
 import time
 
-from . import embedder
+try:  # hermes namespaced plugin import (known parent package)
+    from . import embedder
+except ImportError:  # top-level import (tests / standalone dev)
+    import embedder
 
 logger = logging.getLogger(__name__)
 
@@ -59,9 +62,21 @@ def start_worker():
     _worker.start()
 
 
+_conn = None
+
+
+def _get_conn():
+    """Lazily open the WAL DB on first event (never at register time —
+    doctor's temp HERMES_HOME must stay clean for its cleanup step)."""
+    global _conn
+    if _conn is None:
+        conn = _db()
+        ensure_schema(conn)
+        _conn = conn
+    return _conn
+
+
 def _drain():
-    conn = _db()
-    ensure_schema(conn)
     while True:
         ev = _queue.get()
         if ev is None:
@@ -69,6 +84,7 @@ def _drain():
         try:
             if ev.get("type") == "turn.start":
                 ev["embedding"] = embedder.sketch(ev.get("user_message") or "")
+            conn = _get_conn()
             conn.execute(
                 """INSERT INTO events (ts, type, session_id, model, user_message,
                                        embedding, duration_s, finish_reason,
