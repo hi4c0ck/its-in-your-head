@@ -10,7 +10,9 @@
 // - data: useQuery (the app's one React Query client) polling ctx.rest — the
 //   mandatory fallback; host.onEvent('plugin.its-in-your-head.tick') is the
 //   live accelerator (ctx.socket is a no-op on OAuth remotes).
-import { useEffect, useRef } from 'react'
+// - layout budget 96px: 22 header/tabs, 48 main, 18 ticker, 8 separators.
+//   Overflow goes to the settings popover, never in-pane scrolling.
+import { useEffect, useRef, useState } from 'react'
 import { host, useQuery, queryClient } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
@@ -18,6 +20,78 @@ const POLL_MS = 5000
 const HEAT_POLL_MS = 15000
 const IO_WIDTH = 220   // fixed I/O-frame column
 const IO_LINES = 4
+const STALE_S = 60     // pet returns to idle after this many quiet seconds
+const OK_WINDOW_S = 30 // a successful completion stays 'successful' this long
+
+// PETSTATE-START
+// Pure pet state machine: 7 deterministic states, a pure function of the last
+// polled event plus time-since. No I/O, no globals — unit-testable.
+const PET_GLYPHS = {
+  idle: '(-.-)',
+  processing: '(o.o)',
+  reading: '(o>o)',
+  writing: '(o<o)',
+  verifying: '(o.o)~',
+  successful: '(^.^)',
+  friction: '(>_<)',
+}
+
+function petGlyph(state) {
+  return PET_GLYPHS[state] || PET_GLYPHS.idle
+}
+
+function toolNameOf(ev) {
+  if (!ev) return ''
+  return String(ev.tool || ev.tool_name || ev.name || '').toLowerCase()
+}
+
+function petState(ev, nowSec) {
+  if (!ev) return 'idle'
+  const age = typeof ev.ts === 'number' ? nowSec - ev.ts : 0
+  if (age > STALE_S) return 'idle'
+  const statusCode = typeof ev.status_code === 'number' ? ev.status_code : 0
+  if (ev.type === 'error' || statusCode >= 400) return 'friction'
+  const tool = toolNameOf(ev)
+  if (tool) {
+    if (/read|get|list|search|fetch|cat|grep|glob/.test(tool)) return 'reading'
+    if (/write|edit|create|patch|apply|save|put/.test(tool)) return 'writing'
+    if (/test|verify|check|lint|run|build/.test(tool)) return 'verifying'
+    return 'processing'
+  }
+  if (ev.type === 'api') {
+    const fr = ev.finish_reason ? String(ev.finish_reason) : ''
+    if (fr === 'stop' || fr === 'ok' || fr === 'completed') {
+      return age > OK_WINDOW_S ? 'idle' : 'successful'
+    }
+    return 'processing'
+  }
+  if (ev.type === 'turn') return 'processing'
+  return 'processing'
+}
+
+// Public ticker phrasing only: tool name + status word. Never raw reasoning
+// or raw tool output text — the /recent rows carry no such fields, and any
+// future tool field is treated as a name, never a payload.
+function tickerPhrase(ev, nowSec) {
+  if (!ev) return 'no events yet'
+  const age = typeof ev.ts === 'number' ? Math.max(0, Math.floor(nowSec - ev.ts)) : null
+  const ageTxt = age === null ? '' : ' · ' + (age < 60 ? age + 's' : Math.floor(age / 60) + 'm')
+  const tool = toolNameOf(ev)
+  const failed = ev.type === 'error' ||
+    (typeof ev.status_code === 'number' && ev.status_code >= 400)
+  if (tool) return tool + ' ' + (failed ? 'fail' : 'ok') + ageTxt
+  if (ev.type === 'turn') return 'turn ok' + ageTxt
+  if (ev.type === 'error') {
+    return 'error ' + (ev.status_code ? String(ev.status_code) : 'fail') + ageTxt
+  }
+  if (ev.type === 'api') {
+    const fr = ev.finish_reason ? String(ev.finish_reason) : ''
+    const word = (fr && fr !== 'stop' && /^[a-z_]+$/.test(fr)) ? fr : 'ok'
+    return 'api ' + word + ageTxt
+  }
+  return 'event ok' + ageTxt
+}
+// PETSTATE-END
 
 // Canvas can't use CSS var() strings — resolve the app's theme vars once per
 // draw. The danger tint probes a small set of semantic vars; if the active
@@ -122,9 +196,73 @@ function IoLine({ ev }) {
   })
 }
 
+// C4 settings keys, listed read-only until the /settings POST route lands.
+const SETTING_KEYS = [
+  'perception.enabled',
+  'observation.reasoning',
+  'observation.retain_days',
+  'pulse.prototype_cap',
+  'pulse.min_labeled',
+  'pulse.thresholds.goal',
+  'pulse.thresholds.good',
+  'pulse.thresholds.friction',
+  'adaptation.enabled',
+  'adaptation.rules',
+]
+
+function settingValue(settings, key) {
+  if (!settings) return '—'
+  let cur = settings
+  for (const part of key.split('.')) {
+    if (cur === null || typeof cur !== 'object') return '—'
+    cur = cur[part]
+  }
+  if (cur === null || cur === undefined) return '—'
+  return Array.isArray(cur) ? cur.length + ' rules' : String(cur)
+}
+
+const TABS = [
+  { id: 'pulse', label: 'PULSE' },
+  { id: 'portrait', label: 'PORTRAIT' },
+  { id: 'drift', label: 'DRIFT' },
+]
+
+function TabButton({ tab, active, onClick }) {
+  return jsx('button', {
+    type: 'button',
+    title: tab.label + ' tab',
+    onClick,
+    style: {
+      background: 'transparent',
+      border: 'none',
+      borderBottom: '1px solid var(--ui-accent)',
+      borderBottomColor: active ? 'var(--ui-accent)' : 'transparent',
+      color: active ? 'var(--ui-text-secondary)' : 'var(--ui-text-quaternary)',
+      fontSize: 10, letterSpacing: 1, padding: '0 4px', height: 22,
+      cursor: 'pointer', fontWeight: active ? 600 : 400,
+    },
+    children: tab.label,
+  })
+}
+
+function IconButton({ title, label, onClick }) {
+  return jsx('button', {
+    type: 'button',
+    title,
+    onClick,
+    style: {
+      background: 'transparent', border: 'none', cursor: 'pointer',
+      color: 'var(--ui-text-quaternary)', fontSize: 12, padding: '0 3px', height: 22,
+    },
+    children: label,
+  })
+}
+
 function Strip({ source, rest }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
+  const [tab, setTab] = useState('pulse')
+  const [panel, setPanel] = useState(null) // null | 'settings' | 'help'
 
   const metricsQ = useQuery({
     queryKey: [source, 'iyh-metrics'],
@@ -144,6 +282,26 @@ function Strip({ source, rest }) {
     refetchInterval: POLL_MS,
     retry: false,
   })
+  // Planned routes: poll 404-tolerant; a miss renders an empty state, never
+  // an error toast. The catch folds any failure into "no data yet".
+  const portraitQ = useQuery({
+    queryKey: [source, 'iyh-portrait'],
+    queryFn: () => rest('/portrait').catch(() => null),
+    refetchInterval: POLL_MS,
+    retry: false,
+  })
+  const driftQ = useQuery({
+    queryKey: [source, 'iyh-drift'],
+    queryFn: () => rest('/drift').catch(() => null),
+    refetchInterval: POLL_MS,
+    retry: false,
+  })
+  const settingsQ = useQuery({
+    queryKey: [source, 'iyh-settings'],
+    queryFn: () => rest('/settings').catch(() => null),
+    refetchInterval: POLL_MS,
+    retry: false,
+  })
 
   // Latest heat data in a ref so the ResizeObserver callback (mounted once)
   // never draws a stale value after a data refresh.
@@ -151,7 +309,7 @@ function Strip({ source, rest }) {
   heatRef.current = heatQ.data
 
   // ResizeObserver: re-size the canvas attributes (not just CSS) on every
-  // container change — sash drags, layout switches.
+  // container change — sash drags, layout switches, tab remounts.
   useEffect(() => {
     const wrap = wrapRef.current
     const canvas = canvasRef.current
@@ -166,13 +324,13 @@ function Strip({ source, rest }) {
     const ro = new ResizeObserver(fit)
     ro.observe(wrap)
     return () => ro.disconnect()
-  }, [])
+  }, [tab])
 
   // Re-draw when heat data arrives (query refetch / tick invalidation).
   useEffect(() => {
     const canvas = canvasRef.current
     if (canvas && canvas.width > 0) drawHeat(canvas, heatQ.data)
-  }, [heatQ.data])
+  }, [heatQ.data, tab])
 
   const metrics = metricsQ.data
   let status
@@ -184,10 +342,120 @@ function Strip({ source, rest }) {
     status = metrics.events + ' events · ' + fmtTokens(metrics.total_tokens) + ' tok · last ' + fmtClock(metrics.last_event)
   }
   const recent = (recentQ.data || []).slice(0, IO_LINES)
+  const lastEv = recent.length > 0 ? recent[0] : null
+  const nowSec = Date.now() / 1000
+  const pet = petState(lastEv, nowSec)
+  const ticker = tickerPhrase(lastEv, nowSec)
+
+  const emptyState = (label, q) => jsxs('div', {
+    className: 'flex flex-1 items-center justify-center',
+    style: {
+      fontSize: 10, color: 'var(--ui-text-quaternary)',
+      fontFamily: 'var(--ui-font-mono, monospace)', letterSpacing: 1,
+    },
+    children: [q.data ? '[+] ' + label + ' live' : '[ . ] ' + label + ' · no data yet'],
+  })
+
+  const main =
+    tab === 'pulse'
+      ? jsxs('div', {
+          className: 'flex flex-1 items-stretch',
+          style: { gap: 8, minHeight: 0 },
+          children: [
+            jsxs('div', {
+              ref: wrapRef,
+              className: 'relative flex-1',
+              style: { minWidth: 0 },
+              children: [
+                jsx('canvas', {
+                  ref: canvasRef,
+                  // Sizing comes from the ResizeObserver width/height attributes
+                  // (inset stretches the box); no CSS width/height here.
+                  style: { position: 'absolute', inset: 0 },
+                }),
+                !heatQ.data && jsx('span', {
+                  style: {
+                    position: 'absolute', inset: 0, display: 'flex',
+                    alignItems: 'center', justifyContent: 'center',
+                    fontSize: 10, color: 'var(--ui-text-quaternary)',
+                  },
+                  children: '24h heat lane',
+                }),
+              ],
+            }),
+            jsxs('div', {
+              className: 'flex flex-col justify-end overflow-hidden',
+              style: { width: IO_WIDTH, gap: 2 },
+              children: [
+                recent.length > 0
+                  ? recent.map((ev, i) => jsx(IoLine, { key: i, ev }))
+                  : jsx('span', {
+                      style: { fontSize: 10, color: 'var(--ui-text-quaternary)' },
+                      children: metrics && metrics.events > 0
+                        ? 'I/O frames arrive with each agent call'
+                        : 'no events yet — ticks on your next agent turn',
+                    }),
+              ],
+            }),
+          ],
+        })
+      : tab === 'portrait'
+        ? emptyState('PORTRAIT', portraitQ)
+        : emptyState('DRIFT', driftQ)
+
+  const popover = panel && jsxs('div', {
+    style: {
+      position: 'absolute', inset: 0, zIndex: 10,
+      background: 'var(--ui-popover, var(--ui-surface, transparent))',
+      border: '1px solid var(--ui-stroke-secondary)',
+      color: 'var(--ui-text-secondary)',
+      fontSize: 10, padding: '6px 8px', overflow: 'hidden',
+      display: 'flex', flexDirection: 'column', gap: 4,
+    },
+    children: [
+      jsxs('div', {
+        className: 'flex items-center justify-between',
+        children: [
+          jsx('span', {
+            style: { fontWeight: 500, letterSpacing: 1 },
+            children: panel === 'settings' ? 'SETTINGS · READ-ONLY' : 'ABOUT THIS STRIP',
+          }),
+          jsx('button', {
+            type: 'button', title: 'Close', onClick: () => setPanel(null),
+            style: {
+              background: 'transparent', border: 'none', cursor: 'pointer',
+              color: 'var(--ui-text-quaternary)', fontSize: 11,
+            },
+            children: '×',
+          }),
+        ],
+      }),
+      panel === 'settings'
+        ? jsxs('div', {
+            style: {
+              display: 'flex', flexWrap: 'wrap', gap: '2px 12px',
+              fontFamily: 'var(--ui-font-mono, monospace)',
+              color: 'var(--ui-text-quaternary)',
+            },
+            children: SETTING_KEYS.map((k) => jsxs('span', {
+              key: k,
+              children: [
+                jsx('span', { style: { color: 'var(--ui-text-secondary)' }, children: k }),
+                ' = ' + settingValue(settingsQ.data, k),
+              ],
+            })),
+          })
+        : jsx('div', {
+            style: { color: 'var(--ui-text-quaternary)' },
+            children: 'PULSE heat lane · PORTRAIT/DRIFT pending backend · pet glyph = last tool event · ticker = tool + status only',
+          }),
+    ],
+  })
 
   return jsxs('div', {
     className: 'flex h-full flex-col',
     style: {
+      position: 'relative',
       padding: '4px 8px',
       gap: 3,
       borderTop: '1px solid var(--ui-stroke-secondary)',
@@ -196,55 +464,58 @@ function Strip({ source, rest }) {
     },
     children: [
       jsxs('div', {
-        className: 'flex items-baseline justify-between',
-        style: { fontSize: 11 },
+        className: 'flex items-center',
+        style: { height: 22, fontSize: 11, gap: 6, flexShrink: 0 },
         children: [
-          jsx('span', { style: { fontWeight: 500 }, children: "It's in Your Head" }),
           jsx('span', {
-            style: { fontSize: 10, color: 'var(--ui-text-quaternary)' },
+            title: 'pet: ' + pet,
+            style: {
+              fontFamily: 'var(--ui-font-mono, monospace)', fontSize: 10,
+              color: 'var(--ui-text-quaternary)', width: 36, flexShrink: 0,
+            },
+            children: petGlyph(pet),
+          }),
+          jsx('span', { style: { fontWeight: 500, flexShrink: 0 }, children: "It's in Your Head" }),
+          jsxs('div', {
+            className: 'flex items-center',
+            style: { gap: 2, flexShrink: 0 },
+            children: TABS.map((t) => jsx(TabButton, {
+              key: t.id, tab: t, active: tab === t.id,
+              onClick: () => setTab(t.id),
+            })),
+          }),
+          jsx('span', {
+            style: {
+              flex: 1, textAlign: 'right', fontSize: 10,
+              color: 'var(--ui-text-quaternary)',
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            },
             children: status,
           }),
-        ],
-      }),
-      jsxs('div', {
-        className: 'flex flex-1 items-stretch',
-        style: { gap: 8, minHeight: 0 },
-        children: [
-          jsxs('div', {
-            ref: wrapRef,
-            className: 'relative flex-1',
-            style: { minWidth: 0 },
-            children: [
-              jsx('canvas', {
-                ref: canvasRef,
-                style: { position: 'absolute', inset: 0, width: '100%', height: '100%' },
-              }),
-              !heatQ.data && jsx('span', {
-                style: {
-                  position: 'absolute', inset: 0, display: 'flex',
-                  alignItems: 'center', justifyContent: 'center',
-                  fontSize: 10, color: 'var(--ui-text-quaternary)',
-                },
-                children: '24h heat lane',
-              }),
-            ],
+          jsx(IconButton, {
+            title: 'Help — about this strip',
+            label: '?',
+            onClick: () => setPanel(panel === 'help' ? null : 'help'),
           }),
-          jsxs('div', {
-            className: 'flex flex-col justify-end overflow-hidden',
-            style: { width: IO_WIDTH, gap: 2 },
-            children: [
-              recent.length > 0
-                ? recent.map((ev, i) => jsx(IoLine, { key: i, ev }))
-                : jsx('span', {
-                    style: { fontSize: 10, color: 'var(--ui-text-quaternary)' },
-                    children: metrics && metrics.events > 0
-                      ? 'I/O frames arrive with each agent call'
-                      : 'no events yet — ticks on your next agent turn',
-                  }),
-            ],
+          jsx(IconButton, {
+            title: 'Settings (read-only until /settings POST lands)',
+            label: '⚙',
+            onClick: () => setPanel(panel === 'settings' ? null : 'settings'),
           }),
         ],
       }),
+      main,
+      jsx('div', {
+        style: {
+          height: 18, flexShrink: 0, fontSize: 10, lineHeight: '18px',
+          color: 'var(--ui-text-quaternary)',
+          fontFamily: 'var(--ui-font-mono, monospace)',
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          borderTop: '1px solid var(--ui-stroke-secondary)',
+        },
+        children: ticker,
+      }),
+      popover,
     ],
   })
 }
