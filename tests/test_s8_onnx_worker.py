@@ -352,11 +352,117 @@ def test_download_hash_gate_refuses_mismatch(tmp_path):
         return Resp(b"not-the-real-model-bytes")
     with pytest.raises(encoder.EmbeddingError):
         encoder.download_tier1_model(tmp_path / "m", confirm=True, opener=opener)
+    # A2 zero leftovers: no final and no .part file for any artifact.
+    dest = tmp_path / "m"
+    assert [p for p in dest.rglob("*") if p.is_file()] == []
+    for name in encoder.TIER1_ARTIFACTS:
+        assert not (dest / name).exists()
+        assert not Path(str(dest / name) + ".part").exists()
 
 
 def test_download_requires_confirm(tmp_path):
     with pytest.raises(encoder.EmbeddingError):
         encoder.download_tier1_model(tmp_path / "m")
+
+
+def _tiny_manifest(tmp_path: Path, payloads: dict[str, bytes]):
+    files = {rel: {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+             for rel, data in payloads.items()}
+    manifest = {"schema_version": 1, "model_id": "fake", "revision": "abc", "files": files}
+    mp = tmp_path / "tiny_manifest.json"
+    mp.write_text(json.dumps(manifest), encoding="utf-8")
+    return mp
+
+
+class _Resp:
+    def __init__(self, data):
+        self._d = data
+    def read(self, n=-1):
+        d, self._d = self._d, b""
+        return d
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+def _payloads():
+    return {name: (f"tiny-{i}".encode()) for i, name in enumerate(encoder.TIER1_ARTIFACTS)}
+
+
+def test_download_happy_path_exact_pinned_bytes(tmp_path):
+    payloads = _payloads()
+    mp = _tiny_manifest(tmp_path, payloads)
+    def opener(url):
+        for name, data in payloads.items():
+            if url.endswith(name):
+                return _Resp(data)
+        raise AssertionError(f"unexpected url {url}")
+    dest = tmp_path / "dl"
+    result = encoder.download_tier1_model(dest, confirm=True, opener=opener, manifest_path=mp)
+    assert result["model_version"].endswith(f"@rev-{encoder.TIER1_REVISION}")
+    for name, data in payloads.items():
+        assert (dest / name).read_bytes() == data
+        assert not Path(str(dest / name) + ".part").exists()
+        assert result[name]["sha256"] == hashlib.sha256(data).hexdigest()
+    assert (dest / "model_version.txt").read_text(encoding="utf-8") == result["model_version"]
+    assert encoder.verify_tier1_model(dest, manifest_path=mp) == []
+
+
+def test_download_size_cap_overflow_aborts_and_cleans(tmp_path):
+    payloads = _payloads()
+    mp = _tiny_manifest(tmp_path, payloads)
+    class EndlessResp:
+        def read(self, n=-1):
+            return b"x"  # never EOF; cap must stop the loop
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+    def opener(url):
+        return EndlessResp()
+    dest = tmp_path / "dl"
+    with pytest.raises(encoder.EmbeddingError) as excinfo:
+        encoder.download_tier1_model(dest, confirm=True, opener=opener, manifest_path=mp)
+    msg = str(excinfo.value)
+    assert "size cap" in msg
+    first = next(iter(encoder.TIER1_ARTIFACTS))
+    assert first in msg
+    assert [p for p in dest.rglob("*") if p.is_file()] == []
+    assert list(dest.rglob("*.part")) == []
+
+
+def test_download_enospc_becomes_embedding_error_and_cleans(tmp_path, monkeypatch):
+    import builtins
+    payloads = _payloads()
+    mp = _tiny_manifest(tmp_path, payloads)
+    real_open = builtins.open
+    class BadFile:
+        def __init__(self, fh):
+            self._fh = fh
+        def write(self, data):
+            raise OSError(28, "No space left on device")
+        def flush(self):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            self._fh.close()
+            return False
+    def bad_open(file, mode="r", *a, **k):
+        fh = real_open(file, mode, *a, **k)
+        if "w" in mode:
+            return BadFile(fh)
+        return fh
+    monkeypatch.setattr(builtins, "open", bad_open)
+    def opener(url):
+        return _Resp(b"tiny-0")
+    dest = tmp_path / "dl"
+    with pytest.raises(encoder.EmbeddingError) as excinfo:
+        encoder.download_tier1_model(dest, confirm=True, opener=opener, manifest_path=mp)
+    assert "disk full" in str(excinfo.value)
+    assert [p for p in dest.rglob("*") if p.is_file()] == []
+    assert list(dest.rglob("*.part")) == []
 
 
 def test_worker_client_never_downloads_at_encode(tmp_path):

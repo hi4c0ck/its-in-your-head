@@ -61,6 +61,9 @@ TIER1_ARTIFACTS = {
 # base is the repo root, not .../onnx/.
 TIER1_HF_BASE = "https://huggingface.co/{model}/resolve/{rev}/{name}"
 BATCH_SIZE = 64
+# Exact pinned-size cap for downloads (A1): stream may not exceed the
+# manifest size by more than this tolerance (0 == exact pin).
+DOWNLOAD_SIZE_TOLERANCE = 0
 
 
 class EmbeddingError(RuntimeError):
@@ -326,6 +329,18 @@ def verify_tier1_model(data_dir, *, manifest_path=None) -> list[str]:
     return errors
 
 
+def _remove_quietly(path) -> None:
+    try:
+        Path(path).unlink(missing_ok=True)  # type: ignore[call-arg]
+    except TypeError:  # very old Python without missing_ok
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
 def download_tier1_model(
     data_dir: str | Path,
     *,
@@ -340,6 +355,17 @@ def download_tier1_model(
     model_version next to them; callers must re-embed anchors when the
     version changes (see ``OnnxMiniLMBackend.needs_reembed``). After download
     every manifest file is re-hashed; any mismatch refuses (EmbeddingError).
+
+    Hardening (A1-A3):
+    - A1: each stream is capped at the pinned manifest ``size`` (+ tolerance);
+      overflow aborts with EmbeddingError. The cap lives in the copy loop,
+      so it applies to any opener (urllib or injected).
+    - A2: bytes land in ``<name>.part``; ``.part`` -> final rename happens
+      only after hash verification passes. Any failure deletes every staged
+      ``.part`` (and any final created this run), leaving zero bytes.
+    - A3: OSError during the copy becomes EmbeddingError
+      ('download interrupted (disk full?): ...'); no traceback leaks.
+    ``model_version.txt`` is written only after all files are verified.
     """
     if not confirm:
         raise EmbeddingError(
@@ -349,20 +375,101 @@ def download_tier1_model(
     dest.mkdir(parents=True, exist_ok=True)
     installed = {}
     open_fn = opener or urllib.request.urlopen
-    for name in TIER1_ARTIFACTS:
-        url = TIER1_HF_BASE.format(model=TIER1_MODEL_ID, rev=revision, name=name)
-        out = dest / name
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with open_fn(url) as resp, open(out, "wb") as f:  # noqa: S310 - pinned explicit download
-            while True:
-                block = resp.read(1 << 16)
-                if not block:
-                    break
-                f.write(block)
-        installed[name] = {"path": str(out), "sha256": sha256_file(out)}
-    errors = verify_tier1_model(dest, manifest_path=manifest_path)
-    if errors:
-        raise EmbeddingError(f"sha256 verification failed for Tier-1 model: {errors}")
+    manifest = _load_manifest(manifest_path)
+    pinned_files = (manifest or {}).get("files") or {}
+
+    staged: list[tuple] = []  # (name, final_out, part_path)
+    try:
+        for name in TIER1_ARTIFACTS:
+            url = TIER1_HF_BASE.format(model=TIER1_MODEL_ID, rev=revision, name=name)
+            out = dest / name
+            part = Path(str(out) + ".part")
+            part.parent.mkdir(parents=True, exist_ok=True)
+            staged.append((name, out, part))
+            size = (pinned_files.get(name) or {}).get("size")
+            cap = None
+            if size is not None:
+                try:
+                    cap = int(size) + DOWNLOAD_SIZE_TOLERANCE
+                except (TypeError, ValueError):
+                    cap = None
+            try:
+                with open_fn(url) as resp, open(part, "wb") as f:  # noqa: S310 - pinned explicit download
+                    count = 0
+                    while True:
+                        block = resp.read(1 << 16)
+                        if not block:
+                            break
+                        count += len(block)
+                        if cap is not None and count > cap:
+                            raise EmbeddingError(
+                                f"download size cap exceeded for {name}: "
+                                f"received {count} bytes > pinned size {cap} "
+                                f"(overflow); download aborted"
+                            )
+                        f.write(block)
+                        f.flush()
+            except EmbeddingError:
+                raise
+            except OSError as exc:
+                raise EmbeddingError(
+                    f"download interrupted (disk full?): {name}: {exc} "
+                    f"— no partial files remain"
+                ) from None
+
+        # A2: hash-verify the staged .part files before any rename.
+        if manifest is None:
+            raise EmbeddingError("sha256 verification failed for Tier-1 model: ['manifest unreadable']")
+        staged_by_name = {name: part for name, _out, part in staged}
+        errors: list[str] = []
+        for rel, meta in pinned_files.items():
+            candidate = staged_by_name.get(rel, dest / rel)
+            if not candidate.is_file():
+                errors.append(f"missing: {rel}")
+                continue
+            expected = (meta or {}).get("sha256")
+            if expected:
+                try:
+                    actual = sha256_file(candidate)
+                except OSError as exc:
+                    raise EmbeddingError(
+                        f"download interrupted (disk full?): {rel}: {exc} "
+                        f"— no partial files remain"
+                    ) from None
+                if actual != expected:
+                    errors.append(f"mismatch: {rel}")
+        if errors:
+            raise EmbeddingError(f"sha256 verification failed for Tier-1 model: {errors}")
+
+        # Verified: atomically promote .part -> final.
+        try:
+            for name, out, part in staged:
+                part.replace(out)
+                installed[name] = {"path": str(out), "sha256": sha256_file(out)}
+        except OSError as exc:
+            for _name, out, part in staged:
+                _remove_quietly(part)
+                _remove_quietly(out)
+            raise EmbeddingError(
+                f"download interrupted (disk full?): {exc} — no partial files remain"
+            ) from None
+
+        # Final gate on the promoted files (same semantics as before).
+        errors = verify_tier1_model(dest, manifest_path=manifest_path)
+        if errors:
+            for _name, out, _part in staged:
+                _remove_quietly(out)
+            raise EmbeddingError(f"sha256 verification failed for Tier-1 model: {errors}")
+    except EmbeddingError:
+        for _name, _out, part in staged:
+            _remove_quietly(part)
+        raise
+    except OSError as exc:
+        for _name, _out, part in staged:
+            _remove_quietly(part)
+        raise EmbeddingError(
+            f"download interrupted (disk full?): {exc} — no partial files remain"
+        ) from None
     version = f"{TIER1_MODEL_ID}@rev-{revision}"
     (dest / "model_version.txt").write_text(version, encoding="utf-8")
     return {"model_version": version, **installed}
