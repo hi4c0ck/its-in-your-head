@@ -305,6 +305,15 @@ def _engine_client():
 def _engine_status_text() -> str:
     current = _get_encoder_setting()
     active_tier = "Tier 1" if current == "tier-1-onnx" else "Tier 0"
+    variant = "int8"
+    try:
+        try:
+            from .perception import worker_client as _wc
+        except Exception:
+            from perception import worker_client as _wc  # type: ignore[no-redef]
+        variant = str(_wc.load_manifest().get("default_variant") or "int8")
+    except Exception:
+        pass
     runtime = "unavailable"
     model = "missing"
     worker = "dead"
@@ -323,6 +332,7 @@ def _engine_status_text() -> str:
         "engine:",
         f"  Tier 0: tier-0 (sketch, always available){' [active]' if active_tier == 'Tier 0' else ''}",
         f"  Tier 1: tier-1-onnx (ONNX MiniLM){' [active]' if active_tier == 'Tier 1' else ''}",
+        f"  Variant: {variant} (default; fp32 graph optional, not installed by default)",
         f"  Active tier: {active_tier}",
         f"  perception.encoder: {current}",
         f"  ONNX runtime: {runtime}",

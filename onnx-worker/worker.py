@@ -11,8 +11,10 @@ JSON-lines protocol on stdin/stdout (pinned, see plan P3):
   {"op":"shutdown"} -> worker exits
   any error -> {"request_id":<id or null>,"error":"<class>: <msg>"}
 
-Startup: reads the model dir + manifest (argv), verifies sha256 of every
-manifest file, loads the ONNX session lazily on first embed with
+Startup: reads the model dir + manifest (argv), verifies sha256 of the
+manifest's default-variant files (int8 — the runtime graph set; the optional
+fp32 variant is a future selectable runtime graph and is NOT required),
+loads the ONNX session lazily on first embed with
 CPUExecutionProvider. Tokenization uses the `tokenizers` library against
 tokenizer.json (no `transformers` dependency). Pooling is mean over the
 attention mask; vectors are L2-normalized (manifest `embedding` block).
@@ -37,8 +39,17 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def manifest_variant_files(manifest: dict, variant: str | None = None) -> dict:
+    """Resolve ``variants.<variant>.files`` (default: manifest default_variant)."""
+    name = variant or manifest.get("default_variant") or "int8"
+    entry = (manifest.get("variants") or {}).get(name)
+    if entry is None:
+        raise ValueError(f"manifest has no variant {name!r}")
+    return entry.get("files") or {}
+
+
 def verify_manifest(model_dir: Path, manifest: dict) -> None:
-    for rel, meta in manifest["files"].items():
+    for rel, meta in manifest_variant_files(manifest).items():
         expected = meta.get("sha256")
         if not expected:
             raise ValueError(f"manifest has no sha256 for {rel}")

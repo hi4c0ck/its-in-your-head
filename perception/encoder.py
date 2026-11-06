@@ -47,14 +47,25 @@ TIER0_MODEL_VERSION = "tier0-sketch-v1"
 TIER1_MODEL_ID = "onnx-community/paraphrase-multilingual-MiniLM-L12-v2-ONNX"
 TIER1_REVISION = "d4c06bf0d7680171ac30042a1387e1fdb7a90021"
 TIER1_MODEL_VERSION = f"{TIER1_MODEL_ID}@rev-{TIER1_REVISION[:12]}"
-TIER1_ARTIFACTS = {
-    "onnx/model_int8.onnx": None,   # sha256 in onnx/manifest.json
-    "onnx/model.onnx": None,        # fp32 alternative
-    "tokenizer.json": None,
-    "tokenizer_config.json": None,
-    "config.json": None,
-    "special_tokens_map.json": None,
+# Tier-1 model variants (manifest-structured, LANE 4): the default install
+# downloads ONLY the int8 variant (~135 MB); the fp32 graph (~470 MB) is an
+# explicitly selectable variant, never silently installed. Variant pins live
+# in onnx/manifest.json `variants.<name>.files` (sha256 + size per file).
+TIER1_DEFAULT_VARIANT = "int8"
+TIER1_VARIANTS = {
+    "int8": (
+        "onnx/model_int8.onnx",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "config.json",
+        "special_tokens_map.json",
+    ),
+    "fp32": (
+        "onnx/model.onnx",
+    ),
 }
+# Back-compat alias: the default (int8) variant artifact set.
+TIER1_ARTIFACTS = {name: None for name in TIER1_VARIANTS[TIER1_DEFAULT_VARIANT]}
 # Opt-in download base (used ONLY by download_tier1_model, never at encode-time).
 # The vendored/local path takes precedence; this is the explicit-user-action path.
 # Artifact keys are manifest-relative (e.g. "onnx/model_int8.onnx"), so the
@@ -308,17 +319,44 @@ def _load_manifest(manifest_path=None) -> dict | None:
         return None
 
 
-def verify_tier1_model(data_dir, *, manifest_path=None) -> list[str]:
-    """Zero-network hash gate: re-hash manifest files under ``data_dir``.
+def _variant_files(manifest: dict | None, variant: str) -> dict:
+    """Resolve ``variants.<variant>.files`` from a loaded manifest.
 
+    Missing variant (or missing variants block) -> EmbeddingError naming the
+    requested variant and the variants the manifest does declare.
+    """
+    variants = (manifest or {}).get("variants") or {}
+    entry = variants.get(variant)
+    if entry is None:
+        known = sorted(variants)
+        raise EmbeddingError(
+            f"unknown Tier-1 model variant: {variant!r} "
+            f"(manifest declares variants: {known or 'none'})"
+        )
+    return entry.get("files") or {}
+
+
+def _resolve_variant(manifest: dict | None, variant: str | None) -> str:
+    name = variant or (manifest or {}).get("default_variant") or TIER1_DEFAULT_VARIANT
+    return str(name)
+
+
+def verify_tier1_model(data_dir, *, manifest_path=None, variant: str | None = None) -> list[str]:
+    """Zero-network hash gate: re-hash the *variant's* manifest files.
+
+    Only files listed under ``variants.<variant>.files`` are checked; other
+    files on disk (e.g. an fp32 graph next to an int8 install) are ignored.
+    ``variant=None`` resolves to the manifest's ``default_variant``.
     Returns a list of error strings (empty == verified). Mirrors
     tools/verify_onnx_model.py semantics."""
     manifest = _load_manifest(manifest_path)
     if manifest is None:
         return ["manifest unreadable"]
+    variant = _resolve_variant(manifest, variant)
+    pinned_files = _variant_files(manifest, variant)
     dest = Path(data_dir)
     errors: list[str] = []
-    for rel, meta in (manifest.get("files") or {}).items():
+    for rel, meta in pinned_files.items():
         path = dest / rel
         if not path.is_file():
             errors.append(f"missing: {rel}")
@@ -348,18 +386,23 @@ def download_tier1_model(
     revision: str = TIER1_REVISION,
     opener=None,
     manifest_path=None,
+    variant: str | None = None,
 ) -> dict:
     """Explicit user action only. Requires ``confirm=True``.
 
-    Downloads pinned artifacts into ``data_dir`` and records the installed
+    Downloads ONE variant's pinned artifacts into ``data_dir`` (default:
+    the manifest's ``default_variant``, i.e. ``int8`` — the fp32 graph is
+    never fetched by a default install) and records the installed
     model_version next to them; callers must re-embed anchors when the
-    version changes (see ``OnnxMiniLMBackend.needs_reembed``). After download
-    every manifest file is re-hashed; any mismatch refuses (EmbeddingError).
+    version changes (see ``OnnxMiniLMBackend.needs_reembed``). After
+    download every variant file is re-hashed; any mismatch refuses
+    (EmbeddingError). An unknown ``variant`` raises EmbeddingError naming
+    it before any network or disk write.
 
     Hardening (A1-A3):
-    - A1: each stream is capped at the pinned manifest ``size`` (+ tolerance);
-      overflow aborts with EmbeddingError. The cap lives in the copy loop,
-      so it applies to any opener (urllib or injected).
+    - A1: each stream is capped at the pinned variant manifest ``size``
+      (+ tolerance); overflow aborts with EmbeddingError. The cap lives in
+      the copy loop, so it applies to any opener (urllib or injected).
     - A2: bytes land in ``<name>.part``; ``.part`` -> final rename happens
       only after hash verification passes. Any failure deletes every staged
       ``.part`` (and any final created this run), leaving zero bytes.
@@ -376,11 +419,20 @@ def download_tier1_model(
     installed = {}
     open_fn = opener or urllib.request.urlopen
     manifest = _load_manifest(manifest_path)
-    pinned_files = (manifest or {}).get("files") or {}
+    variant = _resolve_variant(manifest, variant)
+    if manifest is not None:
+        pinned_files = _variant_files(manifest, variant)
+    elif variant not in TIER1_VARIANTS:
+        raise EmbeddingError(
+            f"unknown Tier-1 model variant: {variant!r} "
+            f"(known variants: {sorted(TIER1_VARIANTS)})"
+        )
+    else:
+        pinned_files = {name: {} for name in TIER1_VARIANTS[variant]}
 
     staged: list[tuple] = []  # (name, final_out, part_path)
     try:
-        for name in TIER1_ARTIFACTS:
+        for name in pinned_files:
             url = TIER1_HF_BASE.format(model=TIER1_MODEL_ID, rev=revision, name=name)
             out = dest / name
             part = Path(str(out) + ".part")
@@ -455,7 +507,7 @@ def download_tier1_model(
             ) from None
 
         # Final gate on the promoted files (same semantics as before).
-        errors = verify_tier1_model(dest, manifest_path=manifest_path)
+        errors = verify_tier1_model(dest, manifest_path=manifest_path, variant=variant)
         if errors:
             for _name, out, _part in staged:
                 _remove_quietly(out)
@@ -472,4 +524,4 @@ def download_tier1_model(
         ) from None
     version = f"{TIER1_MODEL_ID}@rev-{revision}"
     (dest / "model_version.txt").write_text(version, encoding="utf-8")
-    return {"model_version": version, **installed}
+    return {"model_version": version, "variant": variant, **installed}

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "plugin_id": "its-in-your-head",
   "backend": "onnxruntime",
   "model_id": "onnx-community/paraphrase-multilingual-MiniLM-L12-v2-ONNX",
@@ -11,30 +11,39 @@
     "package": "onnxruntime",
     "constraint": ">=1.31.1,<1.32"
   },
-  "files": {
-    "onnx/model_int8.onnx": {
-      "sha256": "0029fce9c82365d8a2bf20e03a476e84785a872d8d423c8bac0fd0f350df88dc",
-      "size": 118049319
+  "default_variant": "int8",
+  "variants": {
+    "int8": {
+      "files": {
+        "onnx/model_int8.onnx": {
+          "sha256": "0029fce9c82365d8a2bf20e03a476e84785a872d8d423c8bac0fd0f350df88dc",
+          "size": 118049319
+        },
+        "tokenizer.json": {
+          "sha256": "cad551d5600a84242d0973327029452a1e3672ba6313c2a3c3d69c4310e12719",
+          "size": 17082987
+        },
+        "tokenizer_config.json": {
+          "sha256": "3a8d9bef4da7fc3ac71da789f225b47dc7599a28cfdcc2140463771927dc0726",
+          "size": 1457
+        },
+        "config.json": {
+          "sha256": "376a54b28d37e8502389a87d6c8ff59247fc361cd8d980a47b36b6cae876de5e",
+          "size": 613
+        },
+        "special_tokens_map.json": {
+          "sha256": "8c785abebea9ae3257b61681b4e6fd8365ceafde980c21970d001e834cf10835",
+          "size": 964
+        }
+      }
     },
-    "onnx/model.onnx": {
-      "sha256": "6fef515473041f6f40d7e5f630106e59ff50b22e1b1fccae39199b1d9f8ec03a",
-      "size": 470216988
-    },
-    "tokenizer.json": {
-      "sha256": "cad551d5600a84242d0973327029452a1e3672ba6313c2a3c3d69c4310e12719",
-      "size": 17082987
-    },
-    "tokenizer_config.json": {
-      "sha256": "3a8d9bef4da7fc3ac71da789f225b47dc7599a28cfdcc2140463771927dc0726",
-      "size": 1457
-    },
-    "config.json": {
-      "sha256": "376a54b28d37e8502389a87d6c8ff59247fc361cd8d980a47b36b6cae876de5e",
-      "size": 613
-    },
-    "special_tokens_map.json": {
-      "sha256": "8c785abebea9ae3257b61681b4e6fd8365ceafde980c21970d001e834cf10835",
-      "size": 964
+    "fp32": {
+      "files": {
+        "onnx/model.onnx": {
+          "sha256": "6fef515473041f6f40d7e5f630106e59ff50b22e1b1fccae39199b1d9f8ec03a",
+          "size": 470216988
+        }
+      }
     }
   },
   "embedding": {

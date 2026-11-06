@@ -68,8 +68,10 @@ def _manifest(tmp_path: Path, files_data: dict[str, bytes] | None = None):
     files = {}
     for rel, data in files_data.items():
         files[rel] = {"sha256": _h(mdir, rel, data), "size": len(data)}
-    manifest = {"schema_version": 1, "model_id": "fake-model", "revision": "abc",
-                "files": files, "embedding": {"dimension": 384}}
+    manifest = {"schema_version": 2, "model_id": "fake-model", "revision": "abc",
+                "default_variant": "int8",
+                "variants": {"int8": {"files": files}},
+                "embedding": {"dimension": 384}}
     mp = tmp_path / "manifest.json"
     mp.write_text(json.dumps(manifest), encoding="utf-8")
     return mdir, mp
@@ -365,10 +367,12 @@ def test_download_requires_confirm(tmp_path):
         encoder.download_tier1_model(tmp_path / "m")
 
 
-def _tiny_manifest(tmp_path: Path, payloads: dict[str, bytes]):
+def _tiny_manifest(tmp_path: Path, payloads: dict[str, bytes], variant: str = "int8"):
     files = {rel: {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
              for rel, data in payloads.items()}
-    manifest = {"schema_version": 1, "model_id": "fake", "revision": "abc", "files": files}
+    manifest = {"schema_version": 2, "model_id": "fake", "revision": "abc",
+                "default_variant": variant,
+                "variants": {variant: {"files": files}}}
     mp = tmp_path / "tiny_manifest.json"
     mp.write_text(json.dumps(manifest), encoding="utf-8")
     return mp
@@ -476,3 +480,101 @@ def test_worker_client_never_downloads_at_encode(tmp_path):
     backend.encode(["hello"])
     after = {str(p) for p in tmp_path.rglob("*")}
     assert after == before
+
+
+# --- LANE 4: variant split (int8 default / fp32 optional) -------------------
+
+def _recording_opener(payloads, urls):
+    def opener(url):
+        urls.append(url)
+        for name, data in payloads.items():
+            if url.endswith(name):
+                return _Resp(data)
+        raise AssertionError(f"unexpected url {url}")
+    return opener
+
+
+def test_default_download_requests_only_int8_variant(tmp_path):
+    payloads = _payloads()  # TIER1_ARTIFACTS == int8 set (5 files)
+    mp = _tiny_manifest(tmp_path, payloads)
+    urls = []
+    dest = tmp_path / "dl"
+    result = encoder.download_tier1_model(
+        dest, confirm=True, opener=_recording_opener(payloads, urls), manifest_path=mp)
+    assert result["variant"] == "int8"
+    assert len(urls) == 5
+    requested = {rel for rel in payloads if any(u.endswith(rel) for u in urls)}
+    assert requested == set(payloads)
+    assert not any(u.endswith("onnx/model.onnx") for u in urls), urls  # fp32 never requested
+    assert not (dest / "onnx" / "model.onnx").exists()
+
+
+def test_fp32_variant_download_requests_only_fp32_graph(tmp_path):
+    payloads = {"onnx/model.onnx": b"tiny-fp32-graph"}
+    mp = _tiny_manifest(tmp_path, payloads, variant="fp32")
+    urls = []
+    dest = tmp_path / "dl"
+    result = encoder.download_tier1_model(
+        dest, confirm=True, opener=_recording_opener(payloads, urls),
+        manifest_path=mp, variant="fp32")
+    assert result["variant"] == "fp32"
+    assert len(urls) == 1 and urls[0].endswith("onnx/model.onnx")
+    assert (dest / "onnx" / "model.onnx").read_bytes() == b"tiny-fp32-graph"
+    assert encoder.verify_tier1_model(dest, manifest_path=mp, variant="fp32") == []
+
+
+def test_fp32_variant_mismatch_leaves_zero_leftovers(tmp_path):
+    payloads = {"onnx/model.onnx": b"good-fp32-bytes"}
+    mp = _tiny_manifest(tmp_path, payloads, variant="fp32")
+    def opener(url):
+        return _Resp(b"tampered-fp32-bytes")
+    dest = tmp_path / "dl"
+    with pytest.raises(encoder.EmbeddingError):
+        encoder.download_tier1_model(dest, confirm=True, opener=opener,
+                                     manifest_path=mp, variant="fp32")
+    assert [p for p in dest.rglob("*") if p.is_file()] == []
+    assert list(dest.rglob("*.part")) == []
+
+
+def test_unknown_variant_raises_embedding_error_naming_it(tmp_path):
+    payloads = _payloads()
+    mp = _tiny_manifest(tmp_path, payloads)
+    with pytest.raises(encoder.EmbeddingError) as excinfo:
+        encoder.download_tier1_model(tmp_path / "dl", confirm=True,
+                                     opener=_recording_opener(payloads, []),
+                                     manifest_path=mp, variant="fp16")
+    assert "fp16" in str(excinfo.value)
+    with pytest.raises(encoder.EmbeddingError) as excinfo:
+        encoder.verify_tier1_model(tmp_path / "dl", manifest_path=mp, variant="fp16")
+    assert "fp16" in str(excinfo.value)
+
+
+def test_verify_ignores_unknown_files_on_disk(tmp_path):
+    payloads = _payloads()
+    mp = _tiny_manifest(tmp_path, payloads)
+    dest = tmp_path / "dl"
+    encoder.download_tier1_model(dest, confirm=True,
+                                 opener=_recording_opener(payloads, []),
+                                 manifest_path=mp)
+    (dest / "onnx").mkdir(exist_ok=True)
+    (dest / "onnx" / "model.onnx").write_bytes(b"stray fp32 graph, not in int8 variant")
+    (dest / "extra.txt").write_bytes(b"stray")
+    assert encoder.verify_tier1_model(dest, manifest_path=mp) == []
+    # A two-variant manifest: fp32 verify requires the fp32 graph, and the
+    # int8 verify ignores it even when present.
+    fp32_sha = hashlib.sha256(b"real-fp32").hexdigest()
+    mp2 = tmp_path / "two_variant.json"
+    mp2.write_text(json.dumps({
+        "schema_version": 2, "model_id": "fake", "revision": "abc",
+        "default_variant": "int8",
+        "variants": {
+            "int8": {"files": {r: {"sha256": hashlib.sha256(d).hexdigest(),
+                                   "size": len(d)} for r, d in payloads.items()}},
+            "fp32": {"files": {"onnx/model.onnx": {"sha256": fp32_sha, "size": 9}}},
+        }}), encoding="utf-8")
+    (dest / "onnx" / "model.onnx").write_bytes(b"real-fp32")
+    assert encoder.verify_tier1_model(dest, manifest_path=mp2, variant="fp32") == []
+    assert encoder.verify_tier1_model(dest, manifest_path=mp2) == []
+    (dest / "onnx" / "model.onnx").unlink()
+    assert any("missing" in e and "model.onnx" in e
+               for e in encoder.verify_tier1_model(dest, manifest_path=mp2, variant="fp32"))

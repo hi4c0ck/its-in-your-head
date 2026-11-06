@@ -36,7 +36,7 @@ def _manifest():
 
 
 def _fake_model_dir(tmp_path):
-    """Create fake artifacts + a manifest matching them."""
+    """Create fake artifacts + a variant manifest matching them."""
     files = {}
     for rel in ["onnx/model_int8.onnx", "tokenizer.json"]:
         p = tmp_path / rel
@@ -44,8 +44,21 @@ def _fake_model_dir(tmp_path):
         p.write_bytes(f"fake-{rel}".encode())
         files[rel] = {"sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
                       "size": p.stat().st_size}
-    manifest = {"files": files}
+    manifest = {"default_variant": "int8",
+                "variants": {"int8": {"files": files}}}
     return tmp_path, manifest
+
+
+# Pre-existing pins (schema v1 `files` map) that must survive the v2 variant
+# restructure byte-identical: (sha256, size) per artifact.
+EXPECTED_PINS = {
+    "onnx/model_int8.onnx": ("0029fce9c82365d8a2bf20e03a476e84785a872d8d423c8bac0fd0f350df88dc", 118049319),
+    "onnx/model.onnx": ("6fef515473041f6f40d7e5f630106e59ff50b22e1b1fccae39199b1d9f8ec03a", 470216988),
+    "tokenizer.json": ("cad551d5600a84242d0973327029452a1e3672ba6313c2a3c3d69c4310e12719", 17082987),
+    "tokenizer_config.json": ("3a8d9bef4da7fc3ac71da789f225b47dc7599a28cfdcc2140463771927dc0726", 1457),
+    "config.json": ("376a54b28d37e8502389a87d6c8ff59247fc361cd8d980a47b36b6cae876de5e", 613),
+    "special_tokens_map.json": ("8c785abebea9ae3257b61681b4e6fd8365ceafde980c21970d001e834cf10835", 964),
+}
 
 
 # --- manifest schema/shape -------------------------------------------------
@@ -57,7 +70,7 @@ def test_manifest_exists_and_is_json():
 
 def test_manifest_schema_version_and_identity():
     m = _manifest()
-    assert m["schema_version"] == 1
+    assert m["schema_version"] == 2
     assert m["plugin_id"] == "its-in-your-head"
     assert m["backend"] == "onnxruntime"
     assert m["model_id"] == "onnx-community/paraphrase-multilingual-MiniLM-L12-v2-ONNX"
@@ -76,16 +89,37 @@ def test_manifest_revision_is_immutable_sha():
     assert re.fullmatch(r"[0-9a-f]{40}", m["revision"]), m["revision"]
 
 
-def test_manifest_files_shape():
+def test_manifest_variant_layout():
     m = _manifest()
-    assert "onnx/model_int8.onnx" in m["files"]  # int8 default
-    assert "onnx/model.onnx" in m["files"]        # fp32 alternative
-    for rel, meta in m["files"].items():
-        assert set(meta) == {"sha256", "size"}
-        sha = meta["sha256"]
-        assert sha is None or re.fullmatch(r"[0-9a-f]{64}", sha)
-        size = meta["size"]
-        assert size is None or (isinstance(size, int) and size > 0)
+    assert m["default_variant"] == "int8"
+    variants = m["variants"]
+    assert set(variants) == {"int8", "fp32"}
+    int8_files = set(variants["int8"]["files"])
+    assert int8_files == {"onnx/model_int8.onnx", "tokenizer.json",
+                          "tokenizer_config.json", "config.json",
+                          "special_tokens_map.json"}  # int8 default (~135 MB)
+    assert set(variants["fp32"]["files"]) == {"onnx/model.onnx"}  # fp32 only
+    for variant in variants.values():
+        for rel, meta in variant["files"].items():
+            assert set(meta) == {"sha256", "size"}
+            sha = meta["sha256"]
+            assert sha is None or re.fullmatch(r"[0-9a-f]{64}", sha)
+            size = meta["size"]
+            assert size is None or (isinstance(size, int) and size > 0)
+    assert "files" not in m  # v1 flat map is gone
+
+
+def test_manifest_pins_unchanged_by_variant_restructure():
+    m = _manifest()
+    seen = {}
+    for variant in m["variants"].values():
+        for rel, meta in variant["files"].items():
+            seen[rel] = (meta["sha256"], meta["size"])
+    assert seen == EXPECTED_PINS  # all 6 pre-existing pins byte-identical
+    # int8 default total ~135 MB; fp32 graph ~470 MB standalone.
+    int8_total = sum(seen[r][1] for r in m["variants"]["int8"]["files"])
+    assert 130_000_000 < int8_total < 140_000_000, int8_total
+    assert seen["onnx/model.onnx"][1] == 470216988
 
 
 def test_manifest_embedding_block():
@@ -100,7 +134,15 @@ def test_encoder_constants_match_manifest():
     m = _manifest()
     assert encoder.TIER1_MODEL_ID == m["model_id"]
     assert encoder.TIER1_REVISION == m["revision"]
-    assert set(encoder.TIER1_ARTIFACTS) == set(m["files"])
+    assert encoder.TIER1_DEFAULT_VARIANT == m["default_variant"] == "int8"
+    assert set(encoder.TIER1_ARTIFACTS) == set(m["variants"]["int8"]["files"])
+    union = set()
+    for name, files in encoder.TIER1_VARIANTS.items():
+        assert set(files) == set(m["variants"][name]["files"])
+        union |= set(files)
+    assert union == {"onnx/model_int8.onnx", "onnx/model.onnx", "tokenizer.json",
+                     "tokenizer_config.json", "config.json",
+                     "special_tokens_map.json"}
 
 
 def test_tier1_model_version_format():
@@ -145,7 +187,7 @@ def test_verify_refuses_missing_file(tmp_path):
 def test_verify_refuses_missing_manifest_hash(tmp_path):
     verify_mod = _load_tool("verify_onnx_model")
     model_dir, manifest = _fake_model_dir(tmp_path)
-    manifest["files"]["tokenizer.json"]["sha256"] = None
+    manifest["variants"]["int8"]["files"]["tokenizer.json"]["sha256"] = None
     errors = verify_mod.verify(model_dir, manifest)
     assert any("no sha256" in e for e in errors)
 
@@ -167,10 +209,10 @@ def test_verify_cli_exit_codes(tmp_path):
 def test_fetch_check_refuses_mismatch(tmp_path):
     fetch_mod = _load_tool("fetch_onnx_model")
     model_dir, manifest = _fake_model_dir(tmp_path)
-    manifest["files"]["tokenizer.json"]["sha256"] = "0" * 64
+    manifest["variants"]["int8"]["files"]["tokenizer.json"]["sha256"] = "0" * 64
     errors = fetch_mod.check_hashes(model_dir, manifest)
     assert any("mismatch" in e for e in errors)
-    manifest["files"]["tokenizer.json"]["sha256"] = (
+    manifest["variants"]["int8"]["files"]["tokenizer.json"]["sha256"] = (
         hashlib.sha256((model_dir / "tokenizer.json").read_bytes()).hexdigest())
     assert fetch_mod.check_hashes(model_dir, manifest) == []
 

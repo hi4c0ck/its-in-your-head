@@ -94,7 +94,11 @@ def check_model(model_dir: str | Path | None = None,
     except Exception as exc:
         return "missing", [f"manifest unreadable: {exc}"]
     errors: list[str] = []
-    files = manifest.get("files") or {}
+    name = manifest.get("default_variant") or "int8"
+    entry = (manifest.get("variants") or {}).get(name)
+    if entry is None:
+        return "missing", [f"manifest has no variant {name!r}"]
+    files = entry.get("files") or {}
     missing: list[str] = []
     mismatch: list[str] = []
     for rel, meta in files.items():

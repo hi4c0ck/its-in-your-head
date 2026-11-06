@@ -23,7 +23,8 @@ REFUSES (exit 1) if any pre-existing manifest hash mismatches; it never
 overwrites a mismatching hash.
 
 Usage:
-  python tools/fetch_onnx_model.py           # full fetch + smoke + manifest update
+  python tools/fetch_onnx_model.py           # full fetch (default variant) + smoke + manifest update
+  python tools/fetch_onnx_model.py --variant fp32   # fetch only the fp32 variant graph
   python tools/fetch_onnx_model.py --check   # verify staged files against manifest
   python tools/fetch_onnx_model.py --model-dir <path>  # override staging dir
 """
@@ -152,9 +153,19 @@ def run_smoke(model_dir: Path, manifest_path: Path) -> dict:
             "latency_ms": resp.get("latency_ms"), "python": str(python)}
 
 
-def check_hashes(model_dir: Path, manifest: dict) -> list[str]:
+def variant_files(manifest: dict, variant: str | None = None) -> tuple[str, dict]:
+    """Resolve (variant_name, files) — default: manifest's default_variant."""
+    name = variant or manifest.get("default_variant") or "int8"
+    entry = (manifest.get("variants") or {}).get(name)
+    if entry is None:
+        raise ValueError(f"manifest has no variant {name!r}")
+    return name, entry.get("files") or {}
+
+
+def check_hashes(model_dir: Path, manifest: dict, variant: str | None = None) -> list[str]:
     errors = []
-    for rel, meta in manifest["files"].items():
+    _name, files = variant_files(manifest, variant)
+    for rel, meta in files.items():
         expected = meta.get("sha256")
         path = model_dir / rel
         if not path.is_file():
@@ -173,17 +184,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true",
                     help="verify staged files against committed manifest hashes")
     ap.add_argument("--model-dir", type=Path, default=None)
+    ap.add_argument("--variant", default=None,
+                    help="manifest variant to fetch/check (default: manifest default_variant)")
     args = ap.parse_args(argv)
 
     data_root = resolve_data_root()
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    try:
+        variant, files = variant_files(manifest, args.variant)
+    except ValueError as exc:
+        print(f"error: {exc}")
+        return 1
     model_dir = args.model_dir or (
         data_root / "models" / safe_model_dirname(manifest["model_id"]))
     print(f"data_root: {data_root}")
     print(f"model_dir: {model_dir}")
+    print(f"variant: {variant}")
 
     if args.check:
-        errors = check_hashes(model_dir, manifest)
+        errors = check_hashes(model_dir, manifest, variant)
         if errors:
             print("HASH CHECK FAILED:")
             for e in errors:
@@ -199,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
         manifest["revision"] = revision
 
     base = f"https://huggingface.co/{manifest['model_id']}/resolve/{revision}"
-    for rel in manifest["files"]:
+    for rel in files:
         dest = model_dir / rel
         if dest.is_file():
             print(f"skip (present): {rel}")
@@ -207,16 +226,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"download: {rel}")
         download(f"{base}/{rel}", dest)
 
-    for rel in manifest["files"]:
+    for rel in files:
         path = model_dir / rel
-        manifest["files"][rel] = {"sha256": sha256_file(path),
-                                  "size": path.stat().st_size}
-        print(f"sha256 {rel}: {manifest['files'][rel]['sha256']} "
-              f"({manifest['files'][rel]['size']} bytes)")
+        manifest["variants"][variant]["files"][rel] = {
+            "sha256": sha256_file(path),
+            "size": path.stat().st_size}
+        print(f"sha256 {rel}: {manifest['variants'][variant]['files'][rel]['sha256']} "
+              f"({manifest['variants'][variant]['files'][rel]['size']} bytes)")
 
-    sig = validate_onnx_signature(model_dir, manifest)
-    print(f"ONNX signature OK: inputs={sig['inputs']} outputs={sig['outputs']} "
-          f"hidden_size={sig['hidden_size']} tokenizer={sig['tokenizer_class']}")
+    if variant == "int8":
+        sig = validate_onnx_signature(model_dir, manifest)
+        print(f"ONNX signature OK: inputs={sig['inputs']} outputs={sig['outputs']} "
+              f"hidden_size={sig['hidden_size']} tokenizer={sig['tokenizer_class']}")
+    else:
+        print(f"ONNX signature skipped for variant {variant!r} "
+              f"(runtime graph is the int8 variant)")
 
     MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"manifest updated: {MANIFEST_PATH}")
