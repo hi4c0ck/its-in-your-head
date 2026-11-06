@@ -47,6 +47,116 @@ def set_db_path(path: "Path | str") -> None:
     _database.set_override(path)
 
 
+_profile_path_override = None  # test-only, see set_profile_path()
+
+
+def set_profile_path(path) -> None:
+    """TEST ONLY: point /context source detection at a fixture profile
+    root (or None to clear). Mirrors set_db_path: no global state is
+    consulted when this is set, so fixture profiles stay hermetic."""
+    global _profile_path_override
+    _profile_path_override = None if path is None else Path(path)
+
+
+def _ctx_profile_root(ctx):
+    """Profile root exposed by a ctx double / real ctx, or None.
+
+    Probes the attribute/method names a Hermes ctx may carry
+    (profile_dir/profile_home/hermes_home/home and getters). A ctx that
+    exposes none of them yields None — the caller degrades to 'unknown',
+    never to a guessed present."""
+    if ctx is None:
+        return None
+    for name in ("profile_dir", "profile_home", "profile_path",
+                 "profile_root", "hermes_home", "hermes_home_path",
+                 "home_dir", "home"):
+        try:
+            value = getattr(ctx, name, None)
+        except Exception:
+            continue
+        if value is None:
+            continue
+        try:
+            if callable(value):
+                value = value()
+            if value:
+                return Path(str(value))
+        except Exception:
+            continue
+    for name in ("get_profile_dir", "get_profile_home", "get_hermes_home",
+                 "profile_dir_path"):
+        try:
+            fn = getattr(ctx, name, None)
+            if callable(fn):
+                value = fn()
+                if value:
+                    return Path(str(value))
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_profile_root():
+    """Active profile (Hermes home) root at request time, or None.
+
+    Order: test override, then ctx-exposed path (the route-context
+    resolution the other routes use via set_ctx), then — only when no
+    ctx is wired at all — the same guarded gateway resolvers the rest
+    of the plugin uses (plugins.plugin_storage.plugin_data_dir, whose
+    <home>/plugin-data/<id> location implies the home, and
+    hermes_constants.get_hermes_home). When a ctx IS wired but exposes
+    no profile path (test doubles), resolution is unavailable -> None
+    -> 'unknown'. No Path.home()-style guessing."""
+    if _profile_path_override is not None:
+        return _profile_path_override
+    ctx = _get_ctx()
+    root = _ctx_profile_root(ctx)
+    if root is not None:
+        return root
+    if ctx is not None:
+        return None
+    try:
+        from plugins.plugin_storage import plugin_data_dir
+        data_dir = Path(plugin_data_dir(PLUGIN_ID))
+        if data_dir.parent.name == "plugin-data":
+            return data_dir.parent.parent
+        return data_dir.parent
+    except Exception:
+        pass
+    try:
+        from hermes_constants import get_hermes_home
+        return Path(get_hermes_home())
+    except Exception:
+        return None
+
+
+def _detect_state(candidates):
+    """'present' if any candidate exists, 'absent' if the profile root
+    resolved but none do, 'unknown' if it did not resolve."""
+    root = _resolve_profile_root()
+    if root is None:
+        return "unknown"
+    for rel in candidates:
+        try:
+            if (root / rel).exists():
+                return "present"
+        except Exception:
+            continue
+    return "absent"
+
+
+# Filesystem-backed /context rows: item -> candidate paths relative to
+# the profile root (Hermes home). Real layout: SOUL.md/AGENTS.md at the
+# root, USER.md/MEMORY.md under memories/, skills under skills/.
+_CONTEXT_FS_ROWS = {
+    "SOUL.md": ("SOUL.md",),
+    "USER.md": ("memories/USER.md", "USER.md"),
+    "MEMORY.md": ("memories/MEMORY.md", "MEMORY.md"),
+    "AGENTS.md": ("AGENTS.md",),
+    "active skills": ("skills",),
+}
+
+
 def _connect() -> sqlite3.Connection:
     # Lazy, per-request via the single storage resolver: fresh WAL
     # connection each time (never cached — one open handle would outlive
@@ -353,24 +463,36 @@ _CONTEXT_ROWS = [
      "source": "conversation history", "present": True},
     {"item": "system instructions", "visibility": "NOT EXPOSED",
      "source": None, "present": False},
+    # Filesystem-backed rows: present/state are recomputed at request
+    # time in _context_shape() from the actual profile (see
+    # _CONTEXT_FS_ROWS); the values here are never reported as-is.
     {"item": "SOUL.md", "visibility": "KNOWN",
-     "source": "SOUL.md", "present": True},
+     "source": "SOUL.md", "present": False},
     {"item": "USER.md", "visibility": "KNOWN",
-     "source": "USER.md", "present": True},
+     "source": "USER.md", "present": False},
     {"item": "MEMORY.md", "visibility": "KNOWN",
-     "source": "MEMORY.md", "present": True},
+     "source": "MEMORY.md", "present": False},
     {"item": "AGENTS.md", "visibility": "KNOWN",
-     "source": "AGENTS.md", "present": True},
+     "source": "AGENTS.md", "present": False},
     {"item": "active skills", "visibility": "KNOWN",
-     "source": "skill registry", "present": True},
+     "source": "skill registry", "present": False},
     {"item": "plugin adaptation", "visibility": "KNOWN",
      "source": "adaptation.enabled (S7 engine)", "present": False},
 ]
 
 
 def _context_shape() -> dict:
-    """Provenance table; S7 fills the adaptation rows dynamically."""
+    """Provenance table; S7 fills the adaptation rows dynamically.
+    Filesystem rows carry a request-time detected state
+    (present/absent/unknown); absent rows stay in the table."""
     rows = [dict(r) for r in _CONTEXT_ROWS]
+    for row in rows:
+        if row.get("item") in _CONTEXT_FS_ROWS:
+            state = _detect_state(_CONTEXT_FS_ROWS[row["item"]])
+            row["state"] = state
+            row["present"] = state == "present"
+        else:
+            row["state"] = "present" if row.get("present") else "absent"
     try:
         enabled = bool(_settings_current().get("adaptation.enabled", False))
     except Exception:
@@ -387,6 +509,7 @@ def _context_shape() -> dict:
     for row in rows:
         if row.get("item") == "plugin adaptation":
             row["present"] = enabled
+            row["state"] = "present" if enabled else "absent"
             if enabled:
                 row["source"] = "adaptation engine"
     rows.append({
@@ -394,6 +517,7 @@ def _context_shape() -> dict:
         "visibility": "VISIBLE" if last is not None else "KNOWN",
         "source": "pre_llm_call context injection; may persist in API sidecar",
         "present": last is not None,
+        "state": "present" if last is not None else "absent",
     })
     return {"rows": rows}
 
