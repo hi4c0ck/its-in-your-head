@@ -6,4 +6,10 @@ provides_hooks:
   - pre_llm_call
   - post_api_request
   - api_request_error
+  - pre_tool_call
+  - post_tool_call
+  - on_stream_delta
+  - on_stream_end
+  - on_session_start
+  - on_session_end
 tags: [analytics, observability, desktop]

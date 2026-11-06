@@ -33,8 +33,10 @@ from pathlib import Path
 
 try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from . import embedder
+    from .storage import database as _database
 except ImportError:
     import embedder
+    from storage import database as _database
 
 try:
     from hermes_cli.plugin_events import broadcast_plugin_event
@@ -76,10 +78,22 @@ CREATE TABLE IF NOT EXISTS events (
     error_message     TEXT,
     user_chars        INTEGER,
     user_message      TEXT,
-    sketch            BLOB
+    sketch            BLOB,
+    tool_name         TEXT,
+    task_id           TEXT,
+    tool_call_id      TEXT,
+    duration_ms       REAL,
+    result_type       TEXT,
+    result_chars      INTEGER,
+    status            TEXT,
+    finished          INTEGER,
+    reasoning_chars   INTEGER,
+    reasoning_deltas  INTEGER,
+    final_chars       INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events (type);
+CREATE INDEX IF NOT EXISTS idx_events_tool ON events (tool_name, ts);
 """
 
 _COLUMNS = [
@@ -87,7 +101,9 @@ _COLUMNS = [
     "provider", "api_duration", "finish_reason", "prompt_tokens",
     "completion_tokens", "total_tokens", "status_code", "retry_count",
     "retryable", "error_type", "error_message", "user_chars", "user_message",
-    "sketch",
+    "sketch", "tool_name", "task_id", "tool_call_id", "duration_ms",
+    "result_type", "result_chars", "status", "finished", "reasoning_chars",
+    "reasoning_deltas", "final_chars",
 ]
 _INSERT = ("INSERT INTO events (" + ", ".join(_COLUMNS) + ") VALUES ("
            + ", ".join(":" + c for c in _COLUMNS) + ")")
@@ -111,16 +127,11 @@ def set_db_path(path: "Path | str") -> None:
     """TEST ONLY: point storage at a local file instead of plugin_db()."""
     global _db_path_override
     _db_path_override = path
+    _database.set_override(path)
 
 
 def _connect() -> sqlite3.Connection:
-    if _db_path_override is not None:
-        conn = sqlite3.connect(str(_db_path_override))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
-    from plugins.plugin_storage import plugin_db
-    return plugin_db(PLUGIN_ID)
+    return _database.connect()
 
 
 def _as_int(v) -> "int | None":
@@ -159,6 +170,18 @@ def _row_from_event(ev: dict) -> dict:
         "user_chars": _as_int(ev.get("user_chars")),
         "user_message": ev.get("user_message"),
         "sketch": ev.get("sketch"),
+        "tool_name": ev.get("tool_name"),
+        "task_id": ev.get("task_id"),
+        "tool_call_id": ev.get("tool_call_id"),
+        "duration_ms": ev.get("duration_ms"),
+        "result_type": ev.get("result_type"),
+        "result_chars": _as_int(ev.get("result_chars")),
+        "status": ev.get("status"),
+        "finished": _as_int(ev.get("finished"))
+        if ev.get("finished") is not None else None,
+        "reasoning_chars": _as_int(ev.get("reasoning_chars")),
+        "reasoning_deltas": _as_int(ev.get("reasoning_deltas")),
+        "final_chars": _as_int(ev.get("final_chars")),
     }
 
 
@@ -219,6 +242,10 @@ def _worker_main() -> None:
             for ev in batch:
                 if isinstance(ev, dict) and ev.get("type") == "turn":
                     ev["sketch"] = embedder.sketch(ev.get("user_message"))
+                elif isinstance(ev, dict) and ev.get("type") == "reasoning_seg":
+                    # Worker-side embedding (never on the delta path);
+                    # the raw reasoning text is not persisted (C6).
+                    ev["sketch"] = embedder.sketch(ev.get("reasoning_text"))
             _persist_batch(batch)
             _batches += 1
             if _batches % PRUNE_EVERY == 0:
@@ -226,6 +253,17 @@ def _worker_main() -> None:
             _flush_tick(len(batch))
         except Exception:
             logger.exception("its-in-your-head: batch persist failed (events dropped)")
+
+
+def flush(timeout: float = 3.0) -> bool:
+    """Wait until the queue is drained (used by on_session_end).
+    Returns True when empty within the timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _queue.empty():
+            return True
+        time.sleep(0.01)
+    return _queue.empty()
 
 
 def start_worker() -> None:

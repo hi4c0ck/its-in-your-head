@@ -46,10 +46,22 @@ CREATE TABLE IF NOT EXISTS events (
     error_message     TEXT,
     user_chars        INTEGER,
     user_message      TEXT,
-    sketch            BLOB
+    sketch            BLOB,
+    tool_name         TEXT,
+    task_id           TEXT,
+    tool_call_id      TEXT,
+    duration_ms       REAL,
+    result_type       TEXT,
+    result_chars      INTEGER,
+    status            TEXT,
+    finished          INTEGER,
+    reasoning_chars   INTEGER,
+    reasoning_deltas  INTEGER,
+    final_chars       INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events (type);
+CREATE INDEX IF NOT EXISTS idx_events_tool ON events (tool_name, ts);
 """
 
 router = APIRouter()
