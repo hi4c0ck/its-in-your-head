@@ -134,12 +134,15 @@ def _on_pre_tool_call(tool_name=None, args=None, task_id=None, **kwargs):
         corr = _corr(kwargs)
         name = tool_name or kwargs.get("tool_name") or "unknown"
         STATE.inc("tool_calls_started")
-        metrics.enqueue(events.tool_start(
+        ev = events.tool_start(
             tool_name=name,
             task_id=task_id or kwargs.get("task_id") or corr["task_id"],
             session_id=corr["session_id"], turn_id=corr["turn_id"],
             tool_call_id=kwargs.get("tool_call_id"),
-            args_chars=len(str(args)) if args is not None else None))
+            args_chars=len(str(args)) if args is not None else None)
+        # PULSE registry bump happens worker-side (engine.on_events) — the
+        # hot path stays STATE counter + enqueue only, sub-0.5 ms, no I/O.
+        metrics.enqueue(ev)
     except Exception:
         logger.exception("its-in-your-head: tool_start capture failed")
     return None

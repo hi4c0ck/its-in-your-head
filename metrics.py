@@ -34,9 +34,14 @@ from pathlib import Path
 try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from . import embedder
     from .storage import database as _database
+    from . import engine as _engine
 except ImportError:
     import embedder
     from storage import database as _database
+    try:
+        import engine as _engine
+    except ImportError:  # engine is optional plumbing; worker still persists
+        _engine = None
 
 try:
     from hermes_cli.plugin_events import broadcast_plugin_event
@@ -251,6 +256,15 @@ def _worker_main() -> None:
             if _batches % PRUNE_EVERY == 0:
                 _prune()
             _flush_tick(len(batch))
+            # Engine feed (pulse capsules, portrait update) — worker side
+            # only, never on the hot path. A fault here drops engine
+            # state, not the persisted events.
+            if _engine is not None:
+                try:
+                    _engine.on_events(batch)
+                except Exception:
+                    logger.exception(
+                        "its-in-your-head: engine feed failed (state dropped)")
         except Exception:
             logger.exception("its-in-your-head: batch persist failed (events dropped)")
 
