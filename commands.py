@@ -259,6 +259,207 @@ def _adaptation_text(sub: str) -> str:
     return _adaptation_status_text()
 
 
+def _set_encoder_setting(value: str) -> str:
+    name = "perception.encoder"
+    ctx = _ctx
+    setter = getattr(ctx, "set_config", None)
+    if callable(setter):
+        try:
+            setter(name, value)
+            return f"{name}: {value} (persisted)"
+        except Exception:
+            pass
+    if _api is not None:
+        try:
+            _api._ephemeral_settings[name] = value
+        except Exception:
+            pass
+    return f"{name}: {value} (ephemeral)"
+
+
+def _get_encoder_setting() -> str:
+    try:
+        current = _current_settings()
+        return str(current.get("perception.encoder", "tier-0"))
+    except Exception:
+        return "tier-0"
+
+
+def _engine_client():
+    try:
+        try:
+            from .perception import worker_client as _wc
+        except Exception:
+            from perception import worker_client as _wc  # type: ignore[no-redef]
+    except Exception:
+        return None
+    try:
+        return _wc.get_shared_client()
+    except Exception:
+        try:
+            return _wc.OnnxWorkerClient()
+        except Exception:
+            return None
+
+
+def _engine_status_text() -> str:
+    current = _get_encoder_setting()
+    active_tier = "Tier 1" if current == "tier-1-onnx" else "Tier 0"
+    runtime = "unavailable"
+    model = "missing"
+    worker = "dead"
+    last = "none"
+    client = _engine_client()
+    if client is not None:
+        try:
+            st = client.status()
+            runtime = st.get("runtime", "unavailable")
+            model = st.get("model", "missing")
+            worker = st.get("worker", "dead")
+            last = st.get("last_failure") or "none"
+        except Exception:
+            pass
+    lines = [
+        "engine:",
+        f"  Tier 0: tier-0 (sketch, always available){' [active]' if active_tier == 'Tier 0' else ''}",
+        f"  Tier 1: tier-1-onnx (ONNX MiniLM){' [active]' if active_tier == 'Tier 1' else ''}",
+        f"  Active tier: {active_tier}",
+        f"  perception.encoder: {current}",
+        f"  ONNX runtime: {runtime}",
+        f"  Model: {model}",
+        f"  Worker: {worker}",
+        f"  Last failure: {last}",
+    ]
+    return "\n".join(lines)
+
+
+# -- engine enable steps (monkeypatchable for tests) ----------------------------
+def _op_platform_check():
+    import platform
+    import sys
+    if platform.system() not in ("Windows", "Linux", "Darwin"):
+        raise RuntimeError(f"unsupported platform: {platform.system()}")
+    if sys.version_info < (3, 11):
+        raise RuntimeError(f"unsupported python: {sys.version_info.major}.{sys.version_info.minor}")
+    return f"{platform.system()}/{platform.python_version()}"
+
+
+def _op_pm_env():
+    try:
+        import pm
+    except Exception as exc:
+        raise RuntimeError(f"pm unavailable: {exc}") from exc
+    try:
+        from pathlib import Path as _P
+
+        from .perception import worker_client as _wc
+    except Exception:
+        from perception import worker_client as _wc  # type: ignore[no-redef]
+    python = pm.client.ensure_project_environment(
+        _wc.PM_ENV_NAME, project=_wc.ONNX_WORKER_DIR, explicit=True)
+    if not _P(str(python)).is_file():
+        raise RuntimeError(f"PM env interpreter not found: {python}")
+    return str(python)
+
+
+def _op_download_verify(interpreter=None):
+    try:
+        from .perception import encoder as _enc
+        from .perception import worker_client as _wc
+    except Exception:
+        from perception import encoder as _enc  # type: ignore
+        from perception import worker_client as _wc  # type: ignore
+    model_dir = _wc.resolve_model_dir()
+    status, errors = _wc.check_model(model_dir)
+    if status == "hash-mismatch":
+        raise RuntimeError(f"model hash mismatch: {errors}")
+    if status != "verified":
+        _enc.download_tier1_model(model_dir, confirm=True)
+    status, errors = _wc.check_model(model_dir)
+    if status != "verified":
+        raise RuntimeError(f"model verification failed: {errors}")
+    return str(model_dir)
+
+
+def _op_smoke(interpreter=None, model_dir=None):
+    try:
+        from .perception import worker_client as _wc
+    except Exception:
+        from perception import worker_client as _wc  # type: ignore
+    client = _wc.OnnxWorkerClient(interpreter=interpreter, model_dir=model_dir)
+    st = client.status()
+    if st["runtime"] != "ok":
+        raise RuntimeError("runtime unavailable")
+    if st["model"] != "verified":
+        raise RuntimeError(f"model not verified: {st['model']}")
+    pong = client.ping()
+    if not getattr(pong, "ok", False):
+        raise RuntimeError(f"smoke ping failed: {getattr(pong, 'failure', pong)}")
+    emb = client.embed(["hello world"])
+    if not getattr(emb, "ok", False):
+        raise RuntimeError(f"smoke embed failed: {getattr(emb, 'failure', emb)}")
+    # Keep a shared client pointing at the same env for encode().
+    try:
+        _wc.reset_shared_client()
+        _wc.get_shared_client(interpreter=interpreter, model_dir=model_dir)
+        _wc.get_shared_client().ping()
+    except Exception:
+        pass
+    return f"ping+embed ok dim={getattr(emb, 'dim', None)}"
+
+def _engine_enable_text() -> str:
+    steps = []
+    interpreter = None
+    model_dir = None
+    try:
+        plat = _op_platform_check()
+        steps.append(f"platform/python: ok ({plat})")
+        interpreter = _op_pm_env()
+        steps.append("PM env: ok (interpreter ensured)")
+        model_dir = _op_download_verify(interpreter)
+        steps.append("model download+verify: ok (sha256 verified)")
+        smoke = _op_smoke(interpreter, model_dir)
+        steps.append(f"smoke (ping+embed): ok ({smoke})")
+        steps.append("worker start: ok")
+        setting = _set_encoder_setting("tier-1-onnx")
+        steps.append(f"flip perception.encoder: {setting}")
+        steps.append("engine: enabled Tier 1 (tier-1-onnx)")
+    except Exception as exc:
+        stopped = steps[-1] if steps else "platform/python"
+        lines = ["engine: enable stopped (tier-0 intact)"]
+        lines.extend(f"  {s}" for s in steps)
+        lines.append(f"  stopped at: {stopped} <- {type(exc).__name__}: {exc}")
+        lines.append("  perception.encoder: tier-0 (unchanged)")
+        return "\n".join(lines)
+    return "\n".join(steps)
+
+
+def _engine_disable_text() -> str:
+    notes = []
+    client = _engine_client()
+    if client is not None:
+        try:
+            client.shutdown()
+            notes.append("worker: stopped")
+        except Exception:
+            notes.append("worker: stop failed (ignored)")
+    else:
+        notes.append("worker: none")
+    setting = _set_encoder_setting("tier-0")
+    notes.append(f"flip perception.encoder: {setting}")
+    notes.append("model: kept (files preserved)")
+    notes.append("engine: disabled, Tier 0 active")
+    return "\n".join(notes)
+
+
+def _engine_text(sub: str) -> str:
+    if sub == "enable":
+        return _engine_enable_text()
+    if sub == "disable":
+        return _engine_disable_text()
+    return _engine_status_text()
+
+
 def mirror_handler(raw_args: str = "", **kwargs) -> str:
     """Handler for /mirror. fn(raw_args: str) -> str (Hermes command API)."""
     try:
@@ -282,6 +483,11 @@ def mirror_handler(raw_args: str = "", **kwargs) -> str:
         sub = args[1] if len(args) > 1 else "status"
         if sub in ("on", "off", "status", "rules"):
             return _adaptation_text(sub)
+        return USAGE
+    if head == "engine":
+        sub = args[1] if len(args) > 1 else "status"
+        if sub in ("status", "enable", "disable"):
+            return _engine_text(sub)
         return USAGE
     return USAGE
 

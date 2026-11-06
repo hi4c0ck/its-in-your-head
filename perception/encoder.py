@@ -107,13 +107,14 @@ class Tier0SketchBackend:
 
 
 class OnnxMiniLMBackend:
-    """Tier-1: local ONNX multilingual MiniLM, placeholder loader.
+    """Tier-1: local ONNX multilingual MiniLM via the isolated worker.
 
     * ``model_path`` resolution order: explicit arg -> ``data_dir`` artifacts.
     * Lazy: nothing is loaded in ``__init__`` (register-time safe).
-    * ``encode()`` raises ``ModelNotInstalledError`` when artifacts are
-      missing and ``DependencyError`` when ``onnxruntime`` is not installed —
-      it never downloads (zero-network at encode-time).
+    * ``encode()`` never downloads (zero-network at encode-time). When
+      ``fallback_to_tier0`` is enabled (factory-created backends), any Tier-1
+      failure degrades to Tier-0 for that call and is recorded; direct
+      construction keeps the legacy raising behaviour.
     """
 
     name = "tier-1-onnx"
@@ -126,17 +127,50 @@ class OnnxMiniLMBackend:
         data_dir: str | Path | None = None,
         model_version: str = TIER1_MODEL_VERSION,
         max_seq_len: int = 256,
+        client=None,
+        fallback_to_tier0: bool = False,
+        worker_client=None,
     ) -> None:
         self._model_path = Path(model_path) if model_path else None
         self._tokenizer_path = Path(tokenizer_path) if tokenizer_path else None
         self._data_dir = Path(data_dir) if data_dir else None
         self._model_version = model_version
+        self._requested_version = model_version
         self.max_seq_len = max_seq_len
         self._session = None  # lazy; importing here would be register-time I/O-adjacent work
+        self.client = client if client is not None else worker_client
+        self._fallback_to_tier0 = bool(fallback_to_tier0 or self.client is not None)
+        self._tier0 = Tier0SketchBackend()
+        self.last_failure: str | None = None
+        self.last_model_version: str | None = None
+        self._effective_version: str | None = None
 
     @property
     def model_version(self) -> str:
-        return self._model_version
+        return self._effective_version or self._requested_version
+
+    def _record_tier0(self, failure: str) -> list[list[float]]:
+        self.last_failure = failure
+        self._effective_version = TIER0_MODEL_VERSION
+        self.last_model_version = TIER0_MODEL_VERSION
+        return self._tier0.encode([])  # placeholder replaced by caller with real texts
+
+    def _get_client(self):
+        if self.client is not None:
+            return self.client
+        try:
+            try:
+                from .worker_client import get_shared_client
+            except Exception:
+                from worker_client import get_shared_client  # type: ignore[no-redef]
+        except Exception as exc:
+            from .worker_client import Tier1Failure  # type: ignore
+            raise Tier1Failure("runtime-unavailable", f"worker client import failed: {exc}")
+        mdir = self._data_dir
+        if self._model_path is not None:
+            # Explicit single-file path: use its parent as the model dir.
+            mdir = Path(self._model_path).parent
+        return get_shared_client(model_dir=mdir)
 
     def resolve_paths(self) -> tuple[Path, Path]:
         model = self._model_path or (self._data_dir / "model.onnx" if self._data_dir else None)
@@ -164,15 +198,35 @@ class OnnxMiniLMBackend:
         return self._session
 
     def encode(self, texts: list[str]) -> list[list[float]]:
-        self.resolve_paths()  # fail fast with a clear error before any heavy load
-        self._ensure_session()
-        # Real tokenization + pooling happens here once artifacts are vendored.
-        # This placeholder path is intentionally unreachable in tests (no artifacts).
-        raise EmbeddingError("Tier-1 inference not vendored in this build; use Tier-0.")
+        texts = list(texts)
+        # Direct legacy path (no worker client, no fallback): keep the
+        # pre-LANE-B raising behaviour so existing tests stay green.
+        if not self._fallback_to_tier0 and self.client is None:
+            self.resolve_paths()  # fail fast with a clear error before any heavy load
+            self._ensure_session()
+            raise EmbeddingError("Tier-1 inference not vendored in this build; use Tier-0.")
+        # Composite path: delegate to the worker client; ANY Tier-1 failure
+        # falls back to Tier-0 for this call (never downloads).
+        try:
+            client = self._get_client()
+            result = client.embed(texts)
+        except Exception as exc:
+            failure = f"{type(exc).__name__}: {exc}"
+            self._record_tier0(failure)
+            return self._tier0.encode(texts)
+        if getattr(result, "ok", False):
+            self.last_failure = None
+            version = getattr(result, "model_version", None) or self._requested_version
+            self._effective_version = version
+            self.last_model_version = version
+            return result.vectors  # type: ignore[return-value]
+        failure = str(getattr(result, "failure", None) or "tier-1 failure")
+        self._record_tier0(failure)
+        return self._tier0.encode(texts)
 
     def needs_reembed(self, cached_version: str | None) -> bool:
         """Migration hook: any model_version bump invalidates cached vectors."""
-        return cached_version != self._model_version
+        return cached_version != self.model_version
 
 
 # --------------------------------------------------------------------------- #
@@ -195,12 +249,14 @@ def create_backend(
     *,
     data_dir: str | Path | None = None,
     model_path: str | Path | None = None,
+    client=None,
 ) -> EmbeddingBackend:
     """Factory. No I/O, no network — construction is register-time safe."""
     name = resolve_backend_name(settings, backend_name)
     if name == "tier-0":
         return Tier0SketchBackend()
-    return OnnxMiniLMBackend(model_path=model_path, data_dir=data_dir)
+    return OnnxMiniLMBackend(model_path=model_path, data_dir=data_dir,
+                             client=client, fallback_to_tier0=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -238,18 +294,53 @@ def sha256_file(path: str | Path) -> str:
 # One-time explicit download (the ONLY network path in Tier-1)
 # --------------------------------------------------------------------------- #
 
+def _load_manifest(manifest_path=None) -> dict | None:
+    try:
+        import json
+
+        candidate = Path(manifest_path) if manifest_path else (
+            Path(__file__).resolve().parent.parent / "onnx" / "manifest.json")
+        return json.loads(candidate.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def verify_tier1_model(data_dir, *, manifest_path=None) -> list[str]:
+    """Zero-network hash gate: re-hash manifest files under ``data_dir``.
+
+    Returns a list of error strings (empty == verified). Mirrors
+    tools/verify_onnx_model.py semantics."""
+    manifest = _load_manifest(manifest_path)
+    if manifest is None:
+        return ["manifest unreadable"]
+    dest = Path(data_dir)
+    errors: list[str] = []
+    for rel, meta in (manifest.get("files") or {}).items():
+        path = dest / rel
+        if not path.is_file():
+            errors.append(f"missing: {rel}")
+            continue
+        expected = (meta or {}).get("sha256")
+        if expected and sha256_file(path) != expected:
+            errors.append(f"mismatch: {rel}")
+    return errors
+
+
 def download_tier1_model(
     data_dir: str | Path,
     *,
     confirm: bool = False,
     revision: str = TIER1_REVISION,
     opener=None,
+    manifest_path=None,
 ) -> dict:
     """Explicit user action only. Requires ``confirm=True``.
 
     Downloads pinned artifacts into ``data_dir`` and records the installed
     model_version next to them; callers must re-embed anchors when the
-    version changes (see ``OnnxMiniLMBackend.needs_reembed``)."""
+    version changes (see ``OnnxMiniLMBackend.needs_reembed``). After download
+    every manifest file is re-hashed; any mismatch refuses (EmbeddingError).
+    """
     if not confirm:
         raise EmbeddingError(
             "Refusing to download Tier-1 model without confirm=True (explicit user action)."
@@ -261,6 +352,7 @@ def download_tier1_model(
     for name in TIER1_ARTIFACTS:
         url = TIER1_HF_BASE.format(model=TIER1_MODEL_ID, rev=revision, name=name)
         out = dest / name
+        out.parent.mkdir(parents=True, exist_ok=True)
         with open_fn(url) as resp, open(out, "wb") as f:  # noqa: S310 - pinned explicit download
             while True:
                 block = resp.read(1 << 16)
@@ -268,6 +360,9 @@ def download_tier1_model(
                     break
                 f.write(block)
         installed[name] = {"path": str(out), "sha256": sha256_file(out)}
+    errors = verify_tier1_model(dest, manifest_path=manifest_path)
+    if errors:
+        raise EmbeddingError(f"sha256 verification failed for Tier-1 model: {errors}")
     version = f"{TIER1_MODEL_ID}@rev-{revision}"
     (dest / "model_version.txt").write_text(version, encoding="utf-8")
     return {"model_version": version, **installed}
