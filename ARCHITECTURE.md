@@ -5,6 +5,9 @@ contracts, manifest, test harness, and install wiring; functional code is
 owner work, per the slots below. Official references:
 - https://hermes-agent.nousresearch.com/docs/developer-guide/plugins
 - https://hermes-agent.nousresearch.com/docs/developer-guide/desktop-plugin-sdk
+- https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks
+  (streaming-output-hooks section: bounded-queue delivery +
+  `plugins.stream_reasoning_deltas` opt-in)
 
 ## Tree (what each file is)
 
@@ -54,6 +57,22 @@ its-in-your-head/               # unified package = one installable folder = OSS
   can't rely on the worker).
 - **Embedding** (`embedder.py`): pick Tier-0 sketch params (n, DIM, norm) or
   Tier-1.
+- **Streaming output hooks (optional, post-MVP slot)**: `on_stream_start` /
+  `on_stream_delta` / `on_stream_end` (+ `on_interim_message`) — the live-tick
+  source for the strip. Doc semantics (verified 2026-11-06,
+  /docs/user-guide/features/hooks "Streaming output hooks"): observer-only,
+  delivered through host-owned bounded queues (one worker per callback, never
+  inline on the token path), returns ignored, exceptions logged. Capture shape:
+  `on_stream_delta` = light counters only (tick the strip; do NOT store delta
+  streams); `on_stream_end` = the assembled final text (the store point).
+  **Reasoning deltas are NOT exposed to plugins by default**: `on_stream_delta`
+  only carries `kind="reasoning"` when the user opts in via
+  `plugins: stream_reasoning_deltas: true`. Privacy posture: keep that OFF by
+  default (raw model thinking is sensitive; matches our zero-overload,
+  local-only promise) — if you ever surface a "thinking" signal, the README
+  privacy section must disclose the opt-in. Registering any streaming hook
+  requires BOTH: register in `__init__.py` AND add to `provides_hooks` in
+  plugin.yaml (drift check).
 - **Desktop** (`desktop/plugin.js`): heat canvas (ResizeObserver + theme vars,
   resolved once via getComputedStyle) + I/O tick frames; wire the `host.onEvent`
   live path.
