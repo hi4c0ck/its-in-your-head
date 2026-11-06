@@ -17,11 +17,13 @@ try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from . import events, settings
     from .session_state import SessionState
     from ..adaptation.injection import build_injection
+    from ..pulse.feedback import apply_feedback, detect_feedback
 except ImportError:
     import metrics, engine
     from core import events, settings
     from core.session_state import SessionState
     from adaptation.injection import build_injection
+    from pulse.feedback import apply_feedback, detect_feedback
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,24 @@ def _flush_reasoning(turn_id, session_id=None):
 
 # --- pre-existing hooks (behavior unchanged) ----------------------------
 
+def _apply_explicit_feedback(message) -> None:
+    """Deterministic explicit-feedback -> prototypes association.
+
+    Runs after the turn is captured. Detection/association is fully
+    fault-isolated: any exception (including a detector fault) yields
+    no label, the observer continues, and raw text is never logged.
+    Only the in-memory engine store is touched (no file I/O).
+    """
+    try:
+        if detect_feedback(message) is None:
+            return
+        eng = engine.get_engine()
+        apply_feedback(eng.protos, eng.capsule_state(), message)
+    except Exception:
+        logger.exception(
+            "its-in-your-head: explicit feedback association failed")
+
+
 def _on_pre_llm_call(**kwargs):
     """Prompt capture (turn event) + S7 adaptation seam.
 
@@ -100,6 +120,7 @@ def _on_pre_llm_call(**kwargs):
         })
     except Exception:
         logger.exception("its-in-your-head: turn capture failed")
+    _apply_explicit_feedback(message)
     try:
         snap = _adaptation_settings()
         if snap.get("adaptation.enabled"):

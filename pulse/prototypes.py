@@ -28,12 +28,17 @@ _POSITIVE = (
     "thank", "great", "perfect", "good job", "well done", "nice",
     "excellent", "brilliant", "exactly what", "works great",
     "love it", "awesome", "fantastic", "keep going", "spot on",
+    "thanks", "that worked", "it worked", "fixed it", "that fixed it",
+    "that did it", "that did the trick", "great work", "great job",
+    "nice work", "nice job", "perfect work", "perfect job",
 )
 _NEGATIVE = (
     "wrong", "bad", "terrible", "broken", "useless", "horrible",
     "stupid", "hate", "poor", "redo", "do it again", "don't",
     "do not", "stop", "failed", "doesn't work", "not working",
     "waste", "annoying", "frustrat",
+    "still broken", "still failing", "still not working",
+    "did not work", "does not work", "it failed", "not fixed",
 )
 
 

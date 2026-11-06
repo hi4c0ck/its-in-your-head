@@ -20,6 +20,7 @@ gateway, top-level under tests.
 from __future__ import annotations
 
 import logging
+import struct
 import threading
 from collections import deque
 
@@ -66,6 +67,15 @@ class Engine:
         self._capsules: dict[str, deque] = {}
         self._history: deque = deque(maxlen=DRIFT_MAX)
         self.goal_text: str | None = None
+        # Interpreted-track (agent/reasoning) evidence bookkeeping:
+        # counts reasoning_seg updates that actually landed, so
+        # /portrait can evidence-gate the agent track separately from
+        # the observed (user) track. No raw text is stored here.
+        self._interpreted_evidence_count = 0
+        self._interpreted_last_ts = None
+        self._interpreted_last_confidence = None
+        self._anchor_vectors = None
+        self._anchor_backend = None
         self._thresholds = {
             k: s.get(f"pulse.thresholds.{k}")
             for k in ("goal", "good", "friction")}
@@ -105,6 +115,99 @@ class Engine:
                 self._on_tool_end(ev)
             elif etype in ("user_turn", "turn"):
                 self._on_user_turn(ev)
+            elif etype == "reasoning_seg":
+                self._on_reasoning_seg(ev)
+
+    @staticmethod
+    def _vector_from_event(ev: dict):
+        """Extract a stored embedding/sketch vector from an event.
+
+        Accepts ``vector``/``embedding`` (list of floats) or ``sketch``
+        (Tier-0 packed float32 bytes, or a list of floats). Raw text is
+        never re-embedded: no vector on the event means no evidence.
+        """
+        for key in ("vector", "embedding", "sketch", "sketch_vector"):
+            raw = ev.get(key)
+            if raw is None:
+                continue
+            if isinstance(raw, (bytes, bytearray)):
+                if len(raw) % 4 or not len(raw):
+                    return None
+                return list(struct.unpack(
+                    f"<{len(raw) // 4}f", bytes(raw)))
+            if isinstance(raw, (list, tuple)) and raw:
+                try:
+                    return [float(x) for x in raw]
+                except (TypeError, ValueError):
+                    return None
+            return None
+        return None
+
+    def _anchor_vectors_for(self, backend):
+        """Cached anchor vectors for ``backend`` (built once per backend).
+
+        Uses the same ``get_anchor_vectors`` accessor as the observed
+        (user) track, so both tracks live in the same resemblance space.
+        """
+        if self._anchor_vectors is not None and \
+                self._anchor_backend is backend:
+            return self._anchor_vectors
+        try:
+            from .perception.anchors import get_anchor_vectors
+        except ImportError:
+            from perception.anchors import get_anchor_vectors
+        vectors = get_anchor_vectors(backend)
+        self._anchor_vectors = vectors
+        self._anchor_backend = backend
+        return vectors
+
+    def _on_reasoning_seg(self, ev: dict) -> None:
+        """Fold one reasoning segment into the interpreted portrait track.
+
+        Projection (deterministic, no raw text, no re-embedding):
+        stored sketch/vector -> ``resemblance_all`` vs the anchor bank
+        (same six dimensions as the observed track) -> per-dimension
+        ``R_d`` -> ``Calibration.confidence(R_d)`` (logistic, slope 6,
+        midpoint 0, i.e. ``confidence_profile`` with the portrait's
+        calibration) -> [0, 1] interpreted value per dimension ->
+        ``Portrait.update_interpreted`` (its own EMA / MAX_STEP cap
+        applies). Evidence bookkeeping is updated only when the update
+        actually lands. Any fault degrades to no-op: the worker and the
+        observed track are never affected.
+        """
+        try:
+            vec = self._vector_from_event(ev)
+            if not vec:
+                return
+            try:
+                from .perception.resemblance import (
+                    confidence_profile, resemblance_all)
+            except ImportError:
+                from perception.resemblance import (
+                    confidence_profile, resemblance_all)
+            backend = self._get_backend()
+            anchor_vectors = self._anchor_vectors_for(backend)
+            probe = next(iter(anchor_vectors.values()), None)
+            probe_vec = (probe.get("positive") or [None])[0] \
+                if isinstance(probe, dict) else None
+            if probe_vec is None or len(probe_vec) != len(vec):
+                return  # vector space mismatch: no evidence, not an error
+            scores = resemblance_all(vec, anchor_vectors)
+            conf = confidence_profile(scores, self.portrait.calibration)
+            targets = {d: conf[d] for d in _dims() if d in conf}
+            if not targets:
+                return
+            self.portrait.update_interpreted(targets)
+            self._interpreted_evidence_count += 1
+            self._interpreted_last_ts = ev.get("ts")
+            try:
+                self._interpreted_last_confidence = (
+                    sum(targets.values()) / len(targets))
+            except (TypeError, ZeroDivisionError):
+                pass
+        except Exception:
+            logger.exception(
+                "its-in-your-head: engine reasoning_seg feed failed")
 
     def _on_tool_end(self, ev: dict) -> None:
         try:
@@ -174,7 +277,13 @@ class Engine:
     def portrait_view(self) -> dict:
         dims = _dims()
         snap = self.portrait.normalized()
-        if not self.portrait.evidence:
+        full = self.portrait.snapshot()
+        interp_track = full.get("interpreted") or {}
+        has_observed = bool(self.portrait.evidence)
+        has_interpreted = bool(
+            self._interpreted_evidence_count
+            or (interp_track.get("evidence_count") or 0))
+        if not has_observed and not has_interpreted:
             # Empty-shape contract (S5): no evidence -> available False and
             # None values (structural defaults are NOT data).
             return {"available": False,
@@ -182,11 +291,15 @@ class Engine:
                     "confidence": {d: None for d in dims},
                     "user": {d: None for d in dims},
                     "agent": {d: None for d in dims}}
-        full = self.portrait.snapshot()
-        interp = (full.get("interpreted") or {}).get("values") or {}
-        values = {d: snap.get("values", {}).get(d) for d in dims}
-        conf = {d: snap.get("confidences", {}).get(d) for d in dims}
-        agent = {d: interp.get(d) for d in dims}
+        interp = interp_track.get("values") or {}
+        values = ({d: snap.get("values", {}).get(d) for d in dims}
+                  if has_observed else {d: None for d in dims})
+        conf = ({d: snap.get("confidences", {}).get(d) for d in dims}
+                if has_observed else {d: None for d in dims})
+        # Agent (interpreted) track: values only when reasoning
+        # evidence exists; otherwise None, never the neutral defaults.
+        agent = ({d: interp.get(d) for d in dims} if has_interpreted
+                 else {d: None for d in dims})
         return {"available": True,
                 "dimensions": values, "confidence": conf,
                 "user": dict(values), "agent": agent}
@@ -211,6 +324,9 @@ class Engine:
             self._capsules.clear()
             self._history.clear()
             self.goal_text = None
+            self._interpreted_evidence_count = 0
+            self._interpreted_last_ts = None
+            self._interpreted_last_confidence = None
             self.protos = pulse.PrototypeStore(
                 cap=int(merged.get("pulse.prototype_cap", 8)),
                 min_labeled=int(merged.get("pulse.min_labeled", 3)))
