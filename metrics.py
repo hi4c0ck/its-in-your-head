@@ -30,6 +30,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from . import embedder
@@ -81,6 +82,41 @@ _worker_lock = threading.Lock()
 _worker_thread: "threading.Thread | None" = None
 _shutdown = threading.Event()
 _batches = 0
+
+# Flush-barrier state (F4). _in_flight_events counts events the worker has
+# dequeued but not yet committed (post-persist); _failed_events is the
+# lifetime count of events dropped by a failed persist. _state_cv is
+# notified on every increment/decrement/stop so flush() can wait on real
+# state instead of polling the queue. The worker NEVER calls flush() while
+# holding (or about to acquire) this condition, so there is no deadlock.
+_in_flight_events = 0
+_failed_events = 0
+_state_cv = threading.Condition()
+
+
+class FlushResult(NamedTuple):
+    """Result of flush(): honest accounting, never a bare claim of drained.
+
+    drained: True only when every event enqueued up to return was COMMITTED
+        (queue empty, nothing in flight, no persist failure in the window).
+        A failed batch is dropped via the error path (not retried), so
+        drained is False even with pending == 0 — check `failed`.
+    pending: events not yet committed at return (queued + in_flight).
+    in_flight: dequeued-but-uncommitted events (mid-persist batches).
+    queued: events still waiting on the queue.
+    failed: events dropped by a failed persist during this flush window.
+
+    Truthiness preserves the old `bool` polarity: bool(result) == drained.
+    """
+
+    drained: bool
+    pending: int
+    in_flight: int
+    queued: int
+    failed: int
+
+    def __bool__(self) -> bool:
+        return self.drained
 
 
 def enqueue(event: dict) -> None:
@@ -191,16 +227,26 @@ def _flush_tick(n: int) -> None:
 
 
 def _worker_main() -> None:
-    global _batches
+    global _batches, _in_flight_events, _failed_events
     while not _shutdown.is_set():
         try:
             first = _queue.get(timeout=QUEUE_GET_TIMEOUT)
         except queue.Empty:
             continue
+        # Count the dequeue immediately: from here until the post-persist
+        # decrement, this batch is in-flight and flush() must not claim
+        # drained. Incremented before any persist work (and before the
+        # test-visible _persist_batch call) so a gated persist is always
+        # visible to flush().
+        with _state_cv:
+            _in_flight_events += 1
+            _state_cv.notify_all()
         batch = [first]
         while len(batch) < BATCH_MAX:
             try:
                 batch.append(_queue.get_nowait())
+                with _state_cv:
+                    _in_flight_events += 1
             except queue.Empty:
                 break
         try:
@@ -226,18 +272,67 @@ def _worker_main() -> None:
                     logger.exception(
                         "its-in-your-head: engine feed failed (state dropped)")
         except Exception:
+            # Failed-batch policy: report via the error path below and DROP
+            # the batch — flush() does not retry. The dropped count is
+            # accumulated so flush() reports it instead of silently
+            # claiming the work drained.
             logger.exception("its-in-your-head: batch persist failed (events dropped)")
+            with _state_cv:
+                _failed_events += len(batch)
+                _state_cv.notify_all()
+        finally:
+            # Post-persist commit accounting (runs on success AND failure):
+            # the batch is no longer in flight. Never calls flush() here.
+            with _state_cv:
+                _in_flight_events -= len(batch)
+                _state_cv.notify_all()
 
 
-def flush(timeout: float = 3.0) -> bool:
-    """Wait until the queue is drained (used by on_session_end).
-    Returns True when empty within the timeout."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if _queue.empty():
-            return True
-        time.sleep(0.01)
-    return _queue.empty()
+def flush(timeout: float = 3.0) -> FlushResult:
+    """Flush barrier: wait until the queue is empty AND no batch is in
+    flight (dequeued but not yet committed).
+
+    Returns a FlushResult (bool(result) == result.drained). Contract:
+    - drained is True only when everything enqueued up to return was
+      committed: queue empty, in_flight == 0, and no persist failure
+      occurred during this flush window. Never True while work is
+      uncommitted.
+    - Timeout (default 3.0s): bounded wait; on timeout returns
+      drained=False with the actual pending/in_flight/queued counts —
+      never claims drained when work is uncommitted.
+    - Failure policy: a failed batch is reported via the error path and
+      dropped, NOT retried; its events are counted in `failed` and make
+      drained False for that window even though pending == 0.
+    - stop_worker() releases the barrier: when shutdown is set, flush
+      returns promptly with drained=False (unless genuinely everything
+      committed) instead of hanging to the timeout. The worker never
+      calls flush(), so there is no self-deadlock.
+    """
+    deadline = time.monotonic() + timeout
+    with _state_cv:
+        failed_at_entry = _failed_events
+        while True:
+            queued = _queue.qsize()
+            in_flight = _in_flight_events
+            failed = _failed_events - failed_at_entry
+            if queued == 0 and in_flight == 0:
+                return FlushResult(
+                    drained=(failed == 0), pending=0, in_flight=0,
+                    queued=0, failed=failed)
+            if _shutdown.is_set():
+                # Worker stopping releases the barrier promptly; pending
+                # work is reported, not claimed drained.
+                return FlushResult(
+                    drained=False, pending=queued + in_flight,
+                    in_flight=in_flight, queued=queued, failed=failed)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return FlushResult(
+                    drained=False, pending=queued + in_flight,
+                    in_flight=in_flight, queued=queued, failed=failed)
+            # Short wait slice: enqueue() does not (and must not) signal
+            # _state_cv, so re-poll the queue size on wakeups.
+            _state_cv.wait(timeout=min(remaining, 0.02))
 
 
 def start_worker() -> None:
@@ -263,5 +358,9 @@ def stop_worker(timeout: float = 3.0) -> None:
         thread = _worker_thread
         _worker_thread = None
         _shutdown.set()
+    # Stopping releases the flush barrier: wake any flush() waiters so
+    # they return promptly with honest pending accounting.
+    with _state_cv:
+        _state_cv.notify_all()
     if thread is not None:
         thread.join(timeout=timeout)
