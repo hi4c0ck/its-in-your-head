@@ -17,7 +17,10 @@ import { host, useQuery, queryClient } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const POLL_MS = 5000
-const HEAT_POLL_MS = 15000
+const PULSE_POLL_MS = 15000
+// Legacy hourly lane retired: the pane polls /pulse at the same slow cadence
+// the old hourly heat lane used; POLL_MS polling below is the mandatory
+// fallback on every route.
 const IO_WIDTH = 220   // fixed I/O-frame column
 const IO_LINES = 4
 const STALE_S = 60     // pet returns to idle after this many quiet seconds
@@ -125,47 +128,68 @@ function fmtClock(ts) {
   return p(d.getHours()) + ':' + p(d.getMinutes())
 }
 
-function drawHeat(canvas, heat) {
+function pulseCellValue(cell) {
+  if (!cell || typeof cell !== 'object') return null
+  const v = cell.value
+  return typeof v === 'number' && Number.isFinite(v)
+    ? Math.min(1, Math.max(0, v))
+    : null
+}
+
+function drawPulse(canvas, pulse) {
   const c2d = canvas.getContext('2d')
   if (!c2d) return
   c2d.clearRect(0, 0, canvas.width, canvas.height)
-  // Heat encoding is surface-relative by construction: cells are painted in
-  // the host accent at 0.12..1.0 alpha over a cleared canvas, so the host
-  // surface itself is the blend base in both themes. The hottest cell (full
-  // accent; default build accent #0053fd) holds >=3:1 contrast on the light
-  // card (#fcfcfc) and the dark card (#161618) — see
-  // tests/test_desktop_themecompat.mjs. No theme-specific colors here.
+  // Same encoding contract as the retired heat lane: cells are painted in the
+  // host accent at 0.12..1.0 alpha over a cleared canvas, so the host surface
+  // itself is the blend base in both themes. The hottest cell (full accent;
+  // default build accent #0053fd) holds >=3:1 contrast on the light card
+  // (#fcfcfc) and the dark card (#161618) — see
+  // tests/test_desktop_themecompat.mjs. Friction cells use the danger tint
+  // (same alpha encoding) where the existing danger token applies. Rows are
+  // dynamic: whichever tool rows GET /pulse carries, never a hardcoded list.
+  // Missing cells (e.g. a column the row does not carry) stay neutral.
   const colors = resolveColors(canvas)
   const dpr = window.devicePixelRatio || 1
-  const hours = (heat && heat.hours) || 24
-  const cells = (heat && heat.cells) || {}
+  const columns =
+    pulse && Array.isArray(pulse.columns) && pulse.columns.length > 0
+      ? pulse.columns
+      : ['goal', 'good', 'friction', 'unlabeled']
+  const rows = pulse && Array.isArray(pulse.rows) ? pulse.rows : []
   const pad = 2 * dpr
   const laneW = Math.max(1, canvas.width - 2 * pad)
   const laneH = Math.max(1, canvas.height - 2 * pad)
-  const cellW = laneW / hours
-  const gap = Math.max(dpr, cellW * 0.12)
-  let maxCount = 0
-  const counts = {}
-  for (let i = 0; i < hours; i++) {
-    const c = cells[String(i)] || { turns: 0, calls: 0, errors: 0 }
-    counts[i] = c
-    maxCount = Math.max(maxCount, c.turns + c.calls)
-  }
-  for (let i = 0; i < hours; i++) {
-    const c = counts[i]
-    const x = pad + i * cellW
-    const w = Math.max(gap, cellW - 2 * gap)
-    const activity = c.turns + c.calls
-    if (activity > 0) {
-      c2d.fillStyle = colors.accent
-      c2d.globalAlpha = 0.12 + 0.88 * (activity / maxCount)
-      c2d.fillRect(x + gap, pad, w, laneH)
-    }
-    if (c.errors > 0) {  // danger tick under the cell
-      c2d.fillStyle = colors.danger
-      c2d.globalAlpha = 0.9
-      c2d.fillRect(x + gap, pad + laneH - 2 * dpr, w, 2 * dpr)
-    }
+  const labelW = Math.min(84 * dpr, laneW * 0.34)
+  const gridW = Math.max(1, laneW - labelW)
+  const cellW = gridW / columns.length
+  const maxRows = 8
+  const rowH = laneH / Math.max(1, Math.min(maxRows, rows.length || 1))
+  c2d.font = Math.round(8 * dpr) + 'px monospace'
+  c2d.textBaseline = 'middle'
+  rows.slice(0, maxRows).forEach((row, ri) => {
+    const y = pad + ri * rowH
+    const tool = String(row.tool_name || row.tool || '—')
+    c2d.fillStyle = colors.accent
+    c2d.globalAlpha = 0.85
+    c2d.fillText(tool.slice(0, 16), pad, y + rowH / 2)
+    c2d.globalAlpha = 1
+    columns.forEach((col, ci) => {
+      const v = pulseCellValue(row[col])
+      const x = pad + labelW + ci * cellW
+      const gap = Math.max(dpr, cellW * 0.08)
+      if (v !== null && v > 0) {
+        c2d.fillStyle = col === 'friction' ? colors.danger : colors.accent
+        c2d.globalAlpha = 0.12 + 0.88 * v
+        c2d.fillRect(x + gap, y + gap,
+          Math.max(gap, cellW - 2 * gap), Math.max(gap, rowH - 2 * gap))
+      }
+      c2d.globalAlpha = 1
+    })
+  })
+  if (rows.length === 0) {
+    c2d.fillStyle = colors.accent
+    c2d.globalAlpha = 0.7
+    c2d.fillText('no pulse rows yet', pad, pad + rowH / 2)
     c2d.globalAlpha = 1
   }
 }
@@ -218,6 +242,172 @@ const SETTING_KEYS = [
   'adaptation.enabled',
   'adaptation.rules',
 ]
+
+// Shared theme-var strings for the portrait/drift views, defined once so the
+// var() census stays stable; each is an installed-build token (fixture-verified).
+const V_ACCENT = 'var(--ui-accent)'
+const V_SEC = 'var(--ui-text-secondary)'
+const V_QUAT = 'var(--ui-text-quaternary)'
+const V_STROKE = 'var(--ui-stroke-secondary)'
+const V_DANGER = 'var(--dt-destructive, var(--ui-accent))'
+
+function clamp01(v) {
+  return typeof v === 'number' && Number.isFinite(v)
+    ? Math.min(1, Math.max(0, v))
+    : null
+}
+
+function PortraitView({ data }) {
+  const dims =
+    data && data.dimensions && typeof data.dimensions === 'object'
+      ? Object.keys(data.dimensions)
+      : []
+  const hasEvidence =
+    !!(data && data.available) &&
+    dims.some(
+      (d) =>
+        clamp01(data.user && data.user[d]) !== null ||
+        clamp01(data.agent && data.agent[d]) !== null,
+    )
+  if (!hasEvidence) {
+    return jsxs('div', {
+      className: 'flex flex-1 items-center justify-center',
+      style: {
+        fontSize: 10, color: V_QUAT,
+        fontFamily: 'var(--ui-font-mono, monospace)', letterSpacing: 1,
+      },
+      children: ['PORTRAIT · no data yet — evidence empty'],
+    })
+  }
+  return jsxs('div', {
+    className: 'flex flex-1 items-center',
+    style: { gap: 12, minHeight: 0, overflow: 'hidden' },
+    children: dims.map((d, i) => {
+      const u = clamp01(data.user[d])
+      const a = clamp01(data.agent[d])
+      return jsxs('div', {
+        key: d,
+        className: 'flex flex-col',
+        style: { gap: 2, minWidth: 0 },
+        children: [
+          jsx('span', {
+            style: {
+              fontSize: 8, color: V_QUAT, whiteSpace: 'nowrap',
+              overflow: 'hidden', textOverflow: 'ellipsis',
+            },
+            children: d.slice(0, 10),
+          }),
+          jsxs('div', {
+            style: { width: 46, height: 4, background: V_STROKE },
+            children: [
+              jsx('div', {
+                style: {
+                  width: (u === null ? 0 : Math.round(u * 100)) + '%',
+                  height: '100%', background: V_ACCENT, opacity: u === null ? 0 : 0.9,
+                },
+              }),
+            ],
+          }),
+          jsxs('div', {
+            style: { width: 46, height: 4, background: V_STROKE },
+            children: [
+              jsx('div', {
+                style: {
+                  width: (a === null ? 0 : Math.round(a * 100)) + '%',
+                  height: '100%', background: V_QUAT, opacity: a === null ? 0 : 0.9,
+                },
+              }),
+            ],
+          }),
+          jsx('span', {
+            style: { fontSize: 8, color: V_SEC },
+            children:
+              (u === null ? '–' : Math.round(u * 100)) +
+              '/' + (a === null ? '–' : Math.round(a * 100)),
+          }),
+        ],
+      }, i)
+    }),
+  })
+}
+
+function driftDelta(series) {
+  if (!Array.isArray(series) || series.length < 2) return null
+  const a = series[series.length - 2]
+  const b = series[series.length - 1]
+  return typeof a === 'number' && typeof b === 'number' ? b - a : null
+}
+
+function DriftView({ data }) {
+  const series =
+    data && data.series && typeof data.series === 'object' ? data.series : {}
+  const axes = Object.keys(series)
+  const deltas = axes.map((d) => driftDelta(series[d]))
+  if (!(data && data.available) || deltas.every((x) => x === null)) {
+    return jsxs('div', {
+      className: 'flex flex-1 items-center justify-center',
+      style: {
+        fontSize: 10, color: V_QUAT,
+        fontFamily: 'var(--ui-font-mono, monospace)', letterSpacing: 1,
+      },
+      children: ['DRIFT · no data yet — need 2 snapshots'],
+    })
+  }
+  return jsxs('div', {
+    className: 'flex flex-1 items-center',
+    style: { gap: 10, minHeight: 0, overflow: 'hidden' },
+    children: axes.map((d, i) => {
+      const delta = deltas[i]
+      const mag = delta === null ? 0 : Math.min(1, Math.abs(delta))
+      const neg = delta !== null && delta < 0
+      return jsxs('div', {
+        key: d,
+        className: 'flex flex-col',
+        style: { gap: 2, minWidth: 0 },
+        children: [
+          jsx('span', {
+            style: {
+              fontSize: 8, color: V_QUAT, whiteSpace: 'nowrap',
+              overflow: 'hidden', textOverflow: 'ellipsis',
+            },
+            children: d.slice(0, 10),
+          }),
+          jsxs('div', {
+            style: {
+              position: 'relative', width: 46, height: 6,
+              background: V_STROKE,
+            },
+            children: [
+              jsx('div', {
+                style: {
+                  position: 'absolute', top: 0, bottom: 0,
+                  left: neg ? 0 : '50%',
+                  width: Math.round(mag * 50) + '%',
+                  background: neg ? V_DANGER : V_ACCENT,
+                  opacity: delta === null ? 0 : 0.9,
+                },
+              }),
+              neg &&
+                jsx('div', {
+                  style: {
+                    position: 'absolute', top: -2, bottom: -2,
+                    left: Math.round(mag * 50) + '%', width: 2,
+                    background: V_DANGER,
+                  },
+                }),
+            ],
+          }),
+          jsx('span', {
+            style: { fontSize: 8, color: neg ? V_DANGER : V_SEC },
+            children: delta === null
+              ? '·'
+              : (neg ? '−' : '+') + Math.abs(delta).toFixed(2),
+          }),
+        ],
+      }, i)
+    }),
+  })
+}
 
 function settingValue(settings, key) {
   if (!settings) return '—'
@@ -279,10 +469,10 @@ function Strip({ source, rest }) {
     refetchInterval: POLL_MS,
     retry: false,
   })
-  const heatQ = useQuery({
-    queryKey: [source, 'iyh-heatmap'],
-    queryFn: () => rest('/heatmap?window=24h'),
-    refetchInterval: HEAT_POLL_MS,
+  const pulseQ = useQuery({
+    queryKey: [source, 'iyh-pulse'],
+    queryFn: () => rest('/pulse'),
+    refetchInterval: PULSE_POLL_MS,
     retry: false,
   })
   const recentQ = useQuery({
@@ -312,10 +502,10 @@ function Strip({ source, rest }) {
     retry: false,
   })
 
-  // Latest heat data in a ref so the ResizeObserver callback (mounted once)
+  // Latest pulse data in a ref so the ResizeObserver callback (mounted once)
   // never draws a stale value after a data refresh.
-  const heatRef = useRef(null)
-  heatRef.current = heatQ.data
+  const pulseRef = useRef(null)
+  pulseRef.current = pulseQ.data
 
   // ResizeObserver: re-size the canvas attributes (not just CSS) on every
   // container change — sash drags, layout switches, tab remounts.
@@ -328,18 +518,18 @@ function Strip({ source, rest }) {
       const r = wrap.getBoundingClientRect()
       canvas.width = Math.max(1, Math.round(r.width * dpr))
       canvas.height = Math.max(1, Math.round(r.height * dpr))
-      drawHeat(canvas, heatRef.current)
+      drawPulse(canvas, pulseRef.current)
     }
     const ro = new ResizeObserver(fit)
     ro.observe(wrap)
     return () => ro.disconnect()
   }, [tab])
 
-  // Re-draw when heat data arrives (query refetch / tick invalidation).
+  // Re-draw when pulse data arrives (query refetch / tick invalidation).
   useEffect(() => {
     const canvas = canvasRef.current
-    if (canvas && canvas.width > 0) drawHeat(canvas, heatQ.data)
-  }, [heatQ.data, tab])
+    if (canvas && canvas.width > 0) drawPulse(canvas, pulseQ.data)
+  }, [pulseQ.data, tab])
 
   const metrics = metricsQ.data
   let status
@@ -382,13 +572,13 @@ function Strip({ source, rest }) {
                   // (inset stretches the box); no CSS width/height here.
                   style: { position: 'absolute', inset: 0 },
                 }),
-                !heatQ.data && jsx('span', {
+                !pulseQ.data && jsx('span', {
                   style: {
                     position: 'absolute', inset: 0, display: 'flex',
                     alignItems: 'center', justifyContent: 'center',
                     fontSize: 10, color: 'var(--ui-text-quaternary)',
                   },
-                  children: '24h heat lane',
+                  children: 'pulse matrix · 4 semantic columns',
                 }),
               ],
             }),
@@ -409,8 +599,8 @@ function Strip({ source, rest }) {
           ],
         })
       : tab === 'portrait'
-        ? emptyState('PORTRAIT', portraitQ)
-        : emptyState('DRIFT', driftQ)
+        ? jsx(PortraitView, { data: portraitQ.data })
+        : jsx(DriftView, { data: driftQ.data })
 
   const popover = panel && jsxs('div', {
     style: {
@@ -461,7 +651,7 @@ function Strip({ source, rest }) {
           })
         : jsx('div', {
             style: { color: 'var(--ui-text-quaternary)' },
-            children: 'PULSE heat lane · PORTRAIT/DRIFT pending backend · pet glyph = last tool event · ticker = tool + status only',
+            children: 'PULSE semantic matrix · PORTRAIT user/agent tracks · DRIFT deltas · pet glyph = last tool event · ticker = tool + status only',
           }),
     ],
   })

@@ -84,4 +84,27 @@ for (const [fg, label] of [['#0053fd', 'hottest cell (accent)'], ['#cf2d56', 'da
 // Alpha-blend encoding stays surface-relative (unchanged behavior).
 assert.ok(src.includes('globalAlpha = 0.12 + 0.88'), 'heat cells use accent alpha over cleared canvas')
 
+// 3. Semantic rendering (P1 lane 3): the pane is driven by the semantic
+// routes, not by the legacy hourly lane; it never invents values.
+assert.ok(src.includes("rest('/pulse')"), 'pane fetches /pulse as its primary view')
+assert.ok(!src.includes("'/heatmap"), 'legacy hourly lane is not the pane primary view')
+assert.ok(src.includes("rest('/portrait')"), 'pane fetches /portrait')
+assert.ok(src.includes("rest('/drift')"), 'pane fetches /drift')
+assert.ok(src.includes('pulse.columns'), 'pulse renders the 4 semantic columns from the response')
+for (const col of ["'goal'", "'good'", "'friction'", "'unlabeled'"]) {
+  assert.ok(src.includes(col), 'semantic column ' + col + ' present')
+}
+assert.ok(src.includes('tool_name'), 'pulse rows are dynamic (tool_name from the response)')
+assert.ok(src.includes('data.user'), 'portrait consumes the USER track')
+assert.ok(src.includes('data.agent'), 'portrait consumes the INTERPRETED (agent) track')
+assert.ok(src.includes('data.dimensions'), 'portrait consumes the six-dimension track')
+assert.ok(src.includes('data.available'), 'portrait gates on the evidence flag')
+assert.ok(src.includes('evidence empty'), 'portrait renders the honest placeholder when empty')
+assert.ok(src.includes('data.series'), 'drift consumes per-axis series')
+assert.ok(src.includes('driftDelta'), 'drift renders per-axis deltas vs last snapshot')
+assert.ok(src.includes("'--dt-destructive'"), 'danger token still governs negative drift')
+assert.ok(src.includes('new ResizeObserver'), 'ResizeObserver stays mandatory')
+assert.ok(src.includes('refetchInterval: PULSE_POLL_MS'), 'polling fallback stays mandatory')
+assert.ok(src.includes('refetchInterval: POLL_MS'), 'polling fallback stays on every route')
+
 console.log('PASS themecompat: ' + usages.length + ' var() usages checked, heat contrast >=3:1 on light+dark')
