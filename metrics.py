@@ -229,26 +229,28 @@ def _flush_tick(n: int) -> None:
 def _worker_main() -> None:
     global _batches, _in_flight_events, _failed_events
     while not _shutdown.is_set():
-        try:
-            first = _queue.get(timeout=QUEUE_GET_TIMEOUT)
-        except queue.Empty:
-            continue
-        # Count the dequeue immediately: from here until the post-persist
-        # decrement, this batch is in-flight and flush() must not claim
-        # drained. Incremented before any persist work (and before the
-        # test-visible _persist_batch call) so a gated persist is always
-        # visible to flush().
+        # Dequeue AND in-flight accounting happen atomically under the
+        # flush barrier's condition: an item can never be OUT of the queue
+        # but NOT YET counted in in_flight (that gap let flush() observers
+        # see queue-empty + in_flight==0 while a live batch was draining —
+        # the 'lost event' visibility window). queue.Queue.get takes its
+        # own internal lock; no circular dependency (queue code never
+        # touches _state_cv), so holding the condition across it is safe.
+        batch: list = []
         with _state_cv:
-            _in_flight_events += 1
-            _state_cv.notify_all()
-        batch = [first]
-        while len(batch) < BATCH_MAX:
             try:
-                batch.append(_queue.get_nowait())
-                with _state_cv:
-                    _in_flight_events += 1
+                first = _queue.get(timeout=QUEUE_GET_TIMEOUT)
             except queue.Empty:
-                break
+                continue
+            batch = [first]
+            _in_flight_events += 1
+            while len(batch) < BATCH_MAX:
+                try:
+                    batch.append(_queue.get_nowait())
+                except queue.Empty:
+                    break
+                _in_flight_events += 1
+            _state_cv.notify_all()
         try:
             for ev in batch:
                 if isinstance(ev, dict) and ev.get("type") == "turn":
