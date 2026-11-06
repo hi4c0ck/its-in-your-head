@@ -249,3 +249,124 @@ def test_worker_protocol_ops_documented():
 def test_manifest_no_model_binaries_in_repo():
     # Only manifest.json under onnx/ — never model binaries.
     assert sorted(p.name for p in (ROOT / "onnx").iterdir()) == ["manifest.json"]
+
+
+# --- F3: fetch no-flag = verify-only; --repin stages + atomically promotes -----
+
+def _f3_manifest_dir(tmp_path):
+    """Fake pinned manifest + matching fake model dir under tmp_path."""
+    model_dir = tmp_path / "model"
+    files = {}
+    for rel in ["onnx/model_int8.onnx", "tokenizer.json"]:
+        p = model_dir / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(f"fake-{rel}".encode())
+        files[rel] = {"sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+                      "size": p.stat().st_size}
+    manifest = {"model_id": "fake/model", "revision": "b" * 40,
+                "embedding": {"dimension": 384}, "default_variant": "int8",
+                "variants": {"int8": {"files": files}}}
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest_path, model_dir
+
+
+def test_f3_no_flag_verify_only_leaves_manifest_identical(tmp_path, monkeypatch):
+    import os as _os  # local import for replace spy typing
+    fetch_mod = _load_tool("fetch_onnx_model")
+    manifest_path, model_dir = _f3_manifest_dir(tmp_path)
+    monkeypatch.setattr(fetch_mod, "MANIFEST_PATH", manifest_path)
+    calls = []
+    monkeypatch.setattr(fetch_mod, "resolve_revision",
+                        lambda mid: calls.append("resolve") or (_ for _ in ()).throw(AssertionError("resolve_revision must not be called")))
+    monkeypatch.setattr(fetch_mod, "download",
+                        lambda url, dest: calls.append("download") or (_ for _ in ()).throw(AssertionError("download must not be called")))
+    monkeypatch.setattr(fetch_mod, "run_smoke",
+                        lambda *a, **k: calls.append("smoke") or (_ for _ in ()).throw(AssertionError("smoke must not run")))
+    before = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    assert fetch_mod.main(["--model-dir", str(model_dir)]) == 0
+    # --check is the same verify-only path
+    assert fetch_mod.main(["--check", "--model-dir", str(model_dir)]) == 0
+    assert calls == []
+    assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == before
+    assert not manifest_path.with_name("manifest.staged.json").exists()
+    del _os
+
+
+def test_f3_no_flag_mismatch_exits_1_no_resolve(tmp_path, monkeypatch):
+    fetch_mod = _load_tool("fetch_onnx_model")
+    manifest_path, model_dir = _f3_manifest_dir(tmp_path)
+    monkeypatch.setattr(fetch_mod, "MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(fetch_mod, "resolve_revision",
+                        lambda mid: (_ for _ in ()).throw(AssertionError("no resolve in verify-only")))
+    (model_dir / "tokenizer.json").write_bytes(b"tampered")
+    before = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    assert fetch_mod.main(["--model-dir", str(model_dir)]) == 1
+    assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == before
+
+
+def _f3_repin_harness(tmp_path, monkeypatch, fetch_mod, smoke_result=None, smoke_error=None):
+    manifest_path, model_dir = _f3_manifest_dir(tmp_path)
+    monkeypatch.setattr(fetch_mod, "MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(fetch_mod, "resolve_revision", lambda mid: "a" * 40)
+    def _fake_download(url, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(f"staged-{dest.name}".encode())
+    monkeypatch.setattr(fetch_mod, "download", _fake_download)
+    monkeypatch.setattr(fetch_mod, "validate_onnx_signature",
+                        lambda model_dir_, manifest_: {"inputs": {}, "outputs": {}, "hidden_size": 384, "tokenizer_class": "Fake"})
+    if smoke_error is not None:
+        def _bad_smoke(model_dir_, manifest_path_):
+            raise smoke_error
+        monkeypatch.setattr(fetch_mod, "run_smoke", _bad_smoke)
+    else:
+        monkeypatch.setattr(fetch_mod, "run_smoke",
+                            lambda model_dir_, manifest_path_: smoke_result or {"ok": True})
+    return manifest_path, model_dir
+
+
+def test_f3_repin_success_promotes_atomically(tmp_path, monkeypatch):
+    import os as _os
+    fetch_mod = _load_tool("fetch_onnx_model")
+    manifest_path, model_dir = _f3_repin_harness(tmp_path, monkeypatch, fetch_mod)
+    staged = manifest_path.with_name("manifest.staged.json")
+    real_replace = _os.replace
+    captured = {}
+    def _spy_replace(src, dst):
+        captured["src"] = Path(src)
+        captured["dst"] = Path(dst)
+        captured["bytes"] = Path(src).read_bytes()
+        return real_replace(src, dst)
+    monkeypatch.setattr(_os, "replace", _spy_replace)
+    assert fetch_mod.main(["--repin", "--model-dir", str(model_dir)]) == 0
+    assert captured["dst"] == manifest_path and captured["src"] == staged
+    # byte-wise: promoted manifest == staged bytes captured pre-rename
+    assert manifest_path.read_bytes() == captured["bytes"]
+    promoted = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert promoted["revision"] == "a" * 40
+    assert not staged.exists()
+
+
+def test_f3_repin_smoke_failure_cleans_up(tmp_path, monkeypatch):
+    fetch_mod = _load_tool("fetch_onnx_model")
+    manifest_path, model_dir = _f3_repin_harness(
+        tmp_path, monkeypatch, fetch_mod, smoke_error=RuntimeError("smoke boom"))
+    before = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    before_bytes = manifest_path.read_bytes()
+    assert fetch_mod.main(["--repin", "--model-dir", str(model_dir)]) == 1
+    assert manifest_path.read_bytes() == before_bytes
+    assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == before
+    assert not manifest_path.with_name("manifest.staged.json").exists()
+    assert not (Path(str(model_dir) + ".staged")).exists()
+
+
+def test_f3_repin_verify_failure_cleans_up(tmp_path, monkeypatch):
+    fetch_mod = _load_tool("fetch_onnx_model")
+    manifest_path, model_dir = _f3_repin_harness(tmp_path, monkeypatch, fetch_mod)
+    monkeypatch.setattr(fetch_mod, "check_hashes",
+                        lambda model_dir_, manifest_, variant=None: ["mismatch: tokenizer.json expected x got y"])
+    before_bytes = manifest_path.read_bytes()
+    assert fetch_mod.main(["--repin", "--model-dir", str(model_dir)]) == 1
+    assert manifest_path.read_bytes() == before_bytes
+    assert not manifest_path.with_name("manifest.staged.json").exists()
+    assert not (Path(str(model_dir) + ".staged")).exists()

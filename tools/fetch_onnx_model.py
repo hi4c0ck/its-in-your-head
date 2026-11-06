@@ -1,38 +1,55 @@
 """Maintainer-only: pinned Tier-1 model fetch + manifest hash publication.
 
 Explicit maintainer action (deliberate network use, NOT the zero-network
-encode-time rule). Steps:
+encode-time rule). Two modes:
 
-1. Resolve the immutable HF commit SHA for MANIFEST["model_id"] via the HF
-   API and pin it in onnx/manifest.json (revision pin first — no hashes are
-   ever published from an unpinned download).
-2. Download the manifest `files` into a staging dir under the Hermes
-   user-data root (same resolution as storage/database.py:
-   plugin_data_dir("its-in-your-head")/models/<safe model id>), NEVER into
-   the plugin install dir.
-3. Compute sha256 + size for every manifest file.
-4. Validate ONNX I/O signatures (input names/ranks, output rank-3) and
-   tokenizer config consistency (tokenizer.json present, config.json
-   model_type/hidden size vs embedding dimension).
-5. Run CPU smoke inference (worker.py embed of two texts -> 384-dim
-   L2-normalized vectors) in the PM-ensured onnx-worker env.
-6. Write the computed hashes back into onnx/manifest.json.
+VERIFY-ONLY (default, no flags — F3):
+  python tools/fetch_onnx_model.py            # verify ONLY (no network)
+  python tools/fetch_onnx_model.py --check    # same as above (back-compat)
+  python tools/fetch_onnx_model.py --model-dir <path> [--variant <name>]
 
---check mode: recomputes hashes of the installed/staged model dir and
-REFUSES (exit 1) if any pre-existing manifest hash mismatches; it never
-overwrites a mismatching hash.
+  Verifies the staged model dir against the PINNED onnx/manifest.json
+  (sha256 + size, default variant: manifest default_variant, "int8").
+  NEVER resolves a new revision, NEVER downloads, NEVER rewrites the
+  manifest. Exit 0 = every pinned file verified; exit 1 = any pin
+  mismatch/missing (each error printed). No smoke inference in this mode.
 
-Usage:
-  python tools/fetch_onnx_model.py           # full fetch (default variant) + smoke + manifest update
-  python tools/fetch_onnx_model.py --variant fp32   # fetch only the fp32 variant graph
-  python tools/fetch_onnx_model.py --check   # verify staged files against manifest
-  python tools/fetch_onnx_model.py --model-dir <path>  # override staging dir
+EXPLICIT REPIN:
+  python tools/fetch_onnx_model.py --repin [--variant <name>] [--model-dir <path>]
+
+  1. Resolve the current HF revision (network; the only network use).
+  2. Stage a NEW manifest NEXT TO the pinned one,
+     onnx/manifest.staged.json, with the resolved revision and fresh
+     sha256+size pins for the chosen variant set.
+  3. Download+verify the variant set into a staging dir
+     (<model_dir>.staged, same parent) — never into the live model dir.
+  4. Validate the ONNX signature (int8 only) and run CPU smoke inference
+     against the STAGED pins.
+  5. ONLY after verify+smoke pass: promote manifest.staged.json ->
+     manifest.json ATOMICALLY via os.replace() on the same volume
+     (single rename syscall; readers never see a partial file; the old
+     pinned bytes are swapped in one step). On ANY failure the pinned
+     manifest stays byte-identical and staged artifacts (the staged
+     manifest file and the staging dir) are removed. Exit 0 promoted,
+     exit 1 any failure.
+
+The runtime installer (perception/encoder.py) is untouched by this tool:
+it stays byte-pinned and reads the promoted manifest only.
+
+Flag/exit-code contract:
+  (none)/--check  verify-only  exit 0 verified / 1 mismatch-or-missing
+  --repin         repin        exit 0 promoted / 1 any failure
+  --check+--repin is an error (exit 1).
+  Unknown variant: exit 1 (no revision resolved, manifest untouched).
 """
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
+import os
+import shutil
 import sys
 import urllib.request
 from pathlib import Path
@@ -171,6 +188,11 @@ def check_hashes(model_dir: Path, manifest: dict, variant: str | None = None) ->
         if not path.is_file():
             errors.append(f"missing: {rel}")
             continue
+        size = meta.get("size")
+        if size is not None and path.stat().st_size != size:
+            errors.append(
+                f"size mismatch: {rel} expected {size} got {path.stat().st_size}")
+            continue
         if expected is None:
             continue
         actual = sha256_file(path)
@@ -179,75 +201,128 @@ def check_hashes(model_dir: Path, manifest: dict, variant: str | None = None) ->
     return errors
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--check", action="store_true",
-                    help="verify staged files against committed manifest hashes")
-    ap.add_argument("--model-dir", type=Path, default=None)
-    ap.add_argument("--variant", default=None,
-                    help="manifest variant to fetch/check (default: manifest default_variant)")
-    args = ap.parse_args(argv)
+def staged_manifest_path(pinned: Path | None = None) -> Path:
+    """Staged manifest lives next to the pinned one (same volume)."""
+    return Path(pinned or MANIFEST_PATH).with_name("manifest.staged.json")
 
-    data_root = resolve_data_root()
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    try:
-        variant, files = variant_files(manifest, args.variant)
-    except ValueError as exc:
-        print(f"error: {exc}")
-        return 1
-    model_dir = args.model_dir or (
-        data_root / "models" / safe_model_dirname(manifest["model_id"]))
-    print(f"data_root: {data_root}")
+
+def staging_model_dir(model_dir: Path) -> Path:
+    """Download target for a repin; sibling of the live model dir."""
+    return Path(str(model_dir) + ".staged")
+
+
+def _verify_only(model_dir: Path, manifest: dict, variant: str) -> int:
     print(f"model_dir: {model_dir}")
     print(f"variant: {variant}")
+    errors = check_hashes(model_dir, manifest, variant)
+    if errors:
+        print("HASH CHECK FAILED:")
+        for e in errors:
+            print(f"  {e}")
+        return 1
+    print("hash check OK")
+    return 0
 
-    if args.check:
-        errors = check_hashes(model_dir, manifest, variant)
+
+def _cleanup_staged(staged: Path, staging_dir: Path) -> None:
+    try:
+        staged.unlink(missing_ok=True)  # type: ignore[call-arg]
+    except TypeError:  # pragma: no cover - very old Python
+        if staged.is_file():
+            staged.unlink()
+    if staging_dir.is_dir():
+        shutil.rmtree(staging_dir)
+
+
+def _repin(model_dir: Path, manifest: dict, variant: str) -> int:
+    pinned = Path(MANIFEST_PATH)
+    staged = staged_manifest_path(pinned)
+    staging_dir = staging_model_dir(model_dir)
+    try:
+        revision = resolve_revision(manifest["model_id"])
+        print(f"resolved revision: {revision}")
+        staged_manifest = copy.deepcopy(manifest)
+        staged_manifest["revision"] = revision
+        _name, files = variant_files(staged_manifest, variant)
+        base = f"https://huggingface.co/{manifest['model_id']}/resolve/{revision}"
+        for rel in files:
+            dest = staging_dir / rel
+            if dest.is_file():
+                print(f"skip (present): {rel}")
+                continue
+            print(f"download: {rel}")
+            download(f"{base}/{rel}", dest)
+        for rel in files:
+            path = staging_dir / rel
+            staged_manifest["variants"][variant]["files"][rel] = {
+                "sha256": sha256_file(path),
+                "size": path.stat().st_size}
+            print(f"sha256 {rel}: "
+                  f"{staged_manifest['variants'][variant]['files'][rel]['sha256']} "
+                  f"({staged_manifest['variants'][variant]['files'][rel]['size']} bytes)")
+        errors = check_hashes(staging_dir, staged_manifest, variant)
         if errors:
             print("HASH CHECK FAILED:")
             for e in errors:
                 print(f"  {e}")
+            _cleanup_staged(staged, staging_dir)
             return 1
-        print("hash check OK")
+        print("hash check OK (staged)")
+        if variant == "int8":
+            sig = validate_onnx_signature(staging_dir, staged_manifest)
+            print(f"ONNX signature OK: inputs={sig['inputs']} outputs={sig['outputs']} "
+                  f"hidden_size={sig['hidden_size']} tokenizer={sig['tokenizer_class']}")
+        else:
+            print(f"ONNX signature skipped for variant {variant!r} "
+                  f"(runtime graph is the int8 variant)")
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_text(
+            json.dumps(staged_manifest, indent=2) + "\n", encoding="utf-8")
+        print(f"staged manifest written: {staged}")
+        smoke = run_smoke(staging_dir, staged)
+        print(f"smoke OK: {json.dumps(smoke)}")
+        os.replace(staged, pinned)
+        print(f"manifest promoted atomically: {staged} -> {pinned}")
         return 0
+    except Exception as exc:  # any failure: pinned manifest byte-identical
+        print(f"repin FAILED: {exc}")
+        _cleanup_staged(staged, staging_dir)
+        return 1
 
-    revision = resolve_revision(manifest["model_id"])
-    print(f"resolved revision: {revision}")
-    if manifest.get("revision") != revision:
-        print(f"pinning revision {manifest.get('revision')} -> {revision}")
-        manifest["revision"] = revision
 
-    base = f"https://huggingface.co/{manifest['model_id']}/resolve/{revision}"
-    for rel in files:
-        dest = model_dir / rel
-        if dest.is_file():
-            print(f"skip (present): {rel}")
-            continue
-        print(f"download: {rel}")
-        download(f"{base}/{rel}", dest)
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--check", action="store_true",
+                    help="verify staged files against committed manifest hashes "
+                         "(same as bare no-flag mode)")
+    ap.add_argument("--repin", action="store_true",
+                    help="explicitly repin: resolve HF revision, stage+verify+"
+                         "smoke, then atomically promote manifest.staged.json")
+    ap.add_argument("--model-dir", type=Path, default=None)
+    ap.add_argument("--variant", default=None,
+                    help="manifest variant to verify/repin (default: manifest default_variant)")
+    args = ap.parse_args(argv)
+    if args.check and args.repin:
+        print("error: --check and --repin are mutually exclusive")
+        return 1
 
-    for rel in files:
-        path = model_dir / rel
-        manifest["variants"][variant]["files"][rel] = {
-            "sha256": sha256_file(path),
-            "size": path.stat().st_size}
-        print(f"sha256 {rel}: {manifest['variants'][variant]['files'][rel]['sha256']} "
-              f"({manifest['variants'][variant]['files'][rel]['size']} bytes)")
-
-    if variant == "int8":
-        sig = validate_onnx_signature(model_dir, manifest)
-        print(f"ONNX signature OK: inputs={sig['inputs']} outputs={sig['outputs']} "
-              f"hidden_size={sig['hidden_size']} tokenizer={sig['tokenizer_class']}")
+    manifest = json.loads(Path(MANIFEST_PATH).read_text(encoding="utf-8"))
+    try:
+        variant, _files = variant_files(manifest, args.variant)
+    except ValueError as exc:
+        print(f"error: {exc}")
+        return 1
+    if args.model_dir is not None:
+        model_dir = args.model_dir
     else:
-        print(f"ONNX signature skipped for variant {variant!r} "
-              f"(runtime graph is the int8 variant)")
+        data_root = resolve_data_root()
+        print(f"data_root: {data_root}")
+        model_dir = (
+            data_root / "models" / safe_model_dirname(manifest["model_id"]))
 
-    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    print(f"manifest updated: {MANIFEST_PATH}")
-
-    smoke = run_smoke(model_dir, MANIFEST_PATH)
-    print(f"smoke OK: {json.dumps(smoke)}")
-    return 0
+    if args.repin:
+        return _repin(model_dir, manifest, variant)
+    return _verify_only(model_dir, manifest, variant)
 
 
 if __name__ == "__main__":
