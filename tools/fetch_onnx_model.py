@@ -25,16 +25,24 @@ EXPLICIT REPIN:
      (<model_dir>.staged, same parent) — never into the live model dir.
   4. Validate the ONNX signature (int8 only) and run CPU smoke inference
      against the STAGED pins.
-  5. ONLY after verify+smoke pass: promote manifest.staged.json ->
-     manifest.json ATOMICALLY via os.replace() on the same volume
-     (single rename syscall; readers never see a partial file; the old
-     pinned bytes are swapped in one step). On ANY failure the pinned
-     manifest stays byte-identical and staged artifacts (the staged
-     manifest file and the staging dir) are removed. Exit 0 promoted,
-     exit 1 any failure.
+  5. ONLY after verify+smoke pass: promote — artifacts FIRST (each staged
+     file os.replace()'d into the live model dir, overwriting stale
+     same-named files; stale live files the new variant set dropped are
+     removed), manifest LAST: os.replace(manifest.staged.json ->
+     manifest.json) on the same volume (single rename; readers never see
+     a partial file; the old pinned bytes are swapped in one step).
+     On ANY failure the pinned manifest stays byte-identical and staged
+     artifacts (the staged manifest file and the staging dir) are
+     removed. Exit 0 promoted, exit 1 any failure.
+  CRASH STATE: a crash AFTER some artifact promotions but BEFORE the
+  manifest promotion leaves a mixed live dir (new bytes where promoted,
+  old bytes elsewhere) against the OLD manifest — a no-flag verify
+  honestly reports exit 1; remediation: re-run --repin (the leftover
+  staging dir is reused) or re-download the pinned variant set via the
+  runtime installer.
 
-The runtime installer (perception/encoder.py) is untouched by this tool:
-it stays byte-pinned and reads the promoted manifest only.
+  The runtime installer (perception/encoder.py) is untouched by this tool:
+  it stays byte-pinned and reads the promoted manifest only.
 
 Flag/exit-code contract:
   (none)/--check  verify-only  exit 0 verified / 1 mismatch-or-missing
@@ -281,8 +289,33 @@ def _repin(model_dir: Path, manifest: dict, variant: str) -> int:
         print(f"staged manifest written: {staged}")
         smoke = run_smoke(staging_dir, staged)
         print(f"smoke OK: {json.dumps(smoke)}")
+        # v0.1.3 PROMOTION ORDER: artifacts first, manifest LAST. The live
+        # model dir must hold the NEW bytes before the manifest starts
+        # pinning the new hashes (a manifest-only promotion left the
+        # runtime dir with old bytes that no longer match the promoted
+        # manifest). os.replace is a same-volume atomic rename and
+        # overwrites an existing destination (MoveFileEx REPLACE_EXISTING
+        # on Windows) — readers never see a partial file.
+        _name, files = variant_files(staged_manifest, variant)
+        for rel in files:
+            src = staging_dir / rel
+            dest = model_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src, dest)
+            print(f"promoted artifact: {rel} -> {dest}")
+        # Stale live artifacts: files the OLD variant set carried but the
+        # promoted set no longer does (a newer revision dropped them).
+        old_files = ((manifest.get("variants") or {}).get(variant) or {}).get("files") or {}
+        for rel in set(old_files) - set(files):
+            stale = model_dir / rel
+            if stale.is_file():
+                stale.unlink()
+                print(f"removed stale live artifact: {rel}")
+        # Manifest promoted LAST (single atomic rename, same volume).
         os.replace(staged, pinned)
         print(f"manifest promoted atomically: {staged} -> {pinned}")
+        _cleanup_staged(staged, staging_dir)
+        print(f"staged dir cleaned: {staging_dir}")
         return 0
     except Exception as exc:  # any failure: pinned manifest byte-identical
         print(f"repin FAILED: {exc}")
@@ -297,7 +330,9 @@ def main(argv: list[str] | None = None) -> int:
                          "(same as bare no-flag mode)")
     ap.add_argument("--repin", action="store_true",
                     help="explicitly repin: resolve HF revision, stage+verify+"
-                         "smoke, then atomically promote manifest.staged.json")
+                         "smoke, then promote artifacts into the live model "
+                         "dir and atomically promote manifest.staged.json "
+                         "(artifacts first, manifest last)")
     ap.add_argument("--model-dir", type=Path, default=None)
     ap.add_argument("--variant", default=None,
                     help="manifest variant to verify/repin (default: manifest default_variant)")

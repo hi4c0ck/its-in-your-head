@@ -24,8 +24,8 @@ Event schema (dicts enqueued by hooks; the worker flattens them to rows):
   error: {type, ts, session_id, turn_id?, api_request_id?, status_code?,
           retry_count?, retryable?, reason?, error: {type?, message?}}
 """
+import collections
 import logging
-import queue
 import sqlite3
 import threading
 import time
@@ -76,7 +76,14 @@ _COLUMNS = [
 _INSERT = ("INSERT INTO events (" + ", ".join(_COLUMNS) + ") VALUES ("
            + ", ".join(":" + c for c in _COLUMNS) + ")")
 
-_queue: "queue.Queue" = queue.Queue()
+# Shared event deque, guarded by _state_cv (the flush barrier's condition).
+# A bare collections.deque instead of queue.Queue: NO blocking operation is
+# ever performed while holding the barrier lock — the worker's idle wait is
+# cv.wait() (which releases the lock while sleeping), so flush() and the
+# producer can always acquire the condition. (v0.1.3 liveness fix: the
+# previous queue.Queue.get(timeout=...) under the condition starved flush()
+# lock acquisition on slow CI.)
+_items: "collections.deque" = collections.deque()
 
 _worker_lock = threading.Lock()
 _worker_thread: "threading.Thread | None" = None
@@ -120,9 +127,12 @@ class FlushResult(NamedTuple):
 
 
 def enqueue(event: dict) -> None:
-    """Called from hooks — microseconds only: build a dict, put it on the
-    queue. No I/O, no embedding, no locking beyond the queue's own."""
-    _queue.put(event)
+    """Called from hooks — microseconds only: build a dict, append it to the
+    shared deque. No I/O, no embedding; the only lock is the shared
+    condition (a deque append + notify)."""
+    with _state_cv:
+        _items.append(event)
+        _state_cv.notify_all()
 
 
 def set_db_path(path: "Path | str") -> None:
@@ -169,7 +179,9 @@ def _row_from_event(ev: dict) -> dict:
         "error_type": error.get("type"),
         "error_message": error.get("message"),
         "user_chars": _as_int(ev.get("user_chars")),
-        "user_message": ev.get("user_message"),
+        # v0.1.3 P0: raw prompts are NEVER serialized (the column stays in
+        # the schema, written NULL; the worker purges the raw field).
+        "user_message": None,
         "sketch": ev.get("sketch"),
         "tool_name": ev.get("tool_name"),
         "task_id": ev.get("task_id"),
@@ -229,28 +241,26 @@ def _flush_tick(n: int) -> None:
 def _worker_main() -> None:
     global _batches, _in_flight_events, _failed_events
     while not _shutdown.is_set():
-        # Dequeue AND in-flight accounting happen atomically under the
-        # flush barrier's condition: an item can never be OUT of the queue
-        # but NOT YET counted in in_flight (that gap let flush() observers
-        # see queue-empty + in_flight==0 while a live batch was draining —
-        # the 'lost event' visibility window). queue.Queue.get takes its
-        # own internal lock; no circular dependency (queue code never
-        # touches _state_cv), so holding the condition across it is safe.
+        # Dequeue + in-flight accounting happen atomically under the flush
+        # barrier's condition: an item can never be OUT of _items but NOT
+        # YET counted in in_flight (that gap let flush() observers see
+        # empty + in_flight==0 while a live batch was draining). The idle
+        # wait is cv.wait(), which RELEASES the lock while sleeping — no
+        # blocking queue operation ever runs under the barrier lock, so
+        # flush() can always acquire it.
         batch: list = []
         with _state_cv:
-            try:
-                first = _queue.get(timeout=QUEUE_GET_TIMEOUT)
-            except queue.Empty:
-                continue
-            batch = [first]
-            _in_flight_events += 1
-            while len(batch) < BATCH_MAX:
-                try:
-                    batch.append(_queue.get_nowait())
-                except queue.Empty:
-                    break
+            while not _items and not _shutdown.is_set():
+                _state_cv.wait(timeout=QUEUE_GET_TIMEOUT)
+            if _shutdown.is_set() and not _items:
+                break
+            while _items and len(batch) < BATCH_MAX:
+                batch.append(_items.popleft())
                 _in_flight_events += 1
-            _state_cv.notify_all()
+            if batch:
+                _state_cv.notify_all()
+        if not batch:
+            continue
         try:
             for ev in batch:
                 if isinstance(ev, dict) and ev.get("type") == "turn":
@@ -259,6 +269,9 @@ def _worker_main() -> None:
                     # Worker-side embedding (never on the delta path);
                     # the raw reasoning text is not persisted (C6).
                     ev["sketch"] = embedder.sketch(ev.get("reasoning_text"))
+            # Persist BEFORE the engine feed: the row mapping no longer
+            # serializes raw text (see _row_from_event), and the purge
+            # below keeps the raw fields out of engine state too.
             _persist_batch(batch)
             _batches += 1
             if _batches % PRUNE_EVERY == 0:
@@ -273,6 +286,17 @@ def _worker_main() -> None:
                 except Exception:
                     logger.exception(
                         "its-in-your-head: engine feed failed (state dropped)")
+            # Privacy scrub (v0.1.3 P0), AFTER the engine feed (feedback
+            # detection legitimately reads the raw turn text in memory):
+            # raw prompt/reasoning text lives in memory only — embed
+            # FIRST, purge LAST so the raw fields can never outlive this
+            # batch. Derived features (user_chars, reasoning_chars,
+            # sketch) are kept. No migration scrub: no real users
+            # pre-v0.1.3 (owner ruling).
+            for ev in batch:
+                if isinstance(ev, dict):
+                    ev.pop("user_message", None)
+                    ev.pop("reasoning_text", None)
         except Exception:
             # Failed-batch policy: report via the error path below and DROP
             # the batch — flush() does not retry. The dropped count is
@@ -305,25 +329,35 @@ def flush(timeout: float = 3.0) -> FlushResult:
     - Failure policy: a failed batch is reported via the error path and
       dropped, NOT retried; its events are counted in `failed` and make
       drained False for that window even though pending == 0.
-    - stop_worker() releases the barrier: when shutdown is set, flush
-      returns promptly with drained=False (unless genuinely everything
-      committed) instead of hanging to the timeout. The worker never
+    - stop_worker() releases the barrier: when shutdown is set AND no work
+      is in flight, flush returns promptly with drained=False (unless
+      everything is committed). While a live worker still has a dequeued
+      batch to commit, flush keeps waiting (bounded by timeout) instead of
+      early-returning work that was about to commit. The worker never
       calls flush(), so there is no self-deadlock.
     """
     deadline = time.monotonic() + timeout
     with _state_cv:
         failed_at_entry = _failed_events
         while True:
-            queued = _queue.qsize()
+            queued = len(_items)
             in_flight = _in_flight_events
             failed = _failed_events - failed_at_entry
             if queued == 0 and in_flight == 0:
                 return FlushResult(
                     drained=(failed == 0), pending=0, in_flight=0,
                     queued=0, failed=failed)
-            if _shutdown.is_set():
-                # Worker stopping releases the barrier promptly; pending
-                # work is reported, not claimed drained.
+            if _shutdown.is_set() and in_flight == 0:
+                # Worker stopping releases the barrier — but ONLY when no
+                # work is in flight: a live worker that has dequeued a batch
+                # will commit it and run its post-persist decrement (the
+                # finally), so returning early would report work that was
+                # about to commit as 'pending'. In-flight + stopping worker
+                # falls through to the bounded wait below; once the commit
+                # lands (in_flight -> 0) the drain check above succeeds.
+                # A DEAD worker can never have in_flight > 0 (the decrement
+                # precedes thread exit), so this branch is reachable only
+                # with a live worker or a crashed one.
                 return FlushResult(
                     drained=False, pending=queued + in_flight,
                     in_flight=in_flight, queued=queued, failed=failed)
@@ -332,8 +366,8 @@ def flush(timeout: float = 3.0) -> FlushResult:
                 return FlushResult(
                     drained=False, pending=queued + in_flight,
                     in_flight=in_flight, queued=queued, failed=failed)
-            # Short wait slice: enqueue() does not (and must not) signal
-            # _state_cv, so re-poll the queue size on wakeups.
+            # Short wait slice (enqueue/worker notify on state changes, but
+            # re-poll on every wakeup to stay correct regardless).
             _state_cv.wait(timeout=min(remaining, 0.02))
 
 

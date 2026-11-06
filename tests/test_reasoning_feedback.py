@@ -36,11 +36,8 @@ def _fresh_engine(tmp_path, monkeypatch):
     # DB I/O per turn, so a stale turn can create a DB file inside an
     # unrelated test (deterministic order-dependent failure of
     # test_register_wires_matrix_without_opening_db). Drain + reset.
-    while not metrics._queue.empty():
-        try:
-            metrics._queue.get_nowait()
-        except Exception:
-            break
+    while metrics._items:
+        metrics._items.popleft()
     try:
         import engine as _engine_mod
         _engine_mod._engine = None

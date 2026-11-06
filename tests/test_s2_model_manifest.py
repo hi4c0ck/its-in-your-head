@@ -345,6 +345,17 @@ def test_f3_repin_success_promotes_atomically(tmp_path, monkeypatch):
     promoted = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert promoted["revision"] == "a" * 40
     assert not staged.exists()
+    # v0.1.3: the RUNTIME artifacts are promoted into the live dir too —
+    # live bytes == staged bytes, so the promoted manifest's pins match
+    # what the runtime will actually load.
+    assert (model_dir / "onnx/model_int8.onnx").read_bytes() == b"staged-model_int8.onnx"
+    assert (model_dir / "tokenizer.json").read_bytes() == b"staged-tokenizer.json"
+    # Integration chain per the review: promoted manifest verifies the live
+    # dir, and the no-flag (verify-only) run passes against it.
+    assert fetch_mod.check_hashes(model_dir, promoted) == []
+    assert fetch_mod.main(["--model-dir", str(model_dir)]) == 0
+    # The staging dir is cleaned up after a successful promotion.
+    assert not (Path(str(model_dir) + ".staged")).exists()
 
 
 def test_f3_repin_smoke_failure_cleans_up(tmp_path, monkeypatch):
@@ -370,3 +381,58 @@ def test_f3_repin_verify_failure_cleans_up(tmp_path, monkeypatch):
     assert manifest_path.read_bytes() == before_bytes
     assert not manifest_path.with_name("manifest.staged.json").exists()
     assert not (Path(str(model_dir) + ".staged")).exists()
+
+
+def test_f3_repin_crash_before_manifest_leaves_mixed_state(tmp_path, monkeypatch):
+    import os as _os
+    """A crash AFTER artifact promotion but BEFORE the manifest rename must
+    leave: pinned manifest byte-identical, live dir holding the NEW bytes
+    (the documented mixed state), and the no-flag verify honestly reporting
+    exit 1 (new live bytes vs old pins)."""
+    fetch_mod = _load_tool("fetch_onnx_model")
+    manifest_path, model_dir = _f3_repin_harness(tmp_path, monkeypatch, fetch_mod)
+    pinned_bytes = manifest_path.read_bytes()
+    real_replace = _os.replace
+
+    def _crash_on_manifest(src, dst):
+        if Path(dst) == manifest_path:
+            raise OSError("simulated crash before manifest promotion")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(_os, "replace", _crash_on_manifest)
+    assert fetch_mod.main(["--repin", "--model-dir", str(model_dir)]) == 1
+    # Pinned manifest untouched.
+    assert manifest_path.read_bytes() == pinned_bytes
+    # Live artifacts already promoted (the documented mixed state).
+    assert (model_dir / "onnx/model_int8.onnx").read_bytes() == b"staged-model_int8.onnx"
+    # No-flag verify honestly flags the mismatch against the OLD pins.
+    assert fetch_mod.main(["--model-dir", str(model_dir)]) == 1
+    # Staged artifacts cleaned up on the failure path.
+    assert not manifest_path.with_name("manifest.staged.json").exists()
+    assert not (Path(str(model_dir) + ".staged")).exists()
+
+
+def test_f3_repin_removes_stale_live_artifacts(tmp_path, monkeypatch):
+    """Files the OLD variant set carried but the promoted set dropped must be
+    removed from the live dir, so it matches the promoted manifest exactly."""
+    fetch_mod = _load_tool("fetch_onnx_model")
+    manifest_path, model_dir = _f3_repin_harness(tmp_path, monkeypatch, fetch_mod)
+    pinned = json.loads(manifest_path.read_text(encoding="utf-8"))
+    pinned["variants"]["int8"]["files"]["onnx/legacy.txt"] = {"sha256": None, "size": None}
+    manifest_path.write_text(json.dumps(pinned, indent=2) + "\n", encoding="utf-8")
+    (model_dir / "onnx/legacy.txt").write_bytes(b"old")
+    # The staged variant resolves to the smaller set (new revision dropped
+    # onnx/legacy.txt).
+    def _variant_files(m, v=None):
+        files = m["variants"]["int8"]["files"]
+        if m.get("revision") == "a" * 40:
+            # Mutate the manifest's OWN map so the staged manifest (and the
+            # pin-recompute loop over it) sees the smaller set.
+            files.pop("onnx/legacy.txt", None)
+        return "int8", files
+
+    monkeypatch.setattr(fetch_mod, "variant_files", _variant_files)
+    assert fetch_mod.main(["--repin", "--model-dir", str(model_dir)]) == 0
+    assert not (model_dir / "onnx/legacy.txt").exists()
+    # The remaining live files are the promoted ones.
+    assert (model_dir / "tokenizer.json").read_bytes() == b"staged-tokenizer.json"

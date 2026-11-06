@@ -53,11 +53,8 @@ def _fresh_pipeline(tmp_path):
     metrics.start_worker()
     yield tmp_path / "s1.db"
     metrics.stop_worker()
-    while not metrics._queue.empty():
-        try:
-            metrics._queue.get_nowait()
-        except Exception:
-            break
+    while metrics._items:
+        metrics._items.popleft()
 
 
 def _wait_rows(db, n, timeout=10.0):

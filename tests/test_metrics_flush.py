@@ -151,16 +151,23 @@ def test_flush_failed_persist_honest_accounting(tmp_path, caplog):
 
 def test_stop_worker_releases_flush_barrier(tmp_path):
     """(d) worker stop releases a waiting flush (no hang); the blocked
-    in-flight batch is reported pending, not claimed drained."""
+    in-flight batch is reported pending, not claimed drained.
+
+    With the v0.1.3 flush contract, flush() only early-returns on shutdown
+    when in_flight == 0; while the gate still blocks the commit it stays
+    in its bounded wait and returns at its deadline with the honest
+    pending counts. The join/poll bounds below exceed the flush deadline
+    and stay generous under a loaded machine (no tight fixed windows that
+    flake on CI)."""
     metrics, db = _fresh(tmp_path)
     gate = _Gate(metrics)
     metrics.start_worker()
     try:
         metrics.enqueue(_ev(0))
         assert gate.entered.wait(10), "worker never entered persist"
-        t, box, done = _start_flush(metrics, timeout=30)
+        t, box, done = _start_flush(metrics, timeout=3)
         metrics.stop_worker(timeout=1)  # join times out; worker still gated
-        t.join(JOIN)
+        t.join(10)  # > flush's internal 3s deadline: the thread MUST exit
         assert not t.is_alive() and done.is_set(), "flush hung after stop"
         r = box["r"]
         assert r.drained is False
@@ -172,13 +179,13 @@ def test_stop_worker_releases_flush_barrier(tmp_path):
         # genuinely drained queue.
         gate.release.set()
         metrics.stop_worker(timeout=3)
-        deadline = 10
+        deadline = 30
         while _count(db) != 1 and deadline > 0:
             import time as _time
             _time.sleep(0.05)
             deadline -= 0.05
         assert _count(db) == 1, "worker never committed its in-flight batch"
-        r2 = metrics.flush(timeout=5)
+        r2 = metrics.flush(timeout=30)
         assert r2.drained and r2.pending == 0
         assert _count(db) == 1
     finally:

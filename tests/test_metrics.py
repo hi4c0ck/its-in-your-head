@@ -12,10 +12,10 @@ import struct
 def test_enqueue_accepts_events():
     import metrics
     importlib.reload(metrics)
-    before = metrics._queue.qsize()
+    before = len(metrics._items)
     metrics.enqueue({"type": "turn.start", "ts": 0.0})
-    assert metrics._queue.qsize() == before + 1
-    metrics._queue.get_nowait()
+    assert len(metrics._items) == before + 1
+    metrics._items.popleft()
 
 
 def test_sketch_shape_and_packing():
@@ -110,8 +110,10 @@ def test_worker_persists_events(tmp_path):
         turn = c.execute(
             "SELECT sketch, user_chars, user_message FROM events WHERE type='turn'"
         ).fetchone()
+        # v0.1.3 P0: raw prompts are NEVER persisted — user_message is
+        # NULL; the derived features (sketch, user_chars) survive.
         assert len(turn[0]) == embedder.DIM * 4, "turn rows carry the sketch blob"
-        assert turn[1] == 11 and turn[2] == "hello world"
+        assert turn[1] == 11 and turn[2] is None
         api = c.execute(
             "SELECT total_tokens, finish_reason, api_duration FROM events WHERE type='api'"
         ).fetchone()
