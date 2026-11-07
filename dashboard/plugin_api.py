@@ -20,8 +20,72 @@ import importlib
 import importlib.util
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Any, cast
+
+# The plugin-host child loads this file standalone (spec_from_file_location,
+# no parent package) with the plugin root OFF its sys.path, so both the
+# relative and the bare `storage` import fail there (the dashboard 502:
+# "No module named 'storage'"). Build the storage package under a unique
+# top-level name from the on-disk layout instead: no sys.path pollution, no
+# collision with any other `storage` module in the shared child process.
+# Safe because `storage` is stdlib-only and its __init__ uses relative
+# imports.
+#
+# Three load invariants:
+# 1. Pre-exec registration: __init__'s relative imports resolve the parent
+#    package through sys.modules DURING its own exec, so the package must be
+#    registered before exec_module (the child's op_asgi does the same).
+# 2. A CROSS-INSTANCE lock: op_asgi registers each concurrent plugin_api
+#    instance before its exec, so a post-restart burst of parallel pane
+#    polls can exec this file on several instances at once; a per-instance
+#    lock cannot serialize them. The lock lives in sys.modules under a
+#    private key so every instance of this file shares the same object —
+#    a thread that sees the registered name always sees a fully-exec'd
+#    module (the 04:40 "has no attribute 'database'" AttributeError 502s).
+# 3. Stale-submodule sweep on re-create: the import fast path skips the
+#    parent-attr binding for submodules already in sys.modules, so a fresh
+#    package must get fresh submodules.
+_STORAGE_ALIAS = "hermes_plugin_its_in_your_head_storage"
+# Cross-instance lock, shared through sys.modules: every racing exec of this
+# file calls setdefault on the same key, and CPython's dict.setdefault is a
+# single GIL-atomic operation, so all instances converge on ONE lock object.
+# With it, "the registered name exists" always implies "fully-exec'd module".
+# (Runtime-legal: sys.modules is a plain dict the import machinery only
+# looks up by the names it imports; the private lock key is inert to it. The
+# cast bridges the ModuleType annotation for type checkers.)
+_storage_load_lock: threading.Lock = cast(
+    "dict[str, Any]", sys.modules).setdefault(
+    _STORAGE_ALIAS + "_lock", threading.Lock())
+
+
+def _load_plugin_storage():
+    pkg_dir = Path(__file__).resolve().parent.parent / "storage"
+    with _storage_load_lock:
+        if _STORAGE_ALIAS in sys.modules:
+            return sys.modules[_STORAGE_ALIAS]
+        for key in [k for k in sys.modules
+                    if k.startswith(_STORAGE_ALIAS + ".")]:
+            del sys.modules[key]
+        spec = importlib.util.spec_from_file_location(
+            _STORAGE_ALIAS, pkg_dir / "__init__.py",
+            submodule_search_locations=[str(pkg_dir)],
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load plugin storage package at {pkg_dir}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[_STORAGE_ALIAS] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            # Never leave a half-initialized or broken package registered: a
+            # thread waiting on the lock would otherwise adopt it.
+            sys.modules.pop(_STORAGE_ALIAS, None)
+            raise
+        return module
+
 
 try:  # namespaced gateway import (agent half loads the plugin as a package)
     from ..storage import database as _database
@@ -32,29 +96,6 @@ except ImportError:
         from storage import database as _database
         from storage import migration as _migration
     except ImportError:
-        # The plugin-host child loads this file standalone: no parent package
-        # and the plugin root is NOT on its sys.path, so both the relative and
-        # the bare `storage` import fail there (the dashboard 502: "No module
-        # named 'storage'"). Load the storage package under a unique top-level
-        # name from the on-disk layout: no sys.path pollution, no collision
-        # with any other `storage` module in the shared child process. Safe
-        # because `storage` is stdlib-only and its __init__ uses relative
-        # imports; the sys.modules cache keeps one instance per child process.
-        def _load_plugin_storage():
-            name = "hermes_plugin_its_in_your_head_storage"
-            pkg_dir = Path(__file__).resolve().parent.parent / "storage"
-            if name not in sys.modules:
-                spec = importlib.util.spec_from_file_location(
-                    name, pkg_dir / "__init__.py",
-                    submodule_search_locations=[str(pkg_dir)],
-                )
-                if spec is None or spec.loader is None:
-                    raise ImportError(f"cannot load plugin storage package at {pkg_dir}")
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[name] = module
-                spec.loader.exec_module(module)
-            return sys.modules[name]
-
         _storage = _load_plugin_storage()
         _database = _storage.database
         _migration = _storage.migration
