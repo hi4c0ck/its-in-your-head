@@ -44,5 +44,8 @@ jobs:
       - name: Desktop contract tests
         run: node tests/test_desktop_petstate.mjs
 
+      - name: Desktop pulse contract tests
+        run: node tests/test_desktop_pulse.mjs
+
       - name: Desktop theme-compat tests
         run: node tests/test_desktop_themecompat.mjs
