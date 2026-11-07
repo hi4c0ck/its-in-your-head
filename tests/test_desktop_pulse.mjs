@@ -83,10 +83,17 @@ assert.ok(src.includes('color: isLive ? V_SEC : V_QUAT'),
 assert.ok(!src.includes("getContext('2d')"), 'canvas painting retired')
 assert.ok(!src.includes('drawPulse'), 'drawPulse removed')
 assert.ok(!src.includes('resolveColors'), 'resolveColors removed')
-assert.ok(!src.includes('ResizeObserver'), 'no ResizeObserver needed (layout engine sizes the grid)')
-assert.ok(!src.includes('useEffect'), 'no canvas re-draw effects left')
+assert.equal((src.match(/new ResizeObserver/g) || []).length, 1,
+  'exactly ONE ResizeObserver: frame-orientation read on the root div (narrow dock); drawing surfaces stay fixed-size')
+assert.equal((src.match(/useEffect\(/g) || []).length, 1,
+  'single useEffect CALL: root orientation detection — no canvas re-draw effects')
 assert.ok(src.includes('pulse.columns'), 'server columns still consumed (via pulseColumns)')
 assert.ok(src.includes('tool_name'), 'pulse rows stay dynamic (tool_name)')
+assert.ok(src.includes('NARROW_W'), 'narrow-dock threshold defined (sidebar frame)')
+assert.ok(src.includes("flex: narrow ? '1 1 30%' : undefined"),
+  'drift wraps 3x2 in the narrow dock (labels to tooltip, numbers stay)')
+assert.ok(src.indexOf('...(!narrow') > -1,
+  'header wordmark / status / I/O column collapse under the narrow dock (tooltips keep them reachable)')
 assert.ok(src.indexOf('// PULSE-START') < src.indexOf('function selectPulseRows'),
   'pure helpers live between the PULSE markers')
 console.log('ok ' + (++n) + ' - matrix structure assertions')

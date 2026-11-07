@@ -108,7 +108,7 @@ assert.ok(src.includes('data.series'), 'drift consumes per-axis series')
 assert.ok(src.includes('driftDelta'), 'drift renders per-axis deltas vs last snapshot')
 assert.ok(src.includes('V_DANGER'), 'danger token (V_DANGER) still governs negative drift + friction cells')
 assert.ok(src.includes('gridTemplateRows'),
-  'PULSE lane is a CSS-grid matrix structure (the layout engine sizes it; no ResizeObserver needed)')
+  'PULSE lane is a CSS-grid matrix structure (layout engine sizes it; the one root ResizeObserver only reads frame orientation)')
 assert.ok(src.includes('refetchInterval: PULSE_POLL_MS'), 'polling fallback stays mandatory')
 assert.ok(src.includes('refetchInterval: POLL_MS'), 'polling fallback stays on every route')
 

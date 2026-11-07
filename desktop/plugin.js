@@ -10,7 +10,7 @@
 //   live accelerator (ctx.socket is a no-op on OAuth remotes).
 // - layout budget 96px: 22 header/tabs, 48 main, 18 ticker, 8 separators.
 //   Overflow goes to the settings popover, never in-pane scrolling.
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { host, icons, useQuery, queryClient } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
@@ -20,6 +20,7 @@ const PULSE_POLL_MS = 15000
 // the old hourly heat lane used; POLL_MS polling below is the mandatory
 // fallback on every route.
 const IO_WIDTH = 220   // fixed I/O-frame column
+const NARROW_W = 480   // below this frame width the strip is docked narrow (sidebar): I/O column hidden, header collapses to essentials
 const IO_LINES = 4
 // PULSE matrix rows shown in the main lane: the lane is ~48px, so at most
 // 4 rows at a legible 10px pitch — the rest stay reachable through the
@@ -577,7 +578,7 @@ function driftDelta(series) {
   return typeof a === 'number' && typeof b === 'number' ? b - a : null
 }
 
-function DriftView({ data }) {
+function DriftView({ data, narrow }) {
   const series =
     data && data.series && typeof data.series === 'object' ? data.series : {}
   const axes = Object.keys(series)
@@ -594,7 +595,12 @@ function DriftView({ data }) {
   }
   return jsxs('div', {
     className: 'flex flex-1 items-center',
-    style: { gap: 10, minHeight: 0, overflow: 'hidden' },
+    style: {
+      gap: narrow ? '2px 6px' : 10,
+      minHeight: 0, overflow: 'hidden',
+      flexWrap: narrow ? 'wrap' : undefined,
+      rowGap: narrow ? 2 : undefined,
+    },
     children: axes.map((d, i) => {
       const delta = deltas[i]
       const mag = delta === null ? 0 : Math.min(1, Math.abs(delta))
@@ -602,9 +608,11 @@ function DriftView({ data }) {
       return jsxs('div', {
         key: d,
         className: 'flex flex-col',
-        style: { gap: 2, minWidth: 0 },
+        // Narrow dock: two rows of three (labels move into the tooltip —
+        // the numbers stay; full axis inspection lives in the workspace).
+        style: { gap: 2, minWidth: 0, flex: narrow ? '1 1 30%' : undefined, title: d },
         children: [
-          jsx('span', {
+          !narrow && jsx('span', {
             style: {
               fontSize: 8, color: V_QUAT, whiteSpace: 'nowrap',
               overflow: 'hidden', textOverflow: 'ellipsis',
@@ -1024,6 +1032,31 @@ function IconButton({ title, label, onClick, disabled }) {
 function Strip({ source, rest }) {
   const [tab, setTab] = useState('pulse')
   const [panel, setPanel] = useState(null) // null | 'settings' | 'help'
+  const rootRef = useRef(null)
+  const [narrow, setNarrow] = useState(false)
+  // Frame orientation: the layout engine hands us the box (wide bottom
+  // lane or narrow sidebar column) — we only READ its width, via the one
+  // ResizeObserver on the root. The fixed-size glyph/canvas contract is
+  // untouched: nothing here re-sizes a drawing surface, it just picks
+  // which elements earn a 300px-wide frame.
+  useEffect(() => {
+    const el = rootRef.current
+    if (!el) return undefined
+    let ro = null
+    const update = (w) => {
+      const n = w < NARROW_W
+      setNarrow((p) => (p === n ? p : n))
+    }
+    update(el.clientWidth)
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver((entries) => {
+        const e = entries[entries.length - 1]
+        update((e && e.contentRect && e.contentRect.width) || el.clientWidth)
+      })
+      ro.observe(el)
+    }
+    return () => { if (ro) ro.disconnect() }
+  }, [])
 
   const metricsQ = useQuery({
     queryKey: [source, 'iyh-metrics'],
@@ -1111,25 +1144,29 @@ function Strip({ source, rest }) {
           style: { gap: 8, minHeight: 0 },
           children: [
             jsx(PulseMatrix, { pulse: pulseQ.data }),
-            jsxs('div', {
-              className: 'flex flex-col justify-end overflow-hidden',
-              style: { width: IO_WIDTH, gap: 2 },
-              children: [
-                recent.length > 0
-                  ? recent.map((ev, i) => jsx(IoLine, { key: i, ev }))
-                  : jsx('span', {
-                      style: { fontSize: 10, color: 'var(--ui-text-quaternary)' },
-                      children: metrics && metrics.events > 0
-                        ? 'I/O frames arrive with each agent call'
-                        : 'no events yet — ticks on your next agent turn',
-                    }),
-              ],
-            }),
+            // The fixed I/O-frame column only earns a wide frame: in a
+            // narrow dock the matrix takes the full width instead.
+            ...(!narrow
+              ? [jsxs('div', {
+                  className: 'flex flex-col justify-end overflow-hidden',
+                  style: { width: IO_WIDTH, gap: 2 },
+                  children: [
+                    recent.length > 0
+                      ? recent.map((ev, i) => jsx(IoLine, { key: i, ev }))
+                      : jsx('span', {
+                          style: { fontSize: 10, color: 'var(--ui-text-quaternary)' },
+                          children: metrics && metrics.events > 0
+                            ? 'I/O frames arrive with each agent call'
+                            : 'no events yet — ticks on your next agent turn',
+                        }),
+                  ],
+                })]
+              : []),
           ],
         })
       : tab === 'portrait'
         ? jsx(PortraitView, { data: portraitQ.data, drift: driftQ.data })
-        : jsx(DriftView, { data: driftQ.data })
+        : jsx(DriftView, { data: driftQ.data, narrow })
 
   const popover = panel && jsxs('div', {
     style: {
@@ -1186,6 +1223,7 @@ function Strip({ source, rest }) {
   })
 
   return jsxs('div', {
+    ref: rootRef,
     className: 'flex h-full flex-col',
     style: {
       position: 'relative',
@@ -1201,14 +1239,20 @@ function Strip({ source, rest }) {
         style: { height: 22, fontSize: 11, gap: 6, flexShrink: 0 },
         children: [
           jsx('span', {
-            title: 'pet: ' + pet,
+            // Narrow dock: the wordmark and status text yield to the tabs —
+            // both move into this tooltip.
+            title: narrow
+              ? "It's in Your Head · pet: " + pet + ' · ' + status
+              : 'pet: ' + pet,
             style: {
               fontFamily: 'var(--ui-font-mono, monospace)', fontSize: 10,
               color: 'var(--ui-text-quaternary)', width: 36, flexShrink: 0,
             },
             children: petGlyph(pet),
           }),
-          jsx('span', { style: { fontWeight: 500, flexShrink: 0 }, children: "It's in Your Head" }),
+          ...(!narrow
+            ? [jsx('span', { style: { fontWeight: 500, flexShrink: 0 }, children: "It's in Your Head" })]
+            : []),
           jsxs('div', {
             className: 'flex items-center',
             style: { gap: 2, flexShrink: 0 },
@@ -1217,15 +1261,17 @@ function Strip({ source, rest }) {
               onClick: () => setTab(t.id),
             })),
           }),
-          jsx('span', {
-            title: status,
-            style: {
-              flex: 1, textAlign: 'right', fontSize: 10,
-              color: 'var(--ui-text-quaternary)',
-              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-            },
-            children: status,
-          }),
+          ...(!narrow
+            ? [jsx('span', {
+                title: status,
+                style: {
+                  flex: 1, textAlign: 'right', fontSize: 10,
+                  color: 'var(--ui-text-quaternary)',
+                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                },
+                children: status,
+              })]
+            : [jsx('span', { style: { flex: 1, flexShrink: 1 }, children: '' })]),
           jsx(IconButton, {
             title: 'Help — about this strip',
             label: '?',
