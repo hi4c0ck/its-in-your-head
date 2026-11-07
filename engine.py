@@ -109,6 +109,15 @@ class Engine:
         self._pattern_turns = 0
         self._pattern_top_counts: dict = {}
         self._pattern_last_evidence: dict = {}
+        # Reinforced-bank dirty set (L10, L5 open item (a)): in-memory mirror
+        # of the persisted pattern_bank rows, loaded once at bootstrap.
+        # _reinforced_cache: {name: {prompt_anchor, agent_anchor, evidence,
+        # updated_at}} (never raw text). _reinforced_dirty: names this
+        # process reinforced since bootstrap; membership never triggers a
+        # DB re-read within this process. _reinforced_loaded: bootstrap done.
+        self._reinforced_cache: dict = {}
+        self._reinforced_dirty: set = set()
+        self._reinforced_loaded = False
         self._thresholds = {
             k: s.get(f"pulse.thresholds.{k}")
             for k in ("goal", "good", "friction")}
@@ -268,6 +277,9 @@ class Engine:
         """Reinforced anchors from the DB (D3 route A). Fault-isolated:
         any failure degrades to {} (preset-only bank), never breaks
         scoring. Worker-side only; the table is tiny.
+
+        Called once at bootstrap (:meth:`_reinforced_bank`); scored turns
+        use the in-memory cache, never this method.
         """
         try:
             _db, _mig = self._storage()
@@ -282,6 +294,29 @@ class Engine:
                 "its-in-your-head: reinforced bank load failed")
             return {}
 
+    def _reinforced_bank(self, _patterns) -> dict:
+        """In-memory reinforced bank with dirty-set discipline (L10).
+
+        Bootstrap (first scored turn of the process): load once from the
+        DB via :meth:`_load_reinforced_bank` (fault-isolated, {} on
+        failure). Every scored turn afterwards returns the in-memory
+        cache — no per-turn DB read, even for names this process
+        reinforced (``_reinforced_dirty`` never triggers a re-read).
+
+        Cross-process semantics (accepted staleness): a reinforcement
+        persisted by ANOTHER process is picked up only at the next
+        bootstrap — i.e. a fresh Engine (next process start) or an
+        explicit :meth:`reset` — never mid-process. This process's own
+        reinforcements are applied to the cache directly at persist
+        time (see :meth:`_maybe_reinforce_and_persist`), so the next
+        turn scores against them without any DB round-trip.
+        """
+        if self._reinforced_loaded:
+            return self._reinforced_cache
+        self._reinforced_loaded = True  # guard first: no retry loops
+        self._reinforced_cache = self._load_reinforced_bank(_patterns)
+        return self._reinforced_cache
+
     def _maybe_reinforce_and_persist(self, bank, top_entry,
                                      reaction_vector, _patterns) -> None:
         """Reinforce the top pattern with the reaction vector and persist
@@ -290,6 +325,15 @@ class Engine:
         pattern_affinity_history writer — a failure must not touch the
         live pipeline. Gate: settings ``perception.reinforce`` and the
         top pattern's amplification >= the configured minimum.
+
+        In-memory mirror (L10): after the persist, the fresh entry is
+        written straight into ``_reinforced_cache`` and the name is
+        marked in ``_reinforced_dirty`` — the next scored turn sees the
+        fresh vectors without any DB read. The dirty mark never causes
+        a DB re-read in this process (see :meth:`_reinforced_bank`).
+        ``updated_at`` mirrors the persist's monotonic rule (wall clock,
+        bumped past the prior value when needed) so the cache matches
+        what a per-turn DB read would have supplied.
         """
         try:
             if reaction_vector is None:
@@ -310,6 +354,18 @@ class Engine:
                     conn, {name: reinforced_entry})
             finally:
                 conn.close()
+            now = time.time()
+            prior = self._reinforced_cache.get(name) or {}
+            prior_updated = prior.get("updated_at")
+            if prior_updated is not None and now <= prior_updated:
+                now = prior_updated + 0.001
+            self._reinforced_cache[name] = {
+                "prompt_anchor": list(reinforced_entry["prompt_anchor"]),
+                "agent_anchor": list(reinforced_entry["agent_anchor"]),
+                "evidence": int(reinforced_entry.get("evidence") or 0),
+                "updated_at": now,
+            }
+            self._reinforced_dirty.add(name)
         except Exception:
             logger.exception(
                 "its-in-your-head: pattern reinforce persist failed")
@@ -334,7 +390,7 @@ class Engine:
             return
         try:
             backend = self._get_backend()
-            reinforced = self._load_reinforced_bank(_patterns)
+            reinforced = self._reinforced_bank(_patterns)
             bank = _patterns.build_pattern_bank(
                 backend, getattr(backend, "model_version", "unknown"),
                 custom_patterns=self._settings.get(
@@ -822,11 +878,28 @@ class Engine:
             self._pattern_turns = 0
             self._pattern_top_counts.clear()
             self._pattern_last_evidence.clear()
+            # Reinforced dirty set (L10): reset is a re-bootstrap path —
+            # clear the dirty marks and re-read the cache from the DB
+            # below, so cross-process persists become visible again.
+            self._reinforced_cache = {}
+            self._reinforced_dirty = set()
+            self._reinforced_loaded = False
             self.protos = pulse.PrototypeStore(
                 cap=int(merged.get("pulse.prototype_cap", 8)),
                 min_labeled=int(merged.get("pulse.min_labeled", 3)))
             self.portrait = _portrait_mod.Portrait(
                 retain_days=int(merged.get("observation.retain_days", 90)))
+        # Re-bootstrap the reinforced cache from the DB (fault-isolated:
+        # failure degrades to {} via _load_reinforced_bank's discipline).
+        try:
+            try:
+                from .perception import patterns as _patterns
+            except ImportError:
+                from perception import patterns as _patterns
+            self._reinforced_bank(_patterns)
+        except Exception:
+            logger.exception(
+                "its-in-your-head: reinforced cache re-bootstrap failed")
         # Registry rows live in the DB; the route's _reset_dataset() wipes
         # those — the registry re-reads lazily on the next observe.
 
