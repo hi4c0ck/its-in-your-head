@@ -11,7 +11,7 @@
 // - layout budget 96px: 22 header/tabs, 48 main, 18 ticker, 8 separators.
 //   Overflow goes to the settings popover, never in-pane scrolling.
 import { useState } from 'react'
-import { host, useQuery, queryClient } from '@hermes/plugin-sdk'
+import { host, icons, useQuery, queryClient } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const POLL_MS = 5000
@@ -490,16 +490,18 @@ function glyphTrackGroup(layer, steps, unfold, interpreted) {
   out += '</g>'
   return out
 }
-function buildGlyph(input) {
+function buildGlyphAt(input, size) {
+  const s = typeof size === 'number' && Number.isFinite(size) && size > 0 ? Math.round(size) : 48
+  const svgOpen = '<svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" width="' + s + '" height="' + s + '" role="img">'
   const src = input && typeof input === 'object' ? (input.portrait && typeof input.portrait === 'object' && !input.dimensions ? input.portrait : input) : {}
   const available = src.available !== false
   const userSteps = glyphTrackSteps(src.user)
   const agentSteps = glyphTrackSteps(src.agent)
-  const userPresent = userSteps.map((s) => s >= 0)
-  const agentPresent = agentSteps.map((s) => s >= 0)
+  const userPresent = userSteps.map((s2) => s2 >= 0)
+  const agentPresent = agentSteps.map((s2) => s2 >= 0)
   const anyUser = userPresent.some(Boolean)
   const anyAgent = agentPresent.some(Boolean)
-  const minimal = '<svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" width="48" height="48" role="img"><g data-layer="observed" opacity="0.25"><circle cx="24" cy="24" r="8" fill="none" stroke="' + GLYPH_STROKE + '" stroke-width="1"/></g></svg>'
+  const minimal = svgOpen + '<g data-layer="observed" opacity="0.25"><circle cx="24" cy="24" r="8" fill="none" stroke="' + GLYPH_STROKE + '" stroke-width="1"/></g></svg>'
   if (!available || (!anyUser && !anyAgent)) return minimal
   const present = GLYPH_DIMS.map((_, i) => userPresent[i] || agentPresent[i])
   const evStep = glyphEvidenceStep(glyphEvidenceCount(input))
@@ -510,7 +512,11 @@ function buildGlyph(input) {
   if (anyUser) body += glyphTrackGroup('observed', userSteps, unfold, false)
   if (anyAgent) body += glyphTrackGroup('interpreted', agentSteps, unfold, true)
   if (!body) return minimal
-  return '<svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" width="48" height="48" role="img">' + body + '</svg>'
+  return svgOpen + body + '</svg>'
+}
+// buildGlyph: the 48px compact case (byte-identical to the pre-refactor output).
+function buildGlyph(input) {
+  return buildGlyphAt(input, 48)
 }
 // PORTRAIT-GLYPH-END
 
@@ -653,6 +659,329 @@ function settingValue(settings, key) {
   return Array.isArray(cur) ? cur.length + ' rules' : String(cur)
 }
 
+// WORKSPACE-START
+// Pure expanded-workspace helpers (no DOM/React/globals): sparkline
+// geometry for the DRIFT history view. Deterministic: identical series
+// -> identical points; values are rounded to 0.1 units so sub-pixel
+// drift never changes the output.
+const SPARK_W = 96
+const SPARK_H = 24
+function driftSparkline(values) {
+  if (!Array.isArray(values)) return null
+  const nums = values.filter((v) => typeof v === 'number' && Number.isFinite(v))
+  if (nums.length < 2) return null
+  const min = Math.min.apply(null, nums)
+  const max = Math.max.apply(null, nums)
+  const span = max - min || 1
+  const pad = 2
+  const n = nums.length
+  const points = nums.map((v, i) => {
+    const x = (pad + (i * (SPARK_W - 2 * pad)) / (n - 1)).toFixed(1)
+    const y = (SPARK_H - pad - ((v - min) / span) * (SPARK_H - 2 * pad)).toFixed(1)
+    return x + ',' + y
+  })
+  return { points: points.join(' '), delta: Math.round((nums[n - 1] - nums[n - 2]) * 1000) / 1000, count: n }
+}
+// WORKSPACE-END
+
+// ExpandedWorkspace — the full inspection surface opened by the compact
+// instrument's single expand icon (host.openWorkspace). Same three views,
+// same visual language, same data (the shared React Query client / keys
+// below — no second observer, engine or collector). The extra space buys
+// information density, not decoration: the complete tool matrix, the
+// portrait as the main visual with its six measurements as inspection
+// (never the portrait itself), and readable drift history.
+const WS_WORKSPACE_ID = 'its-in-your-head-workspace'
+
+function ExpandedPulse({ pulse }) {
+  const columns = pulseColumns(pulse)
+  const rows = pulse && Array.isArray(pulse.rows) ? pulse.rows : []
+  const cellText = (cell) => {
+    if (!cell || typeof cell !== 'object') return '—'
+    const state = String(cell.state || 'neutral')
+    if (state === 'ready') return cell.level === 'strong' ? 'ready · strong' : 'ready · weak'
+    return state
+  }
+  const cellTip = (col, cell, row) => {
+    const v = col === 'live' ? pulseLiveValue(row) : pulseCellValue(cell)
+    let t = col + ' ' + (v === null ? 'neutral (no evidence)' : String(Math.round(v * 100) / 100))
+    if (col === 'friction' && cell && typeof cell === 'object') {
+      if (cell.user !== null && cell.user !== undefined) t += ' · user ' + String(Math.round(cell.user * 100) / 100)
+      if (cell.objective !== null && cell.objective !== undefined) t += ' · objective ' + String(Math.round(cell.objective * 100) / 100)
+    }
+    return t
+  }
+  if (rows.length === 0) {
+    return jsx('div', {
+      className: 'flex flex-1 items-center justify-center',
+      style: { fontSize: 10, color: V_QUAT, fontFamily: 'var(--ui-font-mono, monospace)', letterSpacing: 1 },
+      children: 'PULSE · no tool rows yet — rows appear as tools are observed',
+    })
+  }
+  const cellBase = {
+    fontSize: 8, fontFamily: 'var(--ui-font-mono, monospace)',
+    color: V_QUAT, textAlign: 'center', letterSpacing: 0.5,
+  }
+  return jsxs('div', {
+    className: 'flex-1',
+    style: { minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column' },
+    children: [
+      jsxs('div', {
+        className: 'flex',
+        style: { gap: 8, padding: '4px 0', borderBottom: '1px solid ' + V_STROKE, flexShrink: 0 },
+        children: [
+          jsx('span', { style: Object.assign({ flex: '0 0 120px' }, cellBase, { color: V_SEC }), children: 'TOOL' }),
+          columns.map((c) => jsx('span', {
+            key: c,
+            style: Object.assign({ flex: 1 }, cellBase, { color: c === 'friction' ? V_DANGER : V_SEC, fontWeight: 600 }),
+            children: c.toUpperCase(),
+          })),
+        ],
+      }),
+      rows.map((row, ri) => {
+        const tool = String((row && row.tool_name) || (row && row.tool) || '—')
+        const liveV = pulseLiveValue(row)
+        const isLive = liveV !== null
+        return jsxs('div', {
+          key: ri,
+          className: 'flex items-center',
+          style: { gap: 8, padding: '5px 0', borderBottom: '1px solid ' + V_STROKE, flexShrink: 0 },
+          children: [
+            jsx('span', {
+              className: 'overflow-hidden',
+              style: { flex: '0 0 120px', fontSize: 9, color: isLive ? V_SEC : V_QUAT, fontFamily: 'var(--ui-font-mono, monospace)' },
+              title: tool,
+              children: tool.slice(0, 18),
+            }),
+            columns.map((c) => {
+              const cell = c === 'live' ? null : row ? row[c] : null
+              const v = c === 'live' ? liveV : pulseCellValue(cell)
+              const a = v === null || v <= 0 ? 0 : 0.12 + 0.88 * v
+              return jsxs('div', {
+                key: c,
+                className: 'flex flex-col',
+                style: { flex: 1, gap: 2, minWidth: 0 },
+                title: cellTip(c, cell, row),
+                children: [
+                  jsx('div', {
+                    style: { height: 5, borderRadius: 1, background: c === 'friction' ? V_DANGER : V_ACCENT, opacity: a },
+                  }),
+                  c === 'live'
+                    ? jsx('span', { style: Object.assign({}, cellBase, { color: isLive ? V_SEC : V_QUAT }), children: isLive ? String(Math.round(liveV * 100) / 100) : '—' })
+                    : jsx('span', { style: Object.assign({}, cellBase, { color: cell && cell.state === 'ready' ? V_SEC : V_QUAT }), children: cellText(cell) }),
+                ],
+              })
+            }),
+          ],
+        })
+      }),
+    ],
+  })
+}
+
+function ExpandedPortrait({ data, drift }) {
+  const dims = data && data.dimensions && typeof data.dimensions === 'object' ? Object.keys(data.dimensions) : []
+  const hasEvidence = !!(data && data.available) && dims.some((d) =>
+    clamp01(data.user && data.user[d]) !== null || clamp01(data.agent && data.agent[d]) !== null)
+  let evidenceCount = 0
+  if (drift && drift.series && typeof drift.series === 'object') {
+    for (const d of Object.keys(drift.series)) {
+      const s = drift.series[d]
+      if (Array.isArray(s) && s.length > evidenceCount) evidenceCount = s.length
+    }
+  }
+  const glyph = buildGlyphAt({
+    available: data && data.available,
+    dimensions: data && data.dimensions,
+    user: data && data.user,
+    agent: data && data.agent,
+    confidence: data && data.confidence,
+    evidenceCount,
+  }, 160)
+  const num = (v) => (v === null || typeof v !== 'number' || !Number.isFinite(v) ? '—' : String(Math.round(v * 100) / 100))
+  const axes = dims.length > 0 ? dims : GLYPH_DIMS
+  return jsxs('div', {
+    className: 'flex-1',
+    style: { minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, padding: '8px 0' },
+    children: [
+      hasEvidence
+        ? jsx('div', {
+            title: 'portrait glyph — the accumulated resemblance; not a measurement',
+            style: { width: 160, height: 160, flexShrink: 0 },
+            dangerouslySetInnerHTML: { __html: glyph },
+          })
+        : jsx('span', {
+            style: { fontSize: 10, color: V_QUAT, fontFamily: 'var(--ui-font-mono, monospace)', letterSpacing: 1 },
+            children: 'PORTRAIT · no data yet — evidence empty',
+          }),
+      // Inspection layer: the six measurements behind the glyph. They are
+      // evidence, not the portrait — kept below the glyph, in its own table.
+      jsxs('div', {
+        style: { width: '100%', maxWidth: 480, fontSize: 8, fontFamily: 'var(--ui-font-mono, monospace)' },
+        children: [
+          jsxs('div', {
+            className: 'flex',
+            style: { gap: 8, padding: '3px 0', borderBottom: '1px solid ' + V_STROKE, color: V_SEC, letterSpacing: 1 },
+            children: [
+              jsx('span', { style: { flex: '0 0 140px' }, children: 'DIMENSION' }),
+              jsx('span', { style: { flex: 1, textAlign: 'right' }, children: 'OBSERVED' }),
+              jsx('span', { style: { flex: 1, textAlign: 'right' }, children: 'INTERPRETED' }),
+              jsx('span', { style: { flex: 1, textAlign: 'right' }, children: 'CONF' }),
+            ],
+          }),
+          axes.map((d) => jsxs('div', {
+            key: d,
+            className: 'flex',
+            style: { gap: 8, padding: '3px 0', borderBottom: '1px solid ' + V_STROKE, color: V_QUAT },
+            children: [
+              jsx('span', { style: { flex: '0 0 140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: d, children: d }),
+              jsx('span', { style: { flex: 1, textAlign: 'right', color: V_SEC }, children: num(data && data.user && data.user[d]) }),
+              jsx('span', { style: { flex: 1, textAlign: 'right', color: V_SEC }, children: num(data && data.agent && data.agent[d]) }),
+              jsx('span', { style: { flex: 1, textAlign: 'right' }, children: num(data && data.confidence && data.confidence[d]) }),
+            ],
+          })),
+          jsx('div', {
+            style: { padding: '3px 0', color: V_QUAT, letterSpacing: 1 },
+            children: evidenceCount > 0 ? evidenceCount + ' evidence snapshots · observed track persisted, interpreted where the agent recorded it' : 'no evidence snapshots yet',
+          }),
+        ],
+      }),
+    ],
+  })
+}
+
+function ExpandedDrift({ data }) {
+  const series = data && data.series && typeof data.series === 'object' ? data.series : {}
+  const axes = Object.keys(series)
+  if (!(data && data.available) || axes.length === 0) {
+    return jsx('div', {
+      className: 'flex flex-1 items-center justify-center',
+      style: { fontSize: 10, color: V_QUAT, fontFamily: 'var(--ui-font-mono, monospace)', letterSpacing: 1 },
+      children: 'DRIFT · no data yet — need 2 snapshots',
+    })
+  }
+  return jsxs('div', {
+    className: 'flex-1',
+    style: { minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, padding: '6px 0' },
+    children: axes.map((d) => {
+      const spark = driftSparkline(series[d])
+      const delta = driftDelta(series[d])
+      const neg = delta !== null && delta < 0
+      return jsxs('div', {
+        key: d,
+        className: 'flex items-center',
+        style: { gap: 10, borderBottom: '1px solid ' + V_STROKE, paddingBottom: 6 },
+        children: [
+          jsx('span', {
+            style: { flex: '0 0 110px', fontSize: 9, color: V_SEC, fontFamily: 'var(--ui-font-mono, monospace)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+            title: d,
+            children: d,
+          }),
+          spark && jsx('svg', {
+            viewBox: '0 0 ' + SPARK_W + ' ' + SPARK_H,
+            style: { flex: 1, maxWidth: 420, height: SPARK_H, minWidth: 60 },
+            children: [
+              jsx('line', { x1: 0, y1: SPARK_H - 0.5, x2: SPARK_W, y2: SPARK_H - 0.5, stroke: V_STROKE, 'stroke-width': 1 }),
+              jsx('polyline', {
+                points: spark.points, fill: 'none', stroke: V_ACCENT,
+                'stroke-width': 1.5, 'stroke-linejoin': 'round', style: { opacity: 0.9 },
+              }),
+            ],
+          }),
+          jsx('span', {
+            style: { flex: '0 0 64px', textAlign: 'right', fontSize: 9, fontFamily: 'var(--ui-font-mono, monospace)', color: delta === null ? V_QUAT : (neg ? V_DANGER : V_SEC) },
+            children: delta === null ? '—' : (neg ? '−' : '+') + Math.abs(delta).toFixed(2),
+          }),
+          jsx('span', { style: { flex: '0 0 48px', textAlign: 'right', fontSize: 8, color: V_QUAT, fontFamily: 'var(--ui-font-mono, monospace)' }, children: String(series[d].length) + ' pts' }),
+        ],
+      })
+    }),
+  })
+}
+
+function ExpandedWorkspace({ source, rest }) {
+  const [tab, setTab] = useState('pulse')
+  // Same query keys as the compact instrument -> the app's single React
+  // Query client dedupes and both surfaces share one cache (one observer
+  // set per key, never a second collector).
+  const metricsQ = useQuery({
+    queryKey: [source, 'iyh-metrics'],
+    queryFn: () => rest('/metrics'),
+    refetchInterval: POLL_MS,
+    retry: false,
+  })
+  const pulseQ = useQuery({
+    queryKey: [source, 'iyh-pulse'],
+    queryFn: () => rest('/pulse'),
+    refetchInterval: PULSE_POLL_MS,
+    retry: false,
+  })
+  const portraitQ = useQuery({
+    queryKey: [source, 'iyh-portrait'],
+    queryFn: () => rest('/portrait').catch(() => null),
+    refetchInterval: POLL_MS,
+    retry: false,
+  })
+  const driftQ = useQuery({
+    queryKey: [source, 'iyh-drift'],
+    queryFn: () => rest('/drift').catch(() => null),
+    refetchInterval: POLL_MS,
+    retry: false,
+  })
+  const metrics = metricsQ.data
+  const live = !!metrics
+  const statusText = !metrics
+    ? (metricsQ.isError ? backendErrorLabel(metricsQ.error) + ' · polling continues' : 'waiting for first read…')
+    : metrics.events + ' events · ' + fmtTokens(metrics.total_tokens) + ' tok'
+  return jsxs('div', {
+    className: 'flex h-full flex-col',
+    style: {
+      padding: '6px 12px', gap: 6, minHeight: 0,
+      borderTop: '1px solid ' + V_STROKE,
+      color: V_SEC,
+      fontFamily: 'var(--ui-font-mono, monospace)',
+      overflow: 'hidden',
+    },
+    children: [
+      jsxs('div', {
+        className: 'flex items-center',
+        style: { height: 22, flexShrink: 0, gap: 8, fontSize: 11 },
+        children: [
+          jsx('span', { style: { fontWeight: 600, letterSpacing: 1, fontSize: 10, flexShrink: 0 }, children: "IT'S IN YOUR HEAD" }),
+          jsxs('span', {
+            className: 'flex items-center',
+            style: { gap: 4, fontSize: 8, letterSpacing: 1, color: live ? V_SEC : V_QUAT, flexShrink: 0 },
+            children: [
+              jsx('span', {
+                style: { width: 6, height: 6, borderRadius: 3, display: 'inline-block', background: live ? V_ACCENT : V_STROKE },
+              }),
+              live ? 'LIVE' : (metricsQ.isError ? 'DEGRADED' : 'WAITING'),
+            ],
+          }),
+          jsxs('div', {
+            className: 'flex items-center',
+            style: { gap: 2, flexShrink: 0 },
+            children: TABS.map((t) => jsx(TabButton, {
+              key: t.id, tab: t, active: tab === t.id,
+              onClick: () => setTab(t.id),
+            })),
+          }),
+          jsx('span', {
+            title: statusText,
+            style: { flex: 1, textAlign: 'right', fontSize: 9, color: V_QUAT, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+            children: statusText,
+          }),
+        ],
+      }),
+      tab === 'pulse'
+        ? jsx(ExpandedPulse, { pulse: pulseQ.data })
+        : tab === 'portrait'
+          ? jsx(ExpandedPortrait, { data: portraitQ.data, drift: driftQ.data })
+          : jsx(ExpandedDrift, { data: driftQ.data }),
+    ],
+  })
+}
+
 const TABS = [
   { id: 'pulse', label: 'PULSE' },
   { id: 'portrait', label: 'PORTRAIT' },
@@ -677,14 +1006,16 @@ function TabButton({ tab, active, onClick }) {
   })
 }
 
-function IconButton({ title, label, onClick }) {
+function IconButton({ title, label, onClick, disabled }) {
   return jsx('button', {
     type: 'button',
     title,
-    onClick,
+    onClick: disabled ? undefined : onClick,
+    disabled: disabled || undefined,
     style: {
-      background: 'transparent', border: 'none', cursor: 'pointer',
+      background: 'transparent', border: 'none', cursor: disabled ? 'default' : 'pointer',
       color: 'var(--ui-text-quaternary)', fontSize: 12, padding: '0 3px', height: 22,
+      opacity: disabled ? 0.35 : 1, display: 'inline-flex', alignItems: 'center',
     },
     children: label,
   })
@@ -750,6 +1081,19 @@ function Strip({ source, rest }) {
   const nowSec = Date.now() / 1000
   const pet = petState(lastEv, nowSec)
   const ticker = tickerPhrase(lastEv, nowSec)
+
+  // The single expand control: open the expanded workspace tab (stable id
+  // -> re-fronting the existing tab instead of stacking duplicates; the
+  // tab's own Close routes through the host teardown). Feature-detect on
+  // older desktops and degrade gracefully.
+  const wsCan = typeof host.openWorkspace === 'function'
+  const openWs = () => {
+    if (!wsCan) return
+    host.openWorkspace(WS_WORKSPACE_ID, {
+      title: "It's in Your Head",
+      render: () => jsx(ExpandedWorkspace, { source: source, rest: rest }),
+    })
+  }
 
   const emptyState = (label, q) => jsxs('div', {
     className: 'flex flex-1 items-center justify-center',
@@ -891,6 +1235,14 @@ function Strip({ source, rest }) {
             title: 'Settings (read-only until /settings POST lands)',
             label: '⚙',
             onClick: () => setPanel(panel === 'settings' ? null : 'settings'),
+          }),
+          jsx(IconButton, {
+            title: wsCan
+              ? 'Open workspace — PULSE / PORTRAIT / DRIFT, expanded inspection'
+              : 'Workspace unavailable — this desktop build predates host.openWorkspace',
+            label: jsx(icons.Maximize, { size: 12 }),
+            onClick: openWs,
+            disabled: !wsCan,
           }),
         ],
       }),
