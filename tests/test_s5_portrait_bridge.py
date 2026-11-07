@@ -273,10 +273,17 @@ def test_portrait_fallback_perception_from_latest_row(agent_env, monkeypatch):
     assert all(v is None for v in shape["agent"].values())
     perc = shape["perception"]
     assert perc["perception_available"] is True
-    assert perc["patterns"] == [{
-        "name": "focused", "prompt_affinity": 0.42,
-        "agent_affinity": 0.81, "margin": 0.27, "amplification": 0.39,
-        "evidence": 3, "confidence": 0.75, "repeated": True}]
+    # E1: latest row PER top_pattern — focused surfaces from its own
+    # latest row (repeated: it also won at now-2, within its 3-prior
+    # window), exploratory from its own latest row (no prior window ->
+    # not repeated). Order = per-name latest ts desc.
+    assert perc["patterns"] == [
+        {"name": "focused", "prompt_affinity": 0.42,
+         "agent_affinity": 0.81, "margin": 0.27, "amplification": 0.39,
+         "evidence": 3, "confidence": 0.75, "repeated": True},
+        {"name": "exploratory", "prompt_affinity": 0.10,
+         "agent_affinity": 0.20, "margin": 0.05, "amplification": 0.10,
+         "evidence": 1, "confidence": 0.5, "repeated": False}]
     assert all(s == {"prompt": None, "agent": None}
                for s in perc["dim_signals"].values())
 

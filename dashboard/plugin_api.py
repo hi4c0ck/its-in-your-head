@@ -649,12 +649,16 @@ def _portrait_db_fallback(shape: dict, dims) -> dict:
     """Profile-DB fallback for the isolated dashboard half: bridges the
     persisted observed track through ``portrait_history`` (v3; the same
     resolver the /drift fallback uses) and the DERIVED perception numbers
-    through ``pattern_affinity_history`` (v5 latest row). Fills
+    through ``pattern_affinity_history`` (v5). Fills
     ``dimensions`` and ``user`` only — the confidence and interpreted
     (agent) per-dim tracks are not persisted, so they stay None, never
     invented; perception per-dim signals likewise stay None (no per-dim
-    columns are persisted) while ``patterns`` carries the latest row's
-    derived numbers. Empty table / all-NULL latest row / DB fault ->
+    columns are persisted) while ``patterns`` carries the LATEST ROW PER
+    top_pattern (E1 reader-side completeness: after a restart every
+    pattern that ever won a turn surfaces from its own most recent row,
+    deterministic per-name ts desc with id desc tie-break; the
+    overall-latest entry keeps the legacy card's repeated-window
+    semantics). Empty table / no table / DB fault ->
     the documented empty shape, never a 500."""
     if "perception" not in shape:
         shape["perception"] = _empty_perception(dims)
@@ -664,7 +668,8 @@ def _portrait_db_fallback(shape: dict, dims) -> dict:
         return shape
     try:
         _migration.schema_bootstrap(conn, _DDL)
-        # --- perception: latest derived row + up to 3 prior rows ---
+        # --- perception: LATEST ROW PER top_pattern (E1 reader-side
+        # completeness; the table is top-pattern-only by design — D4).
         try:
             prow = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
@@ -674,26 +679,33 @@ def _portrait_db_fallback(shape: dict, dims) -> dict:
                     "SELECT top_pattern, top_prompt_affinity, "
                     "top_agent_affinity, top_margin, top_amplification, "
                     "evidence, confidence FROM pattern_affinity_history "
-                    "ORDER BY ts DESC, id DESC LIMIT 4").fetchall()
+                    "WHERE top_pattern IS NOT NULL "
+                    "ORDER BY ts DESC, id DESC").fetchall()
                 if rows:
-                    latest_p = rows[0]
-                    top_pattern = latest_p[0]
-                    prior = rows[1:4]
-                    repeated = bool(
-                        top_pattern is not None and any(
-                            r[0] == top_pattern for r in prior))
+                    # Latest row PER name (first occurrence in ts-desc
+                    # order). Per-name 'repeated' = that name also won
+                    # within the up-to-3 rows immediately before its
+                    # own latest row — the card's window applied per
+                    # name; for the overall-latest row this is
+                    # byte-identical to the legacy card semantics.
+                    latest_idx: dict = {}
+                    for i, r in enumerate(rows):
+                        latest_idx.setdefault(r[0], i)
                     patterns = []
-                    if top_pattern is not None:
-                        patterns = [{
-                            "name": top_pattern,
-                            "prompt_affinity": latest_p[1],
-                            "agent_affinity": latest_p[2],
-                            "margin": latest_p[3],
-                            "amplification": latest_p[4],
-                            "evidence": int(latest_p[5]) if latest_p[5] is not None else 0,
-                            "confidence": latest_p[6],
-                            "repeated": repeated,
-                        }]
+                    for name in sorted(latest_idx, key=lambda n: latest_idx[n]):
+                        i = latest_idx[name]
+                        r = rows[i]
+                        prior = rows[i + 1:i + 4]
+                        patterns.append({
+                            "name": name,
+                            "prompt_affinity": r[1],
+                            "agent_affinity": r[2],
+                            "margin": r[3],
+                            "amplification": r[4],
+                            "evidence": int(r[5]) if r[5] is not None else 0,
+                            "confidence": r[6],
+                            "repeated": any(p[0] == name for p in prior),
+                        })
                     shape["perception"] = {
                         "patterns": patterns,
                         "dim_signals": {
