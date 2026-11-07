@@ -130,7 +130,7 @@ def test_simulated_turn_produces_rows(_fresh_pipeline):
     seg = _query(db, "SELECT reasoning_chars, reasoning_deltas, sketch "
                      "FROM events WHERE type='reasoning_seg'")[0]
     assert seg[0] == len("think more done") and seg[1] == 3
-    assert seg[2] is not None  # worker-side sketch of the segment
+    assert seg[2] is None  # D4 (2026-11-07): reasoning rows no longer carry the derived sketch BLOB — discard-after-scoring; raw text and derived vectors are engine-side only
 
     # C6: raw reasoning text and raw tool output never persisted.
     persisted = str(_query(db, "SELECT * FROM events"))

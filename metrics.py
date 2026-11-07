@@ -183,7 +183,11 @@ def _row_from_event(ev: dict) -> dict:
         # v0.1.3 P0: raw prompts are NEVER serialized (the column stays in
         # the schema, written NULL; the worker purges the raw field).
         "user_message": None,
-        "sketch": ev.get("sketch"),
+        # D4 discard-after-scoring: the derived reasoning sketch BLOB no
+        # longer persists — reasoning rows carry no sketch (the column
+        # stays for turn rows only). Reasoning is encoded engine-side
+        # from the in-memory raw text before the C6 purge.
+        "sketch": None if ev.get("type") == "reasoning_seg" else ev.get("sketch"),
         "tool_name": ev.get("tool_name"),
         "task_id": ev.get("task_id"),
         "tool_call_id": ev.get("tool_call_id"),
@@ -266,13 +270,19 @@ def _worker_main() -> None:
             for ev in batch:
                 if isinstance(ev, dict) and ev.get("type") == "turn":
                     ev["sketch"] = embedder.sketch(ev.get("user_message"))
-                elif isinstance(ev, dict) and ev.get("type") == "reasoning_seg":
-                    # Worker-side embedding (never on the delta path);
-                    # the raw reasoning text is not persisted (C6).
-                    ev["sketch"] = embedder.sketch(ev.get("reasoning_text"))
-            # Persist BEFORE the engine feed: the row mapping no longer
-            # serializes raw text (see _row_from_event), and the purge
-            # below keeps the raw fields out of engine state too.
+                # D4 discard-after-scoring: no Tier-0 sketch is attached
+                # to reasoning_seg events anymore. The raw reasoning text
+                # stays in memory only; the engine encodes it through the
+                # configured backend during the feed below (one shared
+                # vector space for prompt + reaction), and the C6 purge
+                # after the feed discards it. Nothing derived from the
+                # raw text persists as a BLOB.
+            # Persist BEFORE the engine feed: the row mapping above no
+            # longer serializes raw text (reasoning rows write a NULL
+            # sketch), and the purge below keeps the raw fields out of
+            # engine state too. The engine feed runs BEFORE the purge, so
+            # the raw reasoning text is still in memory for engine-side
+            # embedding (embed first — engine-side — purge last).
             _persist_batch(batch)
             _batches += 1
             if _batches % PRUNE_EVERY == 0:
@@ -287,13 +297,14 @@ def _worker_main() -> None:
                 except Exception:
                     logger.exception(
                         "its-in-your-head: engine feed failed (state dropped)")
-            # Privacy scrub (v0.1.3 P0), AFTER the engine feed (feedback
-            # detection legitimately reads the raw turn text in memory):
-            # raw prompt/reasoning text lives in memory only — embed
-            # FIRST, purge LAST so the raw fields can never outlive this
-            # batch. Derived features (user_chars, reasoning_chars,
-            # sketch) are kept. No migration scrub: no real users
-            # pre-v0.1.3 (owner ruling).
+            # Privacy scrub (v0.1.3 P0), AFTER the engine feed: raw
+            # prompt/reasoning text lives in memory only — embed FIRST
+            # (reasoning via the engine-side configured backend during
+            # the feed above), purge LAST so the raw fields can never
+            # outlive this batch. Derived features (user_chars,
+            # reasoning_chars, turn sketch) are kept; reasoning rows
+            # carry no sketch BLOB (D4). No migration scrub: no real
+            # users pre-v0.1.3 (owner ruling).
             for ev in batch:
                 if isinstance(ev, dict):
                     ev.pop("user_message", None)

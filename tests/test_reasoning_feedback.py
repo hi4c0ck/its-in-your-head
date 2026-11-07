@@ -54,7 +54,7 @@ def _reasoning(text="Brainstorm every option, even wild ones, "
                     "explore alternatives and think sideways", ts=None):
     return {"type": "reasoning_seg", "ts": ts or time.time(),
             "session_id": "s1", "turn_id": "t1",
-            "sketch": embedder.sketch(text),
+            "reasoning_text": text,
             "reasoning_chars": len(text), "reasoning_deltas": 3}
 
 

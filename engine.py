@@ -83,6 +83,14 @@ class Engine:
         self._interpreted_last_confidence = None
         self._anchor_vectors = None
         self._anchor_backend = None
+        # Pattern-perception state (third portrait view):
+        # prompt vectors cached per turn for (prompt, reaction) pairing,
+        # top-pattern tallies + last-evidence timestamps for confidence.
+        # Vectors/numbers only — never raw text is stored here.
+        self._prompt_vectors: dict = {}
+        self._pattern_turns = 0
+        self._pattern_top_counts: dict = {}
+        self._pattern_last_evidence: dict = {}
         self._thresholds = {
             k: s.get(f"pulse.thresholds.{k}")
             for k in ("goal", "good", "friction")}
@@ -185,24 +193,184 @@ class Engine:
         self._anchor_backend = backend
         return vectors
 
+    # -- pattern perception (third view, worker side only) ------------------ #
+    def _cache_prompt_vector(self, turn_id, vector) -> None:
+        """Cache one prompt vector keyed by turn (bounded; newest wins)."""
+        if vector is None:
+            return
+        key = str(turn_id) if turn_id is not None else "__last__"
+        self._prompt_vectors[key] = list(vector)
+        self._prompt_vectors["__last__"] = list(vector)
+        while len(self._prompt_vectors) > 34:  # 32 turns + __last__ slot
+            oldest = next(iter(self._prompt_vectors))
+            if oldest == "__last__":
+                break
+            self._prompt_vectors.pop(oldest, None)
+
+    def _lookup_prompt_vector(self, turn_id):
+        key = str(turn_id) if turn_id is not None else "__last__"
+        found = self._prompt_vectors.get(key)
+        if found is not None:
+            return found
+        return self._prompt_vectors.get("__last__")
+
+    def _pattern_confidence(self, name, evidence_n, now) -> float:
+        """confidence_from_evidence with plain age in seconds.
+
+        n = the pattern's accumulated evidence count (portrait third view);
+        agreement = fraction of scored turns in which this pattern was the
+        top pattern (first-principles: a pattern that keeps winning the
+        turn is more reliable than one that wins once); age = now minus
+        the pattern's last-evidence timestamp, in plain seconds (never an
+        epoch value, never the now_s argument). ``confidence_from_evidence``
+        treats sub-1e8 values as a plain age, which is what we pass.
+        """
+        try:
+            try:
+                from .perception.patterns import confidence_from_evidence
+            except ImportError:
+                from perception.patterns import confidence_from_evidence
+        except Exception:
+            return 0.0
+        turns = self._pattern_turns
+        agreement = (self._pattern_top_counts.get(name, 0) / turns
+                     if turns else 0.0)
+        last = self._pattern_last_evidence.get(name)
+        age = 0.0
+        if last is not None:
+            try:
+                age = max(0.0, float(now) - float(last))
+            except (TypeError, ValueError):
+                age = 0.0
+        return float(confidence_from_evidence(
+            int(evidence_n or 0), agreement, age))
+
+    def _update_patterns_and_persist(self, prompt_vector, reaction_vector,
+                                     ts) -> None:
+        """Score one turn against the pattern bank and persist derived rows.
+
+        Fault-isolated: any failure degrades to no pattern evidence and
+        never breaks the observed/interpreted tracks or the worker. Runs
+        worker-side only (engine on_events), after the raw reasoning text
+        has been encoded — the raw text itself is never stored here.
+        """
+        if prompt_vector is None:
+            return
+        try:
+            try:
+                from .perception import patterns as _patterns
+            except ImportError:
+                from perception import patterns as _patterns
+        except Exception:
+            return
+        try:
+            backend = self._get_backend()
+            bank = _patterns.build_pattern_bank(
+                backend, getattr(backend, "model_version", "unknown"))
+            if not bank:
+                return
+            scored = _patterns.score_turn(
+                prompt_vector, reaction_vector, bank)
+            patterns = scored.get("patterns") or []
+            if not patterns:
+                return
+            self.portrait.update_patterns(scored)
+            now = float(ts) if ts is not None else time.time()
+            self._pattern_turns += 1
+            top_name = patterns[0].get("name")
+            if top_name is not None:
+                self._pattern_top_counts[top_name] = (
+                    self._pattern_top_counts.get(top_name, 0) + 1)
+            for entry in patterns:
+                name = entry.get("name")
+                if name is not None:
+                    self._pattern_last_evidence[name] = now
+            top = patterns[0]
+            snap = self.portrait.snapshot()
+            evidence_n = 0
+            repeated = False
+            for entry in snap.get("patterns") or []:
+                if entry.get("name") == top_name:
+                    evidence_n = int(entry.get("evidence") or 0)
+                    repeated = bool(entry.get("repeated"))
+                    break
+            confidence = self._pattern_confidence(top_name, evidence_n, now)
+            # Persist only paired rows (reaction present): prompt-only
+            # scoring still updates the in-memory third view, but a
+            # prompt-only row must never displace the durable paired
+            # history read by the dashboard fallback (bridge contract:
+            # an empty table means "no paired evidence yet").
+            if reaction_vector is not None:
+                self._persist_pattern_row(
+                    top, now, evidence_n, confidence, repeated, set(bank),
+                    _patterns)
+        except Exception:
+            logger.exception(
+                "its-in-your-head: engine pattern scoring failed")
+
+    def _persist_pattern_row(self, top_entry, ts, evidence_n, confidence,
+                             repeated, bank_names, _patterns=None) -> None:
+        """Persist ONE derived pattern_affinity_history row (D4 Option B).
+
+        ``top_pattern`` is a preset-bank name taken from the sorted
+        patterns list — never free text, never a prompt fragment. All
+        other columns are derived floats/ints. ``None`` columns when the
+        agent side is absent (prompt-only turn). Fault-isolated,
+        log-and-never-raise, mirroring ``_persist_history_entry``.
+        """
+        try:
+            name = top_entry.get("name")
+            if name is None or name not in bank_names:
+                return  # top_pattern accepts preset-bank names only
+
+            def _num(v):
+                return None if v is None else float(v)
+
+            _db, _mig = self._storage()
+            conn = _db.connect()
+            try:
+                _mig.schema_bootstrap(conn)
+                conn.execute(
+                    "INSERT INTO pattern_affinity_history "
+                    "(ts, top_pattern, top_prompt_affinity, "
+                    "top_agent_affinity, top_margin, top_amplification, "
+                    "evidence, confidence, repeated) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (float(ts), name,
+                     _num(top_entry.get("prompt_affinity")),
+                     _num(top_entry.get("agent_affinity")),
+                     _num(top_entry.get("margin")),
+                     _num(top_entry.get("amplification")),
+                     int(evidence_n or 0),
+                     None if confidence is None else float(confidence),
+                     1 if repeated else 0))
+                _mig.prune_pattern_affinity_history(conn)
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception(
+                "its-in-your-head: pattern_affinity_history persist failed")
+
     def _on_reasoning_seg(self, ev: dict) -> None:
         """Fold one reasoning segment into the interpreted portrait track.
 
-        Projection (deterministic, no raw text, no re-embedding):
-        stored sketch/vector -> ``resemblance_all`` vs the anchor bank
-        (same six dimensions as the observed track) -> per-dimension
-        ``R_d`` -> ``Calibration.confidence(R_d)`` (logistic, slope 6,
-        midpoint 0, i.e. ``confidence_profile`` with the portrait's
-        calibration) -> [0, 1] interpreted value per dimension ->
-        ``Portrait.update_interpreted`` (its own EMA / MAX_STEP cap
-        applies). Evidence bookkeeping is updated only when the update
-        actually lands. Any fault degrades to no-op: the worker and the
-        observed track are never affected.
+        The raw reasoning text (available in memory at engine-feed time,
+        before the metrics worker purges it) is encoded through the SAME
+        configured backend used for prompts, so prompt and reaction share
+        one vector space (tier is a quality switch, not a fork). The
+        dim-mismatch guard below is only model-bump protection: same
+        backend, so it should not trigger in normal operation. Scoring
+        then feeds ``resemblance_all`` -> ``confidence_profile`` and
+        ``Portrait.update_interpreted`` with per-dim (value, confidence)
+        tuples, plus pattern scoring against the cached prompt vector.
+        Any fault degrades to no-op: the worker and the observed track
+        are never affected.
         """
         try:
-            vec = self._vector_from_event(ev)
-            if not vec:
-                return
+            text = ev.get("reasoning_text")
+            if not isinstance(text, str) or not text:
+                return  # no raw reasoning text: no evidence, not an error
             try:
                 from .perception.resemblance import (
                     confidence_profile, resemblance_all)
@@ -210,25 +378,32 @@ class Engine:
                 from perception.resemblance import (
                     confidence_profile, resemblance_all)
             backend = self._get_backend()
+            (vec,) = backend.encode([text])
+            if not vec:
+                return
             anchor_vectors = self._anchor_vectors_for(backend)
             probe = next(iter(anchor_vectors.values()), None)
-            probe_vec = (probe.get("positive") or [None])[0] \
-                if isinstance(probe, dict) else None
+            probe_vec = (probe.get("positive") or [None])[0] if isinstance(
+                probe, dict) else None
             if probe_vec is None or len(probe_vec) != len(vec):
                 return  # vector space mismatch: no evidence, not an error
             scores = resemblance_all(vec, anchor_vectors)
             conf = confidence_profile(scores, self.portrait.calibration)
-            targets = {d: conf[d] for d in _dims() if d in conf}
+            targets = {d: (conf[d], conf[d]) for d in _dims() if d in conf}
             if not targets:
                 return
             self.portrait.update_interpreted(targets)
             self._interpreted_evidence_count += 1
             self._interpreted_last_ts = ev.get("ts")
             try:
+                plain = [t[0] for t in targets.values()]
                 self._interpreted_last_confidence = (
-                    sum(targets.values()) / len(targets))
+                    sum(plain) / len(plain))
             except (TypeError, ZeroDivisionError):
                 pass
+            prompt_vector = self._lookup_prompt_vector(ev.get("turn_id"))
+            self._update_patterns_and_persist(
+                prompt_vector, vec, ev.get("ts"))
         except Exception:
             logger.exception(
                 "its-in-your-head: engine reasoning_seg feed failed")
@@ -271,7 +446,32 @@ class Engine:
             except Exception:
                 logger.exception(
                     "its-in-your-head: goal vector persist failed")
-            self.portrait.update_observed_from_text(text, self._get_backend())
+            backend = self._get_backend()
+            prompt_vector = None
+            try:
+                (prompt_vector,) = backend.encode([text])
+            except Exception:
+                logger.exception(
+                    "its-in-your-head: prompt encode failed")
+            if prompt_vector:
+                self._cache_prompt_vector(ev.get("turn_id"), prompt_vector)
+            if prompt_vector:
+                try:
+                    try:
+                        from .perception.resemblance import resemblance_all
+                    except ImportError:
+                        from perception.resemblance import resemblance_all
+                    # Single encode, shared with patterns below (no
+                    # double-encoding of the same prompt).
+                    anchor_vectors = self._anchor_vectors_for(backend)
+                    self.portrait.update_observed(
+                        resemblance_all(prompt_vector, anchor_vectors))
+                except Exception:
+                    self.portrait.update_observed_from_text(text, backend)
+            else:
+                self.portrait.update_observed_from_text(text, backend)
+            self._update_patterns_and_persist(
+                prompt_vector, None, ev.get("ts"))
             norm = self.portrait.normalized()
             ts = ev.get("ts")
             entry = {
@@ -434,6 +634,50 @@ class Engine:
                 "columns": ["goal", "good", "friction", "unlabeled"],
                 "available": bool(rows)}
 
+    def _perception_view(self, dims, full) -> dict:
+        """Additive ``perception`` key (C1 adjudication).
+
+        Exact shape: ``patterns`` (list of objects with name,
+        prompt_affinity, agent_affinity, margin, amplification, evidence,
+        confidence, repeated), ``dim_signals`` (dict keyed by dimension
+        name, each an object with prompt and agent), and
+        ``perception_available`` (bool). Filled from the portrait third
+        view snapshot and accumulated evidence/confidence. No evidence:
+        patterns empty, dim_signals keeps every dimension key with None
+        values, perception_available False. Never neutral defaults,
+        never invented.
+        """
+        third = full.get("patterns")
+        if third is None or not full.get("perception_available"):
+            return {"patterns": [],
+                    "dim_signals": {d: {"prompt": None, "agent": None}
+                                    for d in dims},
+                    "perception_available": False}
+        now = time.time()
+        patterns = []
+        for entry in third:
+            name = entry.get("name")
+            patterns.append({
+                "name": name,
+                "prompt_affinity": entry.get("prompt_affinity"),
+                "agent_affinity": entry.get("agent_affinity"),
+                "margin": entry.get("margin"),
+                "amplification": entry.get("amplification"),
+                "evidence": int(entry.get("evidence") or 0),
+                "confidence": self._pattern_confidence(
+                    name, entry.get("evidence") or 0, now),
+                "repeated": bool(entry.get("repeated")),
+            })
+        raw_signals = full.get("dim_signals") or {}
+        dim_signals = {}
+        for d in dims:
+            sig = raw_signals.get(d) or {}
+            dim_signals[d] = {"prompt": sig.get("prompt"),
+                              "agent": sig.get("agent")}
+        return {"patterns": patterns,
+                "dim_signals": dim_signals,
+                "perception_available": True}
+
     def portrait_view(self) -> dict:
         dims = _dims()
         snap = self.portrait.normalized()
@@ -443,6 +687,7 @@ class Engine:
         has_interpreted = bool(
             self._interpreted_evidence_count
             or (interp_track.get("evidence_count") or 0))
+        perception = self._perception_view(dims, full)
         if not has_observed and not has_interpreted:
             # Empty-shape contract (S5): no evidence -> available False and
             # None values (structural defaults are NOT data).
@@ -450,7 +695,8 @@ class Engine:
                     "dimensions": {d: None for d in dims},
                     "confidence": {d: None for d in dims},
                     "user": {d: None for d in dims},
-                    "agent": {d: None for d in dims}}
+                    "agent": {d: None for d in dims},
+                    "perception": perception}
         interp = interp_track.get("values") or {}
         values = ({d: snap.get("values", {}).get(d) for d in dims}
                   if has_observed else {d: None for d in dims})
@@ -462,7 +708,8 @@ class Engine:
                  else {d: None for d in dims})
         return {"available": True,
                 "dimensions": values, "confidence": conf,
-                "user": dict(values), "agent": agent}
+                "user": dict(values), "agent": agent,
+                "perception": perception}
 
     def drift_view(self) -> dict:
         # Lazy rehydrate: first drift access after a plugin-process
@@ -495,6 +742,10 @@ class Engine:
             self._interpreted_evidence_count = 0
             self._interpreted_last_ts = None
             self._interpreted_last_confidence = None
+            self._prompt_vectors.clear()
+            self._pattern_turns = 0
+            self._pattern_top_counts.clear()
+            self._pattern_last_evidence.clear()
             self.protos = pulse.PrototypeStore(
                 cap=int(merged.get("pulse.prototype_cap", 8)),
                 min_labeled=int(merged.get("pulse.min_labeled", 3)))
