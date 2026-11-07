@@ -342,7 +342,164 @@ function clamp01(v) {
     : null
 }
 
-function PortraitView({ data }) {
+// PORTRAIT-GLYPH-START
+// Pure deterministic portrait glyph: a 48x48 orbit sigil. No DOM/React/Date/
+// random, no globals beyond the constants below. Canonical dim order makes
+// output byte-identical regardless of input key order. Each dim is quantized
+// to integer steps (0..8 in 1/8 increments) so a 0.05 value move shifts at
+// most one step. Two tracks are rendered as separate <g data-layer> groups
+// and never blended: observed (user) and interpreted (agent, absent when
+// all agent values are null).
+const GLYPH_DIMS = ['directness', 'context_richness', 'exploration', 'analytical_depth', 'iteration', 'scope']
+const GLYPH_ACCENT = 'var(--ui-accent)'
+const GLYPH_SEC = 'var(--ui-text-secondary)'
+const GLYPH_QUAT = 'var(--ui-text-quaternary)'
+const GLYPH_STROKE = 'var(--ui-stroke-secondary)'
+
+function glyphClamp(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null
+}
+function glyphStep(v) {
+  const c = glyphClamp(v)
+  return c === null ? -1 : Math.round(c * 8)
+}
+function glyphFmt(n) {
+  const r = Math.round(n * 100) / 100
+  return String(r === 0 ? 0 : r)
+}
+function glyphTrackSteps(track) {
+  const t = track && typeof track === 'object' ? track : {}
+  return GLYPH_DIMS.map((d) => glyphStep(t[d]))
+}
+function glyphEvidenceCount(input) {
+  if (input && typeof input === 'object') {
+    if (typeof input.evidenceCount === 'number' && Number.isFinite(input.evidenceCount)) return Math.max(0, input.evidenceCount)
+    const series = (input.drift && typeof input.drift === 'object' && input.drift.series) || input.series
+    if (series && typeof series === 'object') {
+      let best = 0
+      for (const d of GLYPH_DIMS) {
+        const s = series[d]
+        if (Array.isArray(s) && s.length > best) best = s.length
+      }
+      return best
+    }
+    if (input.portrait && typeof input.portrait === 'object') return glyphEvidenceCount(input.portrait)
+  }
+  return 0
+}
+function glyphEvidenceStep(evCount) {
+  if (evCount >= 16) return 4
+  if (evCount >= 8) return 3
+  if (evCount >= 4) return 2
+  if (evCount >= 1) return 1
+  return 0
+}
+function glyphConfStep(confidence, present) {
+  const c = confidence && typeof confidence === 'object' ? confidence : {}
+  let sum = 0, n = 0
+  for (let i = 0; i < GLYPH_DIMS.length; i++) {
+    if (!present[i]) continue
+    const v = glyphClamp(c[GLYPH_DIMS[i]])
+    if (v !== null) { sum += v; n++ }
+  }
+  if (n === 0) return 0
+  return Math.round((sum / n) * 4)
+}
+function glyphPoint(cx, cy, r, deg) {
+  const rad = (deg * Math.PI) / 180
+  return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)]
+}
+function glyphTrackGroup(layer, steps, unfold, interpreted) {
+  const isInterp = !!interpreted
+  const opacity = isInterp ? 0.2 + 0.5 * unfold : 0.3 + 0.6 * unfold
+  const stepOr = (v, dflt) => (v < 0 ? dflt : v)
+  const scopeStep = stepOr(steps[5], 2)
+  const iterStep = stepOr(steps[4], 0)
+  const richStep = stepOr(steps[1], 0)
+  const explStep = stepOr(steps[2], 0)
+  const depthStep = stepOr(steps[3], 0)
+  const directStep = stepOr(steps[0], 0)
+  const cx = 24, cy = 24
+  const radius = 7 + scopeStep * 1.3
+  const ringsFull = 1 + Math.floor(iterStep / 2)
+  const spokesFull = 1 + richStep
+  const sides = 3 + depthStep
+  const rings = Math.max(1, 1 + Math.floor((ringsFull - 1) * unfold))
+  const spokes = Math.max(1, 1 + Math.floor((spokesFull - 1) * unfold))
+  const lattice = Math.floor(depthStep * unfold / 2)
+  const straight = directStep >= 4
+  const rot = explStep * 10
+  const satR = 1 + Math.floor(explStep / 4)
+  const ringStroke = isInterp ? GLYPH_SEC : GLYPH_STROKE
+  const innerStroke = isInterp ? GLYPH_SEC : GLYPH_ACCENT
+  const spokeStroke = isInterp ? GLYPH_QUAT : GLYPH_SEC
+  const satFill = isInterp ? GLYPH_QUAT : GLYPH_ACCENT
+  // Interpreted track is scaled 0.92 about the shared centre so the two
+  // layers stay geometrically distinct even when both tracks quantize to the
+  // same steps (otherwise identical steps would overplot pixel-for-pixel).
+  const layerTransform = isInterp ? ' transform="translate(24 24) scale(0.92) translate(-24 -24)"' : ''
+  let out = '<g data-layer="' + layer + '" opacity="' + glyphFmt(opacity) + '"' + layerTransform + '>'
+  for (let i = 0; i < rings; i++) {
+    const rr = radius - i * 3.2
+    if (rr < 3) break
+    out += '<circle cx="' + cx + '" cy="' + cy + '" r="' + glyphFmt(rr) + '" fill="none" stroke="' + ringStroke + '"' +
+      (isInterp ? ' stroke-dasharray="2 2"' : '') + ' stroke-width="1"/>'
+  }
+  for (let i = 0; i < spokes; i++) {
+    const ang = rot + (360 / spokes) * i
+    const p = glyphPoint(cx, cy, radius, ang)
+    out += '<line x1="' + cx + '" y1="' + cy + '" x2="' + glyphFmt(p[0]) + '" y2="' + glyphFmt(p[1]) + '" stroke="' + spokeStroke + '" stroke-width="1"/>'
+    out += '<circle cx="' + glyphFmt(p[0]) + '" cy="' + glyphFmt(p[1]) + '" r="' + satR + '" fill="' + satFill + '"/>'
+  }
+  const innerR = Math.max(4, radius * 0.55)
+  const pts = []
+  for (let i = 0; i < sides; i++) pts.push(glyphPoint(cx, cy, innerR, rot + (360 / sides) * i - 90))
+  if (straight) {
+    const attr = pts.map((p) => glyphFmt(p[0]) + ',' + glyphFmt(p[1])).join(' ')
+    out += '<polygon points="' + attr + '" fill="none" stroke="' + innerStroke + '" stroke-width="1.2" stroke-linejoin="miter" data-joint="miter"/>'
+  } else {
+    let d = 'M' + glyphFmt(pts[0][0]) + ' ' + glyphFmt(pts[0][1])
+    for (let i = 1; i <= sides; i++) {
+      const p = pts[i % sides]
+      d += ' Q' + glyphFmt(pts[(i - 1) % sides][0]) + ' ' + glyphFmt(pts[(i - 1) % sides][1]) + ' ' + glyphFmt(p[0]) + ' ' + glyphFmt(p[1])
+    }
+    d += ' Z'
+    out += '<path d="' + d + '" fill="none" stroke="' + innerStroke + '" stroke-width="1.2" stroke-linejoin="round" data-joint="round"/>'
+  }
+  for (let i = 0; i < lattice; i++) {
+    const ang = rot + i * (180 / Math.max(1, lattice))
+    const a = glyphPoint(cx, cy, innerR, ang)
+    const b = glyphPoint(cx, cy, innerR, ang + 180)
+    out += '<line x1="' + glyphFmt(a[0]) + '" y1="' + glyphFmt(a[1]) + '" x2="' + glyphFmt(b[0]) + '" y2="' + glyphFmt(b[1]) + '" stroke="' + spokeStroke + '" stroke-width="0.7"/>'
+  }
+  out += '</g>'
+  return out
+}
+function buildGlyph(input) {
+  const src = input && typeof input === 'object' ? (input.portrait && typeof input.portrait === 'object' && !input.dimensions ? input.portrait : input) : {}
+  const available = src.available !== false
+  const userSteps = glyphTrackSteps(src.user)
+  const agentSteps = glyphTrackSteps(src.agent)
+  const userPresent = userSteps.map((s) => s >= 0)
+  const agentPresent = agentSteps.map((s) => s >= 0)
+  const anyUser = userPresent.some(Boolean)
+  const anyAgent = agentPresent.some(Boolean)
+  const minimal = '<svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" width="48" height="48" role="img"><g data-layer="observed" opacity="0.25"><circle cx="24" cy="24" r="8" fill="none" stroke="' + GLYPH_STROKE + '" stroke-width="1"/></g></svg>'
+  if (!available || (!anyUser && !anyAgent)) return minimal
+  const present = GLYPH_DIMS.map((_, i) => userPresent[i] || agentPresent[i])
+  const evStep = glyphEvidenceStep(glyphEvidenceCount(input))
+  const confStep = glyphConfStep(src.confidence, present)
+  const strength = evStep + confStep
+  const unfold = Math.min(1, Math.max(0, strength / 8))
+  let body = ''
+  if (anyUser) body += glyphTrackGroup('observed', userSteps, unfold, false)
+  if (anyAgent) body += glyphTrackGroup('interpreted', agentSteps, unfold, true)
+  if (!body) return minimal
+  return '<svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" width="48" height="48" role="img">' + body + '</svg>'
+}
+// PORTRAIT-GLYPH-END
+
+function PortraitView({ data, drift }) {
   const dims =
     data && data.dimensions && typeof data.dimensions === 'object'
       ? Object.keys(data.dimensions)
@@ -364,55 +521,31 @@ function PortraitView({ data }) {
       children: ['PORTRAIT · no data yet — evidence empty'],
     })
   }
+  let evidenceCount = 0
+  if (drift && drift.series && typeof drift.series === 'object') {
+    for (const d of Object.keys(drift.series)) {
+      const s = drift.series[d]
+      if (Array.isArray(s) && s.length > evidenceCount) evidenceCount = s.length
+    }
+  }
+  const glyph = buildGlyph({
+    available: data.available,
+    dimensions: data.dimensions,
+    user: data.user,
+    agent: data.agent,
+    confidence: data.confidence,
+    evidenceCount,
+  })
   return jsxs('div', {
     className: 'flex flex-1 items-center',
     style: { gap: 12, minHeight: 0, overflow: 'hidden' },
-    children: dims.map((d, i) => {
-      const u = clamp01(data.user[d])
-      const a = clamp01(data.agent[d])
-      return jsxs('div', {
-        key: d,
-        className: 'flex flex-col',
-        style: { gap: 2, minWidth: 0 },
-        children: [
-          jsx('span', {
-            style: {
-              fontSize: 8, color: V_QUAT, whiteSpace: 'nowrap',
-              overflow: 'hidden', textOverflow: 'ellipsis',
-            },
-            children: d.slice(0, 10),
-          }),
-          jsxs('div', {
-            style: { width: 46, height: 4, background: V_STROKE },
-            children: [
-              jsx('div', {
-                style: {
-                  width: (u === null ? 0 : Math.round(u * 100)) + '%',
-                  height: '100%', background: V_ACCENT, opacity: u === null ? 0 : 0.9,
-                },
-              }),
-            ],
-          }),
-          jsxs('div', {
-            style: { width: 46, height: 4, background: V_STROKE },
-            children: [
-              jsx('div', {
-                style: {
-                  width: (a === null ? 0 : Math.round(a * 100)) + '%',
-                  height: '100%', background: V_QUAT, opacity: a === null ? 0 : 0.9,
-                },
-              }),
-            ],
-          }),
-          jsx('span', {
-            style: { fontSize: 8, color: V_SEC },
-            children:
-              (u === null ? '–' : Math.round(u * 100)) +
-              '/' + (a === null ? '–' : Math.round(a * 100)),
-          }),
-        ],
-      }, i)
-    }),
+    children: [
+      jsx('span', {
+        title: 'portrait glyph',
+        style: { width: 48, height: 48, flexShrink: 0, overflow: 'hidden' },
+        dangerouslySetInnerHTML: { __html: glyph },
+      }),
+    ],
   })
 }
 
@@ -687,7 +820,7 @@ function Strip({ source, rest }) {
           ],
         })
       : tab === 'portrait'
-        ? jsx(PortraitView, { data: portraitQ.data })
+        ? jsx(PortraitView, { data: portraitQ.data, drift: driftQ.data })
         : jsx(DriftView, { data: driftQ.data })
 
   const popover = panel && jsxs('div', {
