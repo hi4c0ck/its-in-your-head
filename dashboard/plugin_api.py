@@ -635,7 +635,16 @@ def _pulse_live_view() -> dict | None:
 
 def _portrait_shape() -> dict:
     """Six dimension values + per-dim confidence + user/agent split
-    (S3 perception.portrait when importable)."""
+    (S3 perception.portrait when importable; else the profile-DB
+    fallback over portrait_history for the isolated dashboard half).
+
+    The fallback bridges the OBSERVED track only: portrait_history
+    stores the six persisted observed dimension values (v3). The
+    confidence and interpreted (agent) tracks are not persisted, so
+    they stay None — never invented. Empty table / all-NULL latest
+    row -> the documented empty shape; DB faults -> empty shape,
+    never a 500.
+    """
     dims = _dimensions()
     shape = {
         "available": False,
@@ -649,6 +658,48 @@ def _portrait_shape() -> dict:
         ("portrait", "get_portrait", "build_portrait", "compute_portrait",
          "current_portrait", "load_portrait", "portrait_for_text"))
     if fn is None:
+        # Isolated child: no importable perception package. Bridge the
+        # persisted observed track through portrait_history (same
+        # resolver the /drift fallback uses) so the agent worker's
+        # observations are visible without the in-memory engine.
+        try:
+            conn = _connect()
+        except Exception:
+            return shape
+        try:
+            _migration.schema_bootstrap(conn, _DDL)
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='portrait_history'").fetchone()
+            if row is None:
+                return shape
+            cols = [r[1] for r in conn.execute(
+                "PRAGMA table_info(portrait_history)").fetchall()]
+            present = [d for d in dims if d in cols]
+            if not present:
+                return shape
+            latest = conn.execute(
+                f"SELECT {', '.join(present)} FROM portrait_history "
+                "ORDER BY ts DESC, id DESC LIMIT 1").fetchone()
+            if latest is None:
+                return shape
+            for i, d in enumerate(present):
+                v = latest[i]
+                if v is not None:
+                    shape["dimensions"][d] = v
+                    shape["user"][d] = v
+            # Availability gate mirrors the live route: at least one
+            # observed value (an all-NULL row carries no data).
+            shape["available"] = any(v is not None for v in
+                                     shape["dimensions"].values())
+        except Exception:
+            return {"available": False,
+                    "dimensions": {d: None for d in dims},
+                    "confidence": {d: None for d in dims},
+                    "user": {d: None for d in dims},
+                    "agent": {d: None for d in dims}}
+        finally:
+            conn.close()
         return shape
     try:
         result = fn()
@@ -839,18 +890,35 @@ async def pulse():
     return _pulse_shape()
 
 
+def _portrait_live_view() -> dict | None:
+    """The in-process engine portrait view (gateway agent half) when it
+    holds observed values; None when the engine is unavailable
+    (isolated child) or empty — the caller then serves the profile-DB
+    fallback so persisted observations are never hidden by an empty
+    in-memory engine."""
+    try:
+        eng = importlib.import_module("engine")
+    except Exception:
+        return None
+    try:
+        view = eng.get_engine().portrait_view()
+    except Exception:
+        return None
+    if not isinstance(view, dict):
+        return None
+    if not any(v is not None for v in (view.get("dimensions") or {}).values()):
+        return None
+    return view
+
+
 @router.get("/portrait")
 async def portrait():
-    """Portrait: six dimensions + confidence + user/agent split.
-    Live engine data when available, else the shape probe (S5)."""
-    try:
-        import importlib
-        eng = importlib.import_module("engine")
-        view = eng.get_engine().portrait_view()
-        if any(v is not None for v in view["dimensions"].values()):
-            return view
-    except Exception:
-        pass
+    """Portrait: six dimensions + confidence + user/agent split. Live
+    in-process engine data when it holds observed values; otherwise the
+    profile-DB fallback (isolated dashboard child). Never 500s."""
+    view = _portrait_live_view()
+    if view is not None:
+        return view
     return _portrait_shape()
 
 
