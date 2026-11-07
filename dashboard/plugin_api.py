@@ -633,6 +633,55 @@ def _pulse_live_view() -> dict | None:
     return view
 
 
+def _portrait_db_fallback(shape: dict, dims) -> dict:
+    """Profile-DB fallback for the isolated dashboard half: bridges the
+    persisted observed track through ``portrait_history`` (v3; the same
+    resolver the /drift fallback uses). Fills ``dimensions`` and
+    ``user`` only — the confidence and interpreted (agent) tracks are
+    not persisted, so they stay None, never invented. Empty table /
+    all-NULL latest row / DB fault -> the documented empty shape,
+    never a 500."""
+    try:
+        conn = _connect()
+    except Exception:
+        return shape
+    try:
+        _migration.schema_bootstrap(conn, _DDL)
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='portrait_history'").fetchone()
+        if row is None:
+            return shape
+        cols = [r[1] for r in conn.execute(
+            "PRAGMA table_info(portrait_history)").fetchall()]
+        present = [d for d in dims if d in cols]
+        if not present:
+            return shape
+        latest = conn.execute(
+            f"SELECT {', '.join(present)} FROM portrait_history "
+            "ORDER BY ts DESC, id DESC LIMIT 1").fetchone()
+        if latest is None:
+            return shape
+        for i, d in enumerate(present):
+            v = latest[i]
+            if v is not None:
+                shape["dimensions"][d] = v
+                shape["user"][d] = v
+        # Availability gate mirrors the live route: at least one
+        # observed value (an all-NULL row carries no data).
+        shape["available"] = any(v is not None for v in
+                                 shape["dimensions"].values())
+    except Exception:
+        return {"available": False,
+                "dimensions": {d: None for d in dims},
+                "confidence": {d: None for d in dims},
+                "user": {d: None for d in dims},
+                "agent": {d: None for d in dims}}
+    finally:
+        conn.close()
+    return shape
+
+
 def _portrait_shape() -> dict:
     """Six dimension values + per-dim confidence + user/agent split
     (S3 perception.portrait when importable; else the profile-DB
@@ -641,9 +690,12 @@ def _portrait_shape() -> dict:
     The fallback bridges the OBSERVED track only: portrait_history
     stores the six persisted observed dimension values (v3). The
     confidence and interpreted (agent) tracks are not persisted, so
-    they stay None — never invented. Empty table / all-NULL latest
-    row -> the documented empty shape; DB faults -> empty shape,
-    never a 500.
+    they stay None — never invented. Persisted observations are never
+    hidden by an empty in-memory state: whenever the in-process probe
+    yields no observed values — probe unimportable (isolated child) or
+    empty (fresh engine after a restart) — the DB fallback is
+    consulted. Empty table / all-NULL latest row -> the documented
+    empty shape; DB faults -> empty shape, never a 500.
     """
     dims = _dimensions()
     shape = {
@@ -657,77 +709,37 @@ def _portrait_shape() -> dict:
         ("perception.portrait", "perception.portrait_store"),
         ("portrait", "get_portrait", "build_portrait", "compute_portrait",
          "current_portrait", "load_portrait", "portrait_for_text"))
-    if fn is None:
-        # Isolated child: no importable perception package. Bridge the
-        # persisted observed track through portrait_history (same
-        # resolver the /drift fallback uses) so the agent worker's
-        # observations are visible without the in-memory engine.
+    if fn is not None:
         try:
-            conn = _connect()
+            result = fn()
+        except TypeError:
+            result = None  # needs arguments (e.g. text) — nothing in-memory
         except Exception:
-            return shape
-        try:
-            _migration.schema_bootstrap(conn, _DDL)
-            row = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name='portrait_history'").fetchone()
-            if row is None:
-                return shape
-            cols = [r[1] for r in conn.execute(
-                "PRAGMA table_info(portrait_history)").fetchall()]
-            present = [d for d in dims if d in cols]
-            if not present:
-                return shape
-            latest = conn.execute(
-                f"SELECT {', '.join(present)} FROM portrait_history "
-                "ORDER BY ts DESC, id DESC LIMIT 1").fetchone()
-            if latest is None:
-                return shape
-            for i, d in enumerate(present):
-                v = latest[i]
-                if v is not None:
-                    shape["dimensions"][d] = v
-                    shape["user"][d] = v
-            # Availability gate mirrors the live route: at least one
-            # observed value (an all-NULL row carries no data).
-            shape["available"] = any(v is not None for v in
-                                     shape["dimensions"].values())
-        except Exception:
-            return {"available": False,
-                    "dimensions": {d: None for d in dims},
-                    "confidence": {d: None for d in dims},
-                    "user": {d: None for d in dims},
-                    "agent": {d: None for d in dims}}
-        finally:
-            conn.close()
-        return shape
-    try:
-        result = fn()
-    except TypeError:
-        return shape  # needs arguments (e.g. text) — no stored portrait yet
-    except Exception:
-        return shape
-    if not isinstance(result, dict):
-        return shape
-    try:
-        dim_src = result.get("dimensions") or result.get("resemblance") \
-            or result.get("values") or {}
-        conf_src = result.get("confidence") or {}
-        user_src = result.get("user") or {}
-        agent_src = result.get("agent") or {}
-        for d in dims:
-            if isinstance(dim_src, dict) and dim_src.get(d) is not None:
-                shape["dimensions"][d] = dim_src[d]
-            if isinstance(conf_src, dict) and conf_src.get(d) is not None:
-                shape["confidence"][d] = conf_src[d]
-            if isinstance(user_src, dict) and user_src.get(d) is not None:
-                shape["user"][d] = user_src[d]
-            if isinstance(agent_src, dict) and agent_src.get(d) is not None:
-                shape["agent"][d] = agent_src[d]
-        shape["available"] = any(
-            v is not None for v in shape["dimensions"].values())
-    except Exception:
-        return shape
+            result = None
+        if isinstance(result, dict):
+            try:
+                dim_src = result.get("dimensions") or result.get("resemblance") \
+                    or result.get("values") or {}
+                conf_src = result.get("confidence") or {}
+                user_src = result.get("user") or {}
+                agent_src = result.get("agent") or {}
+                for d in dims:
+                    if isinstance(dim_src, dict) and dim_src.get(d) is not None:
+                        shape["dimensions"][d] = dim_src[d]
+                    if isinstance(conf_src, dict) and conf_src.get(d) is not None:
+                        shape["confidence"][d] = conf_src[d]
+                    if isinstance(user_src, dict) and user_src.get(d) is not None:
+                        shape["user"][d] = user_src[d]
+                    if isinstance(agent_src, dict) and agent_src.get(d) is not None:
+                        shape["agent"][d] = agent_src[d]
+                shape["available"] = any(
+                    v is not None for v in shape["dimensions"].values())
+            except Exception:
+                pass  # probe filled nothing: consult the persisted state
+    # In-process probe absent or empty -> bridge from the profile DB
+    # so persisted observations survive restarts and process boundaries.
+    if not shape["available"]:
+        shape = _portrait_db_fallback(shape, dims)
     return shape
 
 

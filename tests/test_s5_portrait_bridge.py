@@ -115,6 +115,33 @@ def test_portrait_fallback_serves_last_observation(agent_env, monkeypatch):
     assert body["agent"] == shape["agent"]
 
 
+def test_portrait_probe_importable_but_empty_serves_db_fallback(
+        agent_env, monkeypatch):
+    """Gateway half after a restart: the perception probe IS importable
+    but yields nothing (fresh in-memory engine) — the persisted
+    observations must still surface from the profile DB, never be
+    hidden by the empty state."""
+    eng, db = agent_env
+    now = time.time()
+    eng.on_events([
+        {"type": "turn", "ts": now, "user_message": _PROMPT_A},
+    ])
+    api = _api(db)
+    monkeypatch.setattr(api, "_portrait_live_view", lambda: None)
+
+    class _mod:  # a found module; its zero-arg candidate returns {}
+        pass
+    monkeypatch.setattr(
+        api, "_engine_first", lambda *a, **k: (_mod(), lambda: {}))
+
+    shape = api._portrait_shape()
+    assert shape["available"] is True
+    assert all(v is not None for v in shape["dimensions"].values()), shape
+    assert shape["user"] == shape["dimensions"]
+    assert all(v is None for v in shape["confidence"].values())
+    assert all(v is not None for v in shape["dimensions"].values())
+
+
 def test_portrait_fallback_empty_db_returns_documented_shape(tmp_path):
     api = _api(tmp_path / "empty.db")
     # The probe is importable in the test process; force the fallback
