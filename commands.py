@@ -45,12 +45,14 @@ def _defaults() -> dict:
             return dict(_settings.DEFAULTS)
         except Exception:
             pass
+    # LAST RESORT (core.settings unimportable): keep aligned with
+    # core.settings.DEFAULTS — /mirror adaptation gating reads these.
     return {
         "perception.enabled": True,
         "observation.reasoning": True,
         "observation.retain_days": 90,
-        "pulse.prototype_cap": 64,
-        "pulse.min_labeled": 20,
+        "pulse.prototype_cap": 8,
+        "pulse.min_labeled": 3,
         "pulse.thresholds.goal": 0.8,
         "pulse.thresholds.good": 0.6,
         "pulse.thresholds.friction": 0.4,

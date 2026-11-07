@@ -7,7 +7,7 @@ drop every worker batch. :func:`migrate` upgrades such databases in place —
 preserving existing rows — inside a single transaction.
 
 Versioning: ``meta(key TEXT PRIMARY KEY, value TEXT)`` with
-``schema_version`` = ``3`` for current-shape databases (fresh or migrated).
+``schema_version`` = ``4`` for current-shape databases (fresh or migrated).
 A database already at the expected version is a fast-path no-op.
 
 Schema v3 (F2 drift durability): adds the ``portrait_history`` table —
@@ -21,6 +21,17 @@ recent rows. v2 databases gain the table empty (existing events rows
 preserved); ``CREATE TABLE IF NOT EXISTS`` + missing-column ``ALTER``
 keep the upgrade idempotent.
 
+Schema v4 (PULSE cross-process bridge): adds the pulse-domain tables —
+``pulse_tools`` (LIVE rows; its DDL moves from pulse.tool_registry's
+lazy script to this single source so the isolated dashboard half can
+bootstrap it without importing the pulse package), ``pulse_prototypes``
+(bounded GOOD / FRICTION / objective-friction prototype vectors),
+``pulse_goal`` (the derived goal vector — the embedding of the last user
+prompt; the raw prompt is NEVER written), and ``pulse_capsules`` (recent
+per-tool capsule vectors). All vector columns are little-endian float32
+BLOBs (the ``events.sketch`` convention); only derived vectors are
+stored. v3 databases gain the tables empty (existing rows preserved).
+
 Import rules: this module is importable from both the worker (``metrics``)
 and the dashboard mount without importing either of them, and it performs
 no I/O at import time.
@@ -29,7 +40,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION  # alias
 
 _CREATE_EVENTS_TABLE = """CREATE TABLE IF NOT EXISTS events (
@@ -122,6 +133,89 @@ _CREATE_PORTRAIT_HISTORY_INDEX = (
 PORTRAIT_HISTORY_DDL = (
     _CREATE_PORTRAIT_HISTORY_TABLE + ";\n"
     + _CREATE_PORTRAIT_HISTORY_INDEX + ";\n"
+)
+
+# --- PULSE cross-process bridge (v4) -------------------------------------
+# LIVE tool rows: moved here from pulse.tool_registry's lazy DDL so the
+# isolated dashboard half (plugin-host child, plugin root off its
+# sys.path) can bootstrap the same table via schema_bootstrap() without
+# importing the pulse package. pulse.tool_registry.SCHEMA is an alias of
+# PULSE_TOOLS_DDL — do not copy the DDL.
+_CREATE_PULSE_TOOLS_TABLE = """CREATE TABLE IF NOT EXISTS pulse_tools (
+    id               INTEGER PRIMARY KEY,
+    tool_name        TEXT UNIQUE NOT NULL,
+    first_seen       REAL NOT NULL,
+    last_seen        REAL NOT NULL,
+    calls_started    INTEGER NOT NULL DEFAULT 0,
+    calls_completed  INTEGER NOT NULL DEFAULT 0,
+    errors           INTEGER NOT NULL DEFAULT 0
+)"""
+
+_CREATE_PULSE_TOOLS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_pulse_tools_name "
+    "ON pulse_tools (tool_name)"
+)
+
+PULSE_TOOLS_DDL = (
+    _CREATE_PULSE_TOOLS_TABLE + ";\n"
+    + _CREATE_PULSE_TOOLS_INDEX + ";\n"
+)
+
+# Bounded prototype banks (FIFO-capped per tool+bank by the writer).
+# `vector` is a derived embedding (float32 BLOB) — never raw text.
+_CREATE_PULSE_PROTOTYPES_TABLE = """CREATE TABLE IF NOT EXISTS pulse_prototypes (
+    id           INTEGER PRIMARY KEY,
+    tool_name    TEXT NOT NULL,
+    bank         TEXT NOT NULL,
+    ts           REAL NOT NULL,
+    vector       BLOB NOT NULL
+)"""
+
+_CREATE_PULSE_PROTOTYPES_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_pulse_prototypes_tool "
+    "ON pulse_prototypes (tool_name, bank)"
+)
+
+PULSE_PROTOTYPES_DDL = (
+    _CREATE_PULSE_PROTOTYPES_TABLE + ";\n"
+    + _CREATE_PULSE_PROTOTYPES_INDEX + ";\n"
+)
+
+# Singleton derived goal vector (id = 1): the embedding of the last user
+# prompt. The raw prompt is never written (v0.1.3 privacy ruling).
+_CREATE_PULSE_GOAL_TABLE = """CREATE TABLE IF NOT EXISTS pulse_goal (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    ts       REAL NOT NULL,
+    vector   BLOB NOT NULL,
+    backend  TEXT
+)"""
+
+PULSE_GOAL_DDL = _CREATE_PULSE_GOAL_TABLE + ";\n"
+
+# Recent per-tool activity-capsule vectors (the GOAL column's fallback
+# reference when a tool's banks are still empty), pruned to the newest
+# per-tool bound by the writer.
+_CREATE_PULSE_CAPSULES_TABLE = """CREATE TABLE IF NOT EXISTS pulse_capsules (
+    id           INTEGER PRIMARY KEY,
+    tool_name    TEXT NOT NULL,
+    ts           REAL NOT NULL,
+    vector       BLOB NOT NULL
+)"""
+
+_CREATE_PULSE_CAPSULES_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_pulse_capsules_tool "
+    "ON pulse_capsules (tool_name, ts)"
+)
+
+PULSE_CAPSULES_DDL = (
+    _CREATE_PULSE_CAPSULES_TABLE + ";\n"
+    + _CREATE_PULSE_CAPSULES_INDEX + ";\n"
+)
+
+# The three derived-vector tables, for the pulse writer's lazy
+# executescript bootstrap (single source; do not copy the DDL).
+PULSE_STATE_DDL = (
+    PULSE_PROTOTYPES_DDL + PULSE_GOAL_DDL + PULSE_CAPSULES_DDL
 )
 
 _META_TABLE_DDL = (
@@ -222,6 +316,25 @@ def _create_portrait_history(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_PORTRAIT_HISTORY_INDEX)
 
 
+def _create_pulse_tables(conn: sqlite3.Connection) -> None:
+    """Create the v4 pulse-domain tables if absent (all IF NOT EXISTS,
+    so a pre-existing set is a no-op and existing rows are preserved).
+
+    Individual ``execute`` calls — no ``executescript`` — so the calls
+    stay inside the caller's transaction (migrate() owns BEGIN/COMMIT).
+    """
+    for stmt in (
+        _CREATE_PULSE_TOOLS_TABLE,
+        _CREATE_PULSE_TOOLS_INDEX,
+        _CREATE_PULSE_PROTOTYPES_TABLE,
+        _CREATE_PULSE_PROTOTYPES_INDEX,
+        _CREATE_PULSE_GOAL_TABLE,
+        _CREATE_PULSE_CAPSULES_TABLE,
+        _CREATE_PULSE_CAPSULES_INDEX,
+    ):
+        conn.execute(stmt)
+
+
 def migrate(conn: sqlite3.Connection,
             expected_version: int = CURRENT_SCHEMA_VERSION) -> bool:
     """Upgrade ``conn``'s database to ``expected_version`` in place.
@@ -231,7 +344,8 @@ def migrate(conn: sqlite3.Connection,
     databases (e.g. missing ``tool_name``) get the missing columns added via
     ``ALTER TABLE`` (existing rows preserved, new columns NULL) *before* the
     indexes that reference them are created. v2 -> v3 likewise gains the
-    ``portrait_history`` table (empty; existing events rows preserved).
+    ``portrait_history`` table (empty; existing events rows preserved), and
+    v3 -> v4 gains the pulse-domain tables (empty; existing rows preserved).
     All steps run in a single transaction when the caller has not already
     opened one; any failure rolls the whole migration back (no partial
     column/index/version state). Returns True if work was done.
@@ -256,6 +370,7 @@ def migrate(conn: sqlite3.Connection,
             _add_missing_columns(conn, existing)
         _create_indexes(conn)
         _create_portrait_history(conn)
+        _create_pulse_tables(conn)
         conn.execute(_META_TABLE_DDL)
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -295,6 +410,11 @@ __all__ = [
     "PORTRAIT_HISTORY_DIMS",
     "PORTRAIT_HISTORY_MAX",
     "PORTRAIT_HISTORY_DDL",
+    "PULSE_TOOLS_DDL",
+    "PULSE_PROTOTYPES_DDL",
+    "PULSE_GOAL_DDL",
+    "PULSE_CAPSULES_DDL",
+    "PULSE_STATE_DDL",
     "get_schema_version",
     "migrate",
     "schema_bootstrap",

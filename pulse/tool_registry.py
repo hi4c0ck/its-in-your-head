@@ -16,21 +16,16 @@ import time
 
 try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from ..storage import database as _database
+    from ..storage import migration as _migration
 except ImportError:  # pragma: no cover
     from storage import database as _database  # type: ignore[no-redef]
+    from storage import migration as _migration  # type: ignore[no-redef]
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS pulse_tools (
-    id               INTEGER PRIMARY KEY,
-    tool_name        TEXT UNIQUE NOT NULL,
-    first_seen       REAL NOT NULL,
-    last_seen        REAL NOT NULL,
-    calls_started    INTEGER NOT NULL DEFAULT 0,
-    calls_completed  INTEGER NOT NULL DEFAULT 0,
-    errors           INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_pulse_tools_name ON pulse_tools (tool_name);
-"""
+# Single source: the pulse_tools DDL lives in storage.migration (v4) so the
+# isolated dashboard half (plugin-host child, plugin root off its sys.path)
+# can bootstrap the same table without importing this module. SCHEMA is an
+# alias — do not copy the DDL.
+SCHEMA = _migration.PULSE_TOOLS_DDL
 
 ERROR_STATUSES = frozenset({"error", "timeout", "failed", "failure"})
 

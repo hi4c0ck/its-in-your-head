@@ -18,7 +18,9 @@ degrades to "no data", it never 500s.
 """
 import importlib
 import importlib.util
+import math
 import sqlite3
+import struct
 import sys
 import threading
 import time
@@ -358,12 +360,15 @@ def _settings_defaults():
             from ..core.settings import DEFAULTS  # type: ignore
         return dict(DEFAULTS)
     except Exception:
+        # LAST RESORT (isolated child, core.settings unimportable): keep
+        # these aligned with core.settings.DEFAULTS — the pulse fallback
+        # derives row state from them.
         return {
             "perception.enabled": True,
             "observation.reasoning": True,
             "observation.retain_days": 90,
-            "pulse.prototype_cap": 64,
-            "pulse.min_labeled": 20,
+            "pulse.prototype_cap": 8,
+            "pulse.min_labeled": 3,
             "pulse.thresholds.goal": 0.8,
             "pulse.thresholds.good": 0.6,
             "pulse.thresholds.friction": 0.4,
@@ -420,30 +425,212 @@ def _engine_first(module_names, fn_names):
 
 _PULSE_COLUMNS = ["goal", "good", "friction", "unlabeled"]
 
+# Cell math mirrors pulse.matrix.build_matrix (which the isolated child
+# cannot import — plugin root off its sys.path): cosine / strongest /
+# display-floor / level / neutral semantics are pinned identically so the
+# fallback rows match the live engine's rows for the same inputs.
+_PULSE_DEFAULT_THRESHOLDS = {"goal": 0.8, "good": 0.6, "friction": 0.4}
+_PULSE_DEFAULT_MIN_LABELED = 3
+# Display guard mirroring the engine's per-tool capsule deque bound
+# (engine.CAPSULES_PER_TOOL): the writer prunes, this caps legacy rows.
+_PULSE_CAPSULE_DISPLAY_CAP = 32
+
+
+def _pulse_cosine(a, b) -> float:
+    """pulse.prototypes.cosine (mirror): 0.0 for None / length mismatch,
+    clamped to [-1, 1]."""
+    if a is None or b is None or len(a) != len(b):
+        return 0.0
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    if na == 0 or nb == 0:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    return max(-1.0, min(1.0, dot / (na * nb)))
+
+
+def _pulse_strongest(vector, bank):
+    """pulse.prototypes.strongest_similarity (mirror): None when the bank
+    is empty — absence of evidence is never a negative score."""
+    if vector is None or not bank:
+        return None
+    return max(_pulse_cosine(vector, proto) for proto in bank)
+
+
+def _pulse_floor(value):
+    """matrix._floor (mirror): display similarity never below 0.0, capped
+    at 1.0; None stays None (neutral)."""
+    if value is None:
+        return None
+    return max(0.0, min(1.0, float(value)))
+
+
+def _pulse_level(value, threshold, state) -> str:
+    """matrix._level (mirror): a value never renders strong/weak for a
+    'learning' tool or a missing value."""
+    if value is None or state != "ready":
+        return "neutral"
+    return "strong" if value >= threshold else "weak"
+
+
+def _unpack_pulse_vector(blob) -> list[float] | None:
+    """float32 LE BLOB -> list[float] (the sketch convention shared with
+    events.sketch and the pulse writer's pack_vector); malformed -> None."""
+    if not blob:
+        return None
+    if len(blob) % 4:
+        return None
+    return list(struct.unpack(f"<{len(blob) // 4}f", bytes(blob)))
+
 
 def _pulse_shape() -> dict:
-    """Matrix rows x 4 columns (S4 pulse.matrix when importable)."""
-    shape = {"rows": [], "columns": list(_PULSE_COLUMNS), "available": False}
-    _, fn = _engine_first(
-        ("pulse.matrix", "pulse"),
-        ("matrix", "get_matrix", "build_matrix", "compute_matrix"))
-    if fn is None:
-        return shape
+    """Profile-DB fallback for the isolated dashboard half (4-column
+    matrix rows x 4).
+
+    The plugin-host child cannot import the agent-side in-memory engine,
+    so PULSE state is bridged through the profile DB the agent half
+    persists (storage.migration v4): ``pulse_tools`` (LIVE rows) plus the
+    bounded derived-vector state (``pulse_prototypes`` banks, the derived
+    ``pulse_goal`` vector, recent ``pulse_capsules`` vectors). Empty
+    banks stay neutral and never hide tool rows; the response keeps the
+    live engine's {rows, columns, available} contract. DB unavailable /
+    read fault -> documented empty shape, never a 500.
+    """
+    shape = {"rows": [], "columns": list(_PULSE_COLUMNS),
+             "available": False}
     try:
-        result = fn()
+        conn = _connect()
     except Exception:
         return shape
+    tool_rows, banks, goal_vector, capsules = [], {}, None, {}
     try:
-        if isinstance(result, dict):
-            rows = result.get("rows", [])
-            cols = result.get("columns", _PULSE_COLUMNS)
-            shape.update({"rows": list(rows), "columns": list(cols),
-                          "available": True})
-        elif isinstance(result, (list, tuple)):
-            shape.update({"rows": list(result), "available": True})
+        _migration.schema_bootstrap(conn)
+        tool_rows = conn.execute(
+            "SELECT id, tool_name, first_seen, last_seen,"
+            " calls_started, calls_completed, errors"
+            " FROM pulse_tools ORDER BY first_seen, id").fetchall()
+        if not tool_rows:
+            return shape
+        for tool, bank, blob in conn.execute(
+                "SELECT tool_name, bank, vector FROM pulse_prototypes"
+                " ORDER BY tool_name, bank, id"):
+            vec = _unpack_pulse_vector(blob)
+            if vec is None:
+                continue
+            banks.setdefault(tool, {"good": [], "friction": [],
+                                    "objective_friction": []}) \
+                .setdefault(bank, []).append(vec)
+        goal_row = conn.execute(
+            "SELECT ts, vector, backend FROM pulse_goal WHERE id = 1"
+        ).fetchone()
+        if goal_row is not None:
+            goal_vector = _unpack_pulse_vector(goal_row[1])
+        for tool, ts, blob in conn.execute(
+                "SELECT tool_name, ts, vector FROM pulse_capsules"
+                " ORDER BY tool_name, ts, id"):
+            vec = _unpack_pulse_vector(blob)
+            if vec is not None:
+                capsules.setdefault(tool, []).append({"vector": vec,
+                                                      "ts": ts})
     except Exception:
-        return {"rows": [], "columns": list(_PULSE_COLUMNS), "available": False}
+        return shape
+    finally:
+        conn.close()
+
+    cur = _settings_current()
+    thresholds = {}
+    for key in ("goal", "good", "friction"):
+        value = cur.get(f"pulse.thresholds.{key}")
+        thresholds[key] = (value if value is not None
+                           else _PULSE_DEFAULT_THRESHOLDS[key])
+    min_labeled = cur.get("pulse.min_labeled")
+    min_labeled = int(min_labeled) if min_labeled is not None \
+        else _PULSE_DEFAULT_MIN_LABELED
+
+    rows = []
+    for (tool_id, tool, first_seen, last_seen, started, completed,
+         errors) in tool_rows:
+        bank = banks.get(tool, {"good": [], "friction": [],
+                                "objective_friction": []})
+        labeled = len(bank.get("good", ())) + len(bank.get("friction", ()))
+        state = "ready" if labeled >= min_labeled else "learning"
+        reference = (bank.get("good", []) + bank.get("friction", [])
+                     + bank.get("objective_friction", []))
+        if not reference:
+            reference = [c["vector"] for c in
+                         capsules.get(tool, [])[-_PULSE_CAPSULE_DISPLAY_CAP:]
+                         if c.get("vector") is not None]
+        goal_raw = _pulse_strongest(goal_vector, reference)
+        goal_value = _pulse_floor(goal_raw)
+        goal_cell = {"value": goal_value,
+                     "state": "neutral" if goal_raw is None else state,
+                     "level": _pulse_level(goal_value,
+                                            thresholds["goal"], state)}
+
+        good_raw = _pulse_strongest(goal_vector, bank.get("good", []))
+        good_value = _pulse_floor(good_raw)
+        good_cell = {"value": good_value,
+                     "state": "neutral" if good_raw is None else state,
+                     "level": _pulse_level(good_value,
+                                            thresholds["good"], state)}
+
+        friction_user = _pulse_strongest(goal_vector,
+                                         bank.get("friction", []))
+        friction_obj = _pulse_strongest(goal_vector,
+                                        bank.get("objective_friction", []))
+        friction_parts = [v for v in (friction_user, friction_obj)
+                          if v is not None]
+        friction_raw = max(friction_parts) if friction_parts else None
+        friction_value = _pulse_floor(friction_raw)
+        friction_cell = {
+            "value": friction_value,
+            "state": "neutral" if friction_raw is None else state,
+            "level": _pulse_level(friction_value,
+                                   thresholds["friction"], state),
+            "user": _pulse_floor(friction_user),
+            "objective": _pulse_floor(friction_obj),
+        }
+
+        rows.append({
+            "tool_name": tool,
+            "tool_id": tool_id,
+            "state": state,
+            "labeled": labeled,
+            "live": {
+                "calls_started": started,
+                "calls_completed": completed,
+                "errors": errors,
+                "last_seen": last_seen,
+                "first_seen": first_seen,
+                # No in-process session state in the isolated child: the
+                # global snapshot is reported empty, never guessed.
+                "global": {},
+            },
+            "goal": goal_cell,
+            "good": good_cell,
+            "friction": friction_cell,
+        })
+    shape["rows"] = rows
+    shape["available"] = True
     return shape
+
+
+def _pulse_live_view() -> dict | None:
+    """The in-process engine view (gateway agent half) when it holds
+    rows; None when the engine is unavailable (isolated child) or empty —
+    the caller then serves the profile-DB fallback so persisted tool
+    rows are never hidden by an empty in-memory engine."""
+    try:
+        eng = importlib.import_module("engine")
+    except Exception:
+        return None
+    try:
+        view = eng.get_engine().pulse_view()
+    except Exception:
+        return None
+    if not isinstance(view, dict) or not view.get("rows"):
+        return None
+    return view
 
 
 def _portrait_shape() -> dict:
@@ -601,8 +788,12 @@ def _context_shape() -> dict:
 
 def _reset_dataset() -> dict:
     """Wipe the plugin-data analytical dataset (events + portrait history
-    if present). Never touches config. Idempotent; returns counts."""
-    counts = {"events": 0, "portrait_history": 0}
+    + the PULSE domain). Never touches config. Idempotent; returns
+    counts. The v4 schema bootstrap (first line) guarantees the pulse
+    tables exist before the deletes."""
+    counts = {"events": 0, "portrait_history": 0,
+              "pulse_tools": 0, "pulse_prototypes": 0,
+              "pulse_goal": 0, "pulse_capsules": 0}
     try:
         conn = _connect()
     except Exception:
@@ -618,6 +809,13 @@ def _reset_dataset() -> dict:
             cur = conn.execute("DELETE FROM portrait_history")
             counts["portrait_history"] = (
                 cur.rowcount if cur.rowcount is not None else 0)
+        # PULSE domain (v4): the in-memory engine state is wiped by the
+        # route's reset_engine() call; these tables would otherwise
+        # resurrect the wiped view on the next isolated /pulse read.
+        for table in ("pulse_tools", "pulse_prototypes", "pulse_goal",
+                      "pulse_capsules"):
+            cur = conn.execute(f"DELETE FROM {table}")
+            counts[table] = cur.rowcount if cur.rowcount is not None else 0
         conn.commit()
     except Exception:
         pass
@@ -631,14 +829,14 @@ def _reset_dataset() -> dict:
 
 @router.get("/pulse")
 async def pulse():
-    """Pulse matrix (rows x 4 columns): live engine data when available,
-    else the import-guarded shape probe (S5)."""
-    try:
-        import importlib
-        eng = importlib.import_module("engine")
-        return eng.get_engine().pulse_view()
-    except Exception:
-        return _pulse_shape()
+    """Pulse matrix (rows x 4 columns): the live in-process engine view
+    when the agent half holds rows; otherwise the profile-DB fallback
+    (isolated dashboard child). Empty banks stay neutral and persisted
+    tool rows are never hidden by an empty engine. Never 500s."""
+    view = _pulse_live_view()
+    if view is not None:
+        return view
+    return _pulse_shape()
 
 
 @router.get("/portrait")

@@ -233,7 +233,9 @@ def test_reset_empty_db_ok(tmp_path):
     c = _client(tmp_path)
     r = c.post("/reset")
     assert r.status_code == 200
-    assert r.json() == {"wiped": {"events": 0, "portrait_history": 0},
+    assert r.json() == {"wiped": {"events": 0, "portrait_history": 0,
+                                   "pulse_tools": 0, "pulse_prototypes": 0,
+                                   "pulse_goal": 0, "pulse_capsules": 0},
                         "reset": True}
 
 

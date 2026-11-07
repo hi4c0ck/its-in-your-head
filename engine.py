@@ -28,6 +28,7 @@ from collections import deque
 try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from . import pulse
     from .pulse import matrix as _pulse_matrix
+    from .pulse import persistence as _pulse_persist
     from .perception import encoder as _encoder
     from .perception import anchors as _anchors
     from .perception import portrait as _portrait_mod
@@ -35,6 +36,7 @@ try:  # hermes namespaced import (gateway) vs top-level import (tests)
 except ImportError:
     import pulse
     from pulse import matrix as _pulse_matrix
+    from pulse import persistence as _pulse_persist
     from perception import encoder as _encoder
     from perception import anchors as _anchors
     from perception import portrait as _portrait_mod
@@ -122,6 +124,23 @@ class Engine:
                 self._on_user_turn(ev)
             elif etype == "reasoning_seg":
                 self._on_reasoning_seg(ev)
+        # Hot-path feedback labels (collector) mark the in-memory banks
+        # dirty without any I/O; this worker pass persists them — the
+        # isolated dashboard half sees the labels on its next /pulse read.
+        self._persist_dirty_prototypes()
+
+    def _persist_dirty_prototypes(self) -> list:
+        """Persist every dirty tool's banks, then clear its dirty mark.
+
+        Persist functions are fault-isolated (never raise), so marking
+        clean is unconditional: a failed persist retries on the next
+        change to that tool, never wedging the dirty set.
+        """
+        dirty = self.protos.dirty_tools()
+        for tool in dirty:
+            _pulse_persist.persist_tool_banks(self.protos, tool)
+            self.protos.mark_clean(tool)
+        return sorted(dirty)
 
     @staticmethod
     def _vector_from_event(ev: dict):
@@ -218,9 +237,19 @@ class Engine:
         try:
             capsule = pulse.handle_post_tool_call(
                 ev, self.registry, backend=self._get_backend(), args=None)
-            self._store_capsule(ev.get("tool_name"), capsule)
+            tool = str(ev.get("tool_name") or "unknown")
+            self._store_capsule(tool, capsule)
+            label = None
             if isinstance(capsule, dict):
-                self.protos.record_tool_end(capsule)
+                label = self.protos.record_tool_end(capsule)
+            # Cross-process bridge (worker side, fault-isolated): persist
+            # the bounded derived-vector state the isolated dashboard
+            # half reads. Derived vectors only — the capsule text payload
+            # and any raw prompt never reach the DB.
+            if isinstance(capsule, dict) and capsule.get("vector") is not None:
+                _pulse_persist.persist_capsule(capsule, CAPSULES_PER_TOOL)
+            if label:
+                _pulse_persist.persist_tool_banks(self.protos, tool)
         except Exception:
             logger.exception("its-in-your-head: engine tool_end feed failed")
 
@@ -230,6 +259,18 @@ class Engine:
             return
         try:
             self.goal_text = text
+            # PULSE bridge: persist the DERIVED goal vector (the embedding
+            # of this prompt). The raw text stays in memory only (C6 /
+            # v0.1.3): the goal row stores the vector, never the prompt.
+            try:
+                goal_vector = pulse.activity_encoder.encode_goal_text(
+                    text, self._get_backend())
+                _pulse_persist.persist_goal_vector(
+                    goal_vector, ts=ev.get("ts"),
+                    backend=self._backend_name)
+            except Exception:
+                logger.exception(
+                    "its-in-your-head: goal vector persist failed")
             self.portrait.update_observed_from_text(text, self._get_backend())
             norm = self.portrait.normalized()
             ts = ev.get("ts")

@@ -1,0 +1,160 @@
+"""Profile-DB persistence of the bounded PULSE vector state (S4).
+
+Cross-process bridge: the agent half (metrics worker + engine) and the
+isolated dashboard half (plugin-host child, which cannot import the
+agent's in-memory ``engine`` module) run in separate processes against
+the same profile DB. The live /pulse route reads the in-process engine;
+when that engine is unavailable the dashboard serves /pulse from the
+tables persisted here (see storage.migration v4).
+
+Locked rules honoured:
+- derived vectors ONLY: the goal row stores the embedding of the last
+  user prompt, never the prompt text (v0.1.3 privacy ruling); capsule
+  rows store the capsule vector, never the text payload.
+- bounded: prototype banks follow the store's cap (FIFO), capsule rows
+  follow the engine's per-tool bound; pruning happens on write.
+- worker-side only: every public function here is called from the
+  metrics worker path (engine.on_events / _on_tool_end / _on_user_turn),
+  never from the collector's hot path (hot-path feedback labels only
+  mark the in-memory store dirty; the next worker pass persists them).
+- fault isolated: public functions log and never raise — a persistence
+  fault must not break perception or the worker.
+"""
+from __future__ import annotations
+
+import logging
+import struct
+import time
+
+try:  # hermes namespaced import (gateway) vs top-level import (tests)
+    from ..storage import database as _database
+    from ..storage import migration as _migration
+except ImportError:  # pragma: no cover
+    from storage import database as _database  # type: ignore[no-redef]
+    from storage import migration as _migration  # type: ignore[no-redef]
+
+logger = logging.getLogger(__name__)
+
+_BANKS = ("good", "friction", "objective_friction")
+
+
+def pack_vector(vector) -> bytes | None:
+    """float vector -> little-endian float32 BLOB (the ``events.sketch``
+    convention). None/empty -> None."""
+    if not vector:
+        return None
+    try:
+        return struct.pack(f"<{len(vector)}f",
+                           *(float(x) for x in vector))
+    except (TypeError, ValueError):
+        return None
+
+
+def unpack_vector(blob) -> list[float] | None:
+    """Inverse of :func:`pack_vector`; malformed -> None."""
+    if not blob:
+        return None
+    if len(blob) % 4:
+        return None
+    return list(struct.unpack(f"<{len(blob) // 4}f", bytes(blob)))
+
+
+def _ensure_schema(conn) -> None:
+    """Lazy bootstrap of the derived-vector tables (idempotent; the
+    pulse_tools table is bootstrapped by the registry/migration)."""
+    conn.executescript(_migration.PULSE_STATE_DDL)
+    conn.commit()
+
+
+def persist_tool_banks(store, tool: str) -> None:
+    """Re-sync one tool's persisted banks to the in-memory store state
+    (delete + insert the current capped banks; converged because the
+    engine worker is the single writer per profile DB).
+
+    Best effort: logs and never raises.
+    """
+    try:
+        banks = store.bank(str(tool))
+        vectors = []
+        for label in _BANKS:
+            for vec in banks.get(label, ()):
+                packed = pack_vector(vec)
+                if packed is not None:
+                    vectors.append((str(tool), label, packed))
+        conn = _database.connect()
+        try:
+            _ensure_schema(conn)
+            conn.execute(
+                "DELETE FROM pulse_prototypes WHERE tool_name = ?",
+                (str(tool),))
+            if vectors:
+                now = time.time()
+                conn.executemany(
+                    "INSERT INTO pulse_prototypes"
+                    " (tool_name, bank, ts, vector) VALUES (?, ?, ?, ?)",
+                    [(t, b, now, v) for t, b, v in vectors])
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception(
+            "its-in-your-head: prototype bank persist failed for %s", tool)
+
+
+def persist_capsule(capsule: dict, cap: int) -> None:
+    """Append one encoded activity capsule (vector + ts only — never the
+    text payload fields) and prune per-tool rows past ``cap`` (newest
+    kept, mirroring the engine's deque bound). No-op for vector-less
+    capsules. Best effort: logs and never raises.
+    """
+    if not isinstance(capsule, dict) or capsule.get("vector") is None:
+        return
+    tool = str(capsule.get("tool_name") or "unknown")
+    ts = float(capsule.get("ts") or time.time())
+    blob = pack_vector(capsule["vector"])
+    if blob is None:
+        return
+    try:
+        conn = _database.connect()
+        try:
+            _ensure_schema(conn)
+            conn.execute(
+                "INSERT INTO pulse_capsules (tool_name, ts, vector)"
+                " VALUES (?, ?, ?)",
+                (tool, ts, blob))
+            conn.execute(
+                "DELETE FROM pulse_capsules WHERE tool_name = ? AND id"
+                " NOT IN (SELECT id FROM pulse_capsules WHERE tool_name = ?"
+                " ORDER BY ts DESC, id DESC LIMIT ?)",
+                (tool, tool, max(1, int(cap))))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception(
+            "its-in-your-head: capsule persist failed for %s", tool)
+
+
+def persist_goal_vector(vector, ts: float | None = None,
+                       backend: str | None = None) -> None:
+    """Persist the derived goal vector (singleton row, id = 1): the
+    embedding of the last user prompt. The raw prompt is NEVER written.
+    Best effort: logs and never raises.
+    """
+    blob = pack_vector(vector)
+    if blob is None:
+        return
+    try:
+        conn = _database.connect()
+        try:
+            _ensure_schema(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO pulse_goal"
+                " (id, ts, vector, backend) VALUES (1, ?, ?, ?)",
+                (float(ts) if ts is not None else time.time(), blob,
+                 str(backend) if backend else None))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("its-in-your-head: goal vector persist failed")

@@ -80,6 +80,12 @@ class PrototypeStore:
         self.min_labeled = max(1, int(min_labeled))
         self._lock = threading.Lock()
         self._banks: dict[str, dict[str, list]] = {}
+        # Cross-process bridge: tools whose banks changed since the last
+        # persisted sync. The collector's hot-path feedback labels touch
+        # only this in-memory set (no I/O); the metrics worker persists
+        # the dirty tools on its next pass (see engine._persist_dirty_
+        # prototypes / pulse.persistence.persist_tool_banks).
+        self._dirty: set[str] = set()
 
     def _bank(self, tool: str) -> dict:
         return self._banks.setdefault(
@@ -105,6 +111,7 @@ class PrototypeStore:
             bank = self._bank(str(tool))
             bank[label].append(vec)
             del bank[label][:-self.cap]  # FIFO eviction, keeps newest cap
+            self._dirty.add(str(tool))
             return vec
 
     def add_good(self, tool, capsule_or_vector):
@@ -164,3 +171,13 @@ class PrototypeStore:
     def tools(self) -> list[str]:
         with self._lock:
             return sorted(self._banks)
+
+    # -- cross-process bridge (dirty tracking, in-memory only) -------------
+    def dirty_tools(self) -> set[str]:
+        """Tools with bank changes since the last persisted sync."""
+        with self._lock:
+            return set(self._dirty)
+
+    def mark_clean(self, tool: str) -> None:
+        with self._lock:
+            self._dirty.discard(str(tool))
