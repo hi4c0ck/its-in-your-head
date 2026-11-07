@@ -242,7 +242,7 @@ class Engine:
             return found
         return self._prompt_vectors.get("__last__")
 
-    def _pattern_confidence(self, name, evidence_n, now) -> float:
+    def _pattern_confidence(self, name, evidence_n, now, margin=None) -> float:
         """confidence_from_evidence with plain age in seconds.
 
         n = the pattern's accumulated evidence count (portrait third view);
@@ -252,6 +252,11 @@ class Engine:
         the pattern's last-evidence timestamp, in plain seconds (never an
         epoch value, never the now_s argument). ``confidence_from_evidence``
         treats sub-1e8 values as a plain age, which is what we pass.
+
+        ``margin`` (L11): the entry's top-margin. When given, the
+        calibrated (margin-gated) branch of ``confidence_from_evidence``
+        runs; when None (legacy call sites / no margin available) the
+        legacy output is reproduced exactly.
         """
         try:
             try:
@@ -271,7 +276,7 @@ class Engine:
             except (TypeError, ValueError):
                 age = 0.0
         return float(confidence_from_evidence(
-            int(evidence_n or 0), agreement, age))
+            int(evidence_n or 0), agreement, age, margin=margin))
 
     def _load_reinforced_bank(self, _patterns) -> dict:
         """Reinforced anchors from the DB (D3 route A). Fault-isolated:
@@ -423,7 +428,8 @@ class Engine:
                     evidence_n = int(entry.get("evidence") or 0)
                     repeated = bool(entry.get("repeated"))
                     break
-            confidence = self._pattern_confidence(top_name, evidence_n, now)
+            confidence = self._pattern_confidence(
+                top_name, evidence_n, now, margin=(top or {}).get("margin"))
             # Persist only paired rows (reaction present): prompt-only
             # scoring still updates the in-memory third view, but a
             # prompt-only row must never displace the durable paired
@@ -796,7 +802,8 @@ class Engine:
                 "amplification": entry.get("amplification"),
                 "evidence": int(entry.get("evidence") or 0),
                 "confidence": self._pattern_confidence(
-                    name, entry.get("evidence") or 0, now),
+                    name, entry.get("evidence") or 0, now,
+                    margin=entry.get("margin")),
                 "repeated": bool(entry.get("repeated")),
             })
         raw_signals = full.get("dim_signals") or {}
