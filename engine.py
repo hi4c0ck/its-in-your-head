@@ -48,6 +48,24 @@ DRIFT_MAX = 512            # bounded in-memory portrait history rows
 CAPSULES_PER_TOOL = 32    # recent encoded capsules kept for GOAL fallback
 
 
+def _reinforce_allowed(settings, amplification) -> bool:
+    """Reinforcement gate (D3 route A): enabled AND amplification is a
+    number at least ``perception.reinforce_min_amplification``.
+    Pure helper so the threshold semantics are pinned in tests.
+    """
+    if not (settings or {}).get("perception.reinforce", True):
+        return False
+    if amplification is None:
+        return False
+    try:
+        threshold = float(
+            (settings or {}).get(
+                "perception.reinforce_min_amplification", 0.15))
+        return float(amplification) >= threshold
+    except (TypeError, ValueError):
+        return False
+
+
 def _dims():
     return list(_anchors.DIMENSIONS)
 
@@ -97,6 +115,7 @@ class Engine:
         self._backend = None
         self._backend_name = str(
             s.get("perception.encoder") or _encoder.DEFAULT_BACKEND)
+        self._settings = dict(s)
 
     # -- backend (lazy) --------------------------------------------------- #
     def _get_backend(self):
@@ -245,6 +264,56 @@ class Engine:
         return float(confidence_from_evidence(
             int(evidence_n or 0), agreement, age))
 
+    def _load_reinforced_bank(self, _patterns) -> dict:
+        """Reinforced anchors from the DB (D3 route A). Fault-isolated:
+        any failure degrades to {} (preset-only bank), never breaks
+        scoring. Worker-side only; the table is tiny.
+        """
+        try:
+            _db, _mig = self._storage()
+            conn = _db.connect()
+            try:
+                _mig.schema_bootstrap(conn)
+                return _patterns.load_reinforced(conn)
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception(
+                "its-in-your-head: reinforced bank load failed")
+            return {}
+
+    def _maybe_reinforce_and_persist(self, bank, top_entry,
+                                     reaction_vector, _patterns) -> None:
+        """Reinforce the top pattern with the reaction vector and persist
+        the reinforced entry (D3 route A). Worker-side only, after a
+        PAIRED scoring turn; fault-isolated like the
+        pattern_affinity_history writer — a failure must not touch the
+        live pipeline. Gate: settings ``perception.reinforce`` and the
+        top pattern's amplification >= the configured minimum.
+        """
+        try:
+            if reaction_vector is None:
+                return
+            amplification = (top_entry or {}).get("amplification")
+            if not _reinforce_allowed(self._settings, amplification):
+                return
+            name = (top_entry or {}).get("name")
+            if not name or name not in bank:
+                return
+            reinforced_entry = _patterns.reinforce(
+                bank[name], reaction_vector)
+            _db, _mig = self._storage()
+            conn = _db.connect()
+            try:
+                _mig.schema_bootstrap(conn)
+                _patterns.persist_reinforced(
+                    conn, {name: reinforced_entry})
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception(
+                "its-in-your-head: pattern reinforce persist failed")
+
     def _update_patterns_and_persist(self, prompt_vector, reaction_vector,
                                      ts) -> None:
         """Score one turn against the pattern bank and persist derived rows.
@@ -265,8 +334,12 @@ class Engine:
             return
         try:
             backend = self._get_backend()
+            reinforced = self._load_reinforced_bank(_patterns)
             bank = _patterns.build_pattern_bank(
-                backend, getattr(backend, "model_version", "unknown"))
+                backend, getattr(backend, "model_version", "unknown"),
+                custom_patterns=self._settings.get(
+                    "perception.custom_patterns"),
+                reinforced=reinforced)
             if not bank:
                 return
             scored = _patterns.score_turn(
@@ -304,6 +377,8 @@ class Engine:
                 self._persist_pattern_row(
                     top, now, evidence_n, confidence, repeated, set(bank),
                     _patterns)
+                self._maybe_reinforce_and_persist(
+                    bank, top, reaction_vector, _patterns)
         except Exception:
             logger.exception(
                 "its-in-your-head: engine pattern scoring failed")
@@ -732,6 +807,7 @@ class Engine:
             merged.update({k: v for k, v in settings.items()
                            if k in _settings.DEFAULTS})
         with self._lock:
+            self._settings = dict(merged)
             self._capsules.clear()
             self._history.clear()
             # Explicit wipe: never resurrect pre-wipe rows from the DB.

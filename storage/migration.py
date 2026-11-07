@@ -7,7 +7,7 @@ drop every worker batch. :func:`migrate` upgrades such databases in place —
 preserving existing rows — inside a single transaction.
 
 Versioning: ``meta(key TEXT PRIMARY KEY, value TEXT)`` with
-``schema_version`` = ``5`` for current-shape databases (fresh or migrated).
+``schema_version`` = ``6`` for current-shape databases (fresh or migrated).
 A database already at the expected version is a fast-path no-op.
 
 Schema v3 (F2 drift durability): adds the ``portrait_history`` table —
@@ -39,6 +39,14 @@ evidence, confidence, repeated flag). It holds NO raw user or reasoning
 content: ``top_pattern`` is a PATTERN NAME from the preset bank, never
 free text. v4 databases gain the table empty (existing rows preserved).
 
+Schema v6 (PORTRAIT perception bank upscaling, D3 route A): adds
+``pattern_bank`` — one row per reinforced pattern name carrying the
+DERIVED prompt/agent anchor vectors (little-endian float32 BLOBs, the
+``events.sketch`` convention), an evidence count, and ``updated_at``.
+It holds NO raw content: ``pattern_name`` is a bank name (preset or
+custom), never free text, and no raw-content column exists. v5
+databases gain the table empty (existing rows preserved).
+
 Import rules: this module is importable from both the worker (``metrics``)
 and the dashboard mount without importing either of them, and it performs
 no I/O at import time.
@@ -48,7 +56,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION  # alias
 
 _logger = logging.getLogger(__name__)
@@ -261,6 +269,20 @@ PATTERN_AFFINITY_HISTORY_DDL = (
     + _CREATE_PATTERN_AFFINITY_HISTORY_INDEX + ";\n"
 )
 
+# --- Reinforced pattern bank (v6, D3 route A) ------------------------------
+# Derived vectors only (float32 struct-packed BLOBs); ``pattern_name`` is
+# a bank name (preset or custom), never free text; no raw content column
+# exists. Upserted per pattern by perception.patterns.persist_reinforced.
+_CREATE_PATTERN_BANK_TABLE = """CREATE TABLE IF NOT EXISTS pattern_bank (
+    pattern_name TEXT PRIMARY KEY,
+    prompt_anchor BLOB NOT NULL,
+    agent_anchor BLOB NOT NULL,
+    evidence INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL
+)"""
+
+PATTERN_BANK_DDL = _CREATE_PATTERN_BANK_TABLE + ";\n"
+
 
 def prune_pattern_affinity_history(conn: sqlite3.Connection) -> None:
     """Prune ``pattern_affinity_history`` to ``PATTERN_AFFINITY_HISTORY_MAX``.
@@ -387,6 +409,15 @@ def _create_pattern_affinity_history(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_PATTERN_AFFINITY_HISTORY_INDEX)
 
 
+def _create_pattern_bank(conn: sqlite3.Connection) -> None:
+    """Create ``pattern_bank`` if absent (v6; IF NOT EXISTS, so a
+    pre-existing table is a no-op and existing rows are preserved).
+    Individual ``execute`` calls — no ``executescript`` — so the calls
+    stay inside the caller's transaction (migrate() owns BEGIN/COMMIT).
+    """
+    conn.execute(_CREATE_PATTERN_BANK_TABLE)
+
+
 def _create_pulse_tables(conn: sqlite3.Connection) -> None:
     """Create the v4 pulse-domain tables if absent (all IF NOT EXISTS,
     so a pre-existing set is a no-op and existing rows are preserved).
@@ -418,6 +449,7 @@ def migrate(conn: sqlite3.Connection,
     ``portrait_history`` table (empty; existing events rows preserved), and
     v3 -> v4 gains the pulse-domain tables (empty; existing rows preserved),
     and v4 -> v5 gains ``pattern_affinity_history`` (empty; existing rows
+    preserved), and v5 -> v6 gains ``pattern_bank`` (empty; existing rows
     preserved).
     All steps run in a single transaction when the caller has not already
     opened one; any failure rolls the whole migration back (no partial
@@ -445,6 +477,7 @@ def migrate(conn: sqlite3.Connection,
         _create_portrait_history(conn)
         _create_pulse_tables(conn)
         _create_pattern_affinity_history(conn)
+        _create_pattern_bank(conn)
         conn.execute(_META_TABLE_DDL)
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -491,6 +524,7 @@ __all__ = [
     "PULSE_STATE_DDL",
     "PATTERN_AFFINITY_HISTORY_MAX",
     "PATTERN_AFFINITY_HISTORY_DDL",
+    "PATTERN_BANK_DDL",
     "prune_pattern_affinity_history",
     "get_schema_version",
     "migrate",

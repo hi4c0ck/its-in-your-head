@@ -13,12 +13,18 @@ x agreement x exponential recency decay), pinned here and tuned later.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import math
+import struct
+import time
 from pathlib import Path
 
 from .anchors import ANCHORS, DIMENSIONS, resolve_data_dir
 from .resemblance import cosine
+
+logger = logging.getLogger(__name__)
 
 PATTERN_BANK_VERSION = "1"
 PATTERN_CACHE_FILE = "pattern_vectors.json"
@@ -94,9 +100,16 @@ CONFIDENCE_ALPHA = 1.0 / math.log(1.0 + CONFIDENCE_SATURATION_N)  # n=10 -> 1.0
 CONFIDENCE_HALF_LIFE_S = 7 * 24 * 60 * 60  # 7-day half-life
 CONFIDENCE_LAMBDA = math.log(2.0) / CONFIDENCE_HALF_LIFE_S
 
-# In-memory cache: (model_version, PATTERN_BANK_VERSION) -> bank dict.
-# A model bump must never compare across vector spaces, so the key always
-# carries the model version (same discipline as anchors.py file cache).
+# Reinforcement step size (pinned, D3 route A): EMA weight of each new
+# reaction vector into the agent anchor. Small on purpose — one strong
+# observation nudges the interpretation, it does not rewrite it.
+REINFORCE_ALPHA = 0.05
+
+# In-memory cache: (model_version, PATTERN_BANK_VERSION, inputs_digest)
+# -> bank dict. A model bump must never compare across vector spaces,
+# and a change in the custom/reinforced input sets changes the digest,
+# so the key always carries both (same discipline as anchors.py file
+# cache).
 _BANK_CACHE: dict = {}
 
 
@@ -112,8 +125,158 @@ def _mean_normalized(vectors: list[list[float]]) -> list[float]:
     return [x / norm for x in mean]
 
 
-def _build_uncached(backend) -> dict:
-    """Encode every paraphrase list through the backend, pinned order."""
+def _normalize(v):
+    norm = math.sqrt(sum(x * x for x in v))
+    if norm == 0:
+        return [0.0] * len(v)
+    return [x / norm for x in v]
+
+
+def _validate_custom(custom_patterns) -> list:
+    """Valid custom entries (name/prompt/agent), invalid ones skipped.
+
+    A bad entry is logged and skipped — it must never break the bank
+    build. Duplicate names within the custom set: first wins.
+    """
+    if not custom_patterns:
+        return []
+    if not isinstance(custom_patterns, (list, tuple)):
+        logger.warning(
+            "its-in-your-head: custom_patterns not a list (%r); ignored",
+            type(custom_patterns))
+        return []
+    valid = []
+    seen = set()
+    for entry in custom_patterns:
+        if not isinstance(entry, dict):
+            logger.warning(
+                "its-in-your-head: custom pattern entry not an object "
+                "(%r); skipped", entry)
+            continue
+        name = entry.get("name")
+        prompt = entry.get("prompt", entry.get("prompt_paraphrases"))
+        agent = entry.get("agent", entry.get("agent_paraphrases"))
+        if not isinstance(name, str) or not name.strip():
+            logger.warning(
+                "its-in-your-head: custom pattern missing/invalid name "
+                "(%r); skipped", entry)
+            continue
+        if name in seen:
+            logger.warning(
+                "its-in-your-head: duplicate custom pattern name %r; "
+                "skipped", name)
+            continue
+        bad = False
+        for label, lst in (("prompt", prompt), ("agent", agent)):
+            if (not isinstance(lst, (list, tuple)) or not lst
+                    or not all(isinstance(s, str) and s for s in lst)):
+                logger.warning(
+                    "its-in-your-head: custom pattern %r has invalid "
+                    "%s list; skipped", name, label)
+                bad = True
+                break
+        if bad:
+            continue
+        seen.add(name)
+        valid.append({
+            "name": name,
+            "prompt": [str(s) for s in prompt],
+            "agent": [str(s) for s in agent],
+        })
+    return valid
+
+
+def _validate_reinforced(reinforced) -> dict:
+    """Valid reinforced bank {name: {prompt_anchor, agent_anchor, evidence}}.
+
+    Invalid entries are logged and skipped; a bad persisted row must
+    never break the bank build.
+    """
+    if not reinforced:
+        return {}
+    if not isinstance(reinforced, dict):
+        logger.warning(
+            "its-in-your-head: reinforced bank not a mapping (%r); ignored",
+            type(reinforced))
+        return {}
+    valid = {}
+    for name, entry in reinforced.items():
+        if not isinstance(name, str) or not name:
+            logger.warning(
+                "its-in-your-head: reinforced entry with invalid name "
+                "(%r); skipped", name)
+            continue
+        if not isinstance(entry, dict):
+            logger.warning(
+                "its-in-your-head: reinforced entry %r not an object; "
+                "skipped", name)
+            continue
+        anchors = {}
+        bad = False
+        for key in ("prompt_anchor", "agent_anchor"):
+            vec = entry.get(key)
+            if (not isinstance(vec, (list, tuple)) or not vec):
+                logger.warning(
+                    "its-in-your-head: reinforced entry %r missing "
+                    "valid %s; skipped", name, key)
+                bad = True
+                break
+            try:
+                anchors[key] = [float(x) for x in vec]
+            except (TypeError, ValueError):
+                logger.warning(
+                    "its-in-your-head: reinforced entry %r has non-numeric "
+                    "%s; skipped", name, key)
+                bad = True
+                break
+        if bad:
+            continue
+        if len(anchors["prompt_anchor"]) != len(anchors["agent_anchor"]):
+            logger.warning(
+                "its-in-your-head: reinforced entry %r anchor dims "
+                "differ; skipped", name)
+            continue
+        try:
+            evidence = int(entry.get("evidence") or 0)
+        except (TypeError, ValueError):
+            evidence = 0
+        anchors["evidence"] = max(0, evidence)
+        valid[name] = anchors
+    return valid
+
+
+def _inputs_digest(custom_valid, reinforced_valid) -> str:
+    """sha256 over the normalized (sorted) custom+reinforced inputs.
+
+    Vectors built under different input sets must never be compared, so
+    the digest is part of the cache key: presence of ANY custom or
+    reinforced input changes the key.
+    """
+    payload = {
+        "custom": sorted(
+            ({"name": e["name"], "prompt": e["prompt"],
+              "agent": e["agent"]} for e in custom_valid),
+            key=lambda e: e["name"]),
+        "reinforced": sorted(
+            ({"name": n, "prompt_anchor": v["prompt_anchor"],
+              "agent_anchor": v["agent_anchor"],
+              "evidence": v["evidence"]}
+             for n, v in reinforced_valid.items()),
+            key=lambda e: e["name"]),
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _build_uncached(backend, custom_valid=(), reinforced_valid=None) -> dict:
+    """Encode every paraphrase list through the backend, pinned order.
+
+    Merge order: preset base, then reinforced overrides (persisted
+    vectors replace the preset anchors for that name), then custom
+    entries (same name: custom wins — encoded fresh).
+    """
+    if reinforced_valid is None:
+        reinforced_valid = {}
     bank: dict = {}
     for entry in PATTERN_BANK:  # preset order, never set-order
         prompt_vecs = backend.encode(list(entry["prompt_paraphrases"]))
@@ -121,6 +284,21 @@ def _build_uncached(backend) -> dict:
         bank[entry["name"]] = {
             "prompt_anchor": _mean_normalized(prompt_vecs),
             "agent_anchor": _mean_normalized(agent_vecs),
+            "evidence": 0,
+        }
+    for name, entry in reinforced_valid.items():
+        bank[name] = {
+            "prompt_anchor": list(entry["prompt_anchor"]),
+            "agent_anchor": list(entry["agent_anchor"]),
+            "evidence": int(entry.get("evidence") or 0),
+        }
+    for entry in custom_valid:
+        prompt_vecs = backend.encode(list(entry["prompt"]))
+        agent_vecs = backend.encode(list(entry["agent"]))
+        bank[entry["name"]] = {
+            "prompt_anchor": _mean_normalized(prompt_vecs),
+            "agent_anchor": _mean_normalized(agent_vecs),
+            "evidence": 0,
         }
     return bank
 
@@ -129,7 +307,8 @@ def _pattern_cache_path(data_dir) -> Path:
     return Path(resolve_data_dir(data_dir)) / PATTERN_CACHE_FILE
 
 
-def _load_file_cache(path: Path, model_version: str) -> dict | None:
+def _load_file_cache(path: Path, model_version: str,
+                     inputs_digest: str | None = None) -> dict | None:
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except Exception:
@@ -138,21 +317,22 @@ def _load_file_cache(path: Path, model_version: str) -> dict | None:
         return None
     if data.get("model_version") != model_version:
         return None
-    names = [e["name"] for e in PATTERN_BANK]
-    if data.get("patterns") != names:
+    if data.get("inputs_digest") != inputs_digest:
         return None
     vectors = data.get("vectors")
-    if not isinstance(vectors, dict) or set(vectors) != set(names):
+    if not isinstance(vectors, dict) or not vectors:
         return None
     return vectors
 
 
-def _save_file_cache(path: Path, model_version: str, bank: dict) -> None:
+def _save_file_cache(path: Path, model_version: str, bank: dict,
+                     inputs_digest: str | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "pattern_bank_version": PATTERN_BANK_VERSION,
         "model_version": model_version,
-        "patterns": [e["name"] for e in PATTERN_BANK],
+        "inputs_digest": inputs_digest,
+        "patterns": list(bank),
         "vectors": bank,
     }
     tmp = path.with_suffix(".tmp")
@@ -161,32 +341,188 @@ def _save_file_cache(path: Path, model_version: str, bank: dict) -> None:
 
 
 def build_pattern_bank(backend, model_version: str | None = None,
-                       data_dir=None) -> dict:
-    """Pattern name -> {prompt_anchor, agent_anchor} normalized vectors.
+                       data_dir=None, custom_patterns=None,
+                       reinforced=None) -> dict:
+    """Pattern name -> {prompt_anchor, agent_anchor, evidence}.
 
-    Cached on the pair (model_version, PATTERN_BANK_VERSION): a model bump
-    or bank bump always rebuilds, never reuses vectors from another space.
-    With ``data_dir`` the cache is also persisted to disk (mirrors the
-    anchors.py file cache); without it the cache is in-memory only.
+    Cached on (model_version, PATTERN_BANK_VERSION, inputs_digest): a
+    model bump, bank bump, or ANY change to the custom/reinforced input
+    sets always rebuilds — vectors built under different inputs or
+    model versions are never compared or reused. Merge order: preset
+    base, then reinforced overrides, then custom entries (custom wins
+    on a shared name).
     """
     if model_version is None:
         model_version = getattr(backend, "model_version", "unknown")
-    key = (str(model_version), PATTERN_BANK_VERSION)
+    custom_valid = _validate_custom(custom_patterns)
+    reinforced_valid = _validate_reinforced(reinforced)
+    digest = _inputs_digest(custom_valid, reinforced_valid)
+    key = (str(model_version), PATTERN_BANK_VERSION, digest)
     if data_dir is None:
         cached = _BANK_CACHE.get(key)
         if cached is not None:
             return {n: dict(v) for n, v in cached.items()}
-        bank = _build_uncached(backend)
+        bank = _build_uncached(backend, custom_valid, reinforced_valid)
         _BANK_CACHE[key] = bank
         return {n: dict(v) for n, v in bank.items()}
     path = _pattern_cache_path(data_dir)
-    cached = _load_file_cache(path, str(model_version))
+    cached = _load_file_cache(path, str(model_version), digest)
     if cached is not None:
         return cached
-    bank = _build_uncached(backend)
-    _save_file_cache(path, str(model_version), bank)
+    bank = _build_uncached(backend, custom_valid, reinforced_valid)
+    _save_file_cache(path, str(model_version), bank, digest)
     _BANK_CACHE[key] = bank
     return {n: dict(v) for n, v in bank.items()}
+
+
+def reinforce(pattern_entry, reaction_vector, alpha=None) -> dict:
+    """One EMA step on the AGENT anchor only (D3 route A).
+
+    Repeated high-amplification observations of how the agent
+    interprets a pattern gradually move the agent-side interpretation
+    anchors toward the observed reaction vectors; the prompt side is
+    authored ground truth and is never drifted here.
+
+    updated = normalize((1-alpha) * agent_anchor + alpha * reaction).
+    ``evidence`` increments by one. The input entry is not mutated;
+    the prompt anchor is carried over unchanged.
+    """
+    if alpha is None:
+        alpha = REINFORCE_ALPHA
+    alpha = float(alpha)
+    agent = [float(x) for x in pattern_entry["agent_anchor"]]
+    reaction = [float(x) for x in reaction_vector]
+    if len(agent) != len(reaction):
+        raise ValueError("agent anchor / reaction dim mismatch")
+    blended = [(1.0 - alpha) * a + alpha * r
+               for a, r in zip(agent, reaction)]
+    try:
+        evidence = int(pattern_entry.get("evidence") or 0)
+    except (TypeError, ValueError):
+        evidence = 0
+    return {
+        "prompt_anchor": list(pattern_entry["prompt_anchor"]),
+        "agent_anchor": _normalize(blended),
+        "evidence": evidence + 1,
+    }
+
+
+def _pack_vector(vector) -> bytes | None:
+    if not vector:
+        return None
+    try:
+        return struct.pack(f"<{len(vector)}f",
+                           *(float(x) for x in vector))
+    except (TypeError, ValueError):
+        return None
+
+
+def _unpack_vector(blob) -> list | None:
+    if not blob or len(blob) % 4:
+        return None
+    try:
+        return list(struct.unpack(f"<{len(blob) // 4}f", bytes(blob)))
+    except (TypeError, struct.error):
+        return None
+
+
+_PATTERN_BANK_CREATE = """CREATE TABLE IF NOT EXISTS pattern_bank (
+    pattern_name TEXT PRIMARY KEY,
+    prompt_anchor BLOB NOT NULL,
+    agent_anchor BLOB NOT NULL,
+    evidence INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL
+)"""
+
+
+def persist_reinforced(conn, entries) -> None:
+    """Persist reinforced anchors: struct-packed float32 BLOBs, upsert
+    per pattern. Derived vectors only; ``pattern_name`` is a bank name
+    (preset or custom), never free text; no raw content column exists.
+
+    Pulse persistence discipline: log-and-never-raise — a persistence
+    failure must not touch the live pipeline.
+    """
+    try:
+        if not isinstance(entries, dict) or not entries:
+            return
+        try:
+            conn.execute(_PATTERN_BANK_CREATE)
+        except Exception:
+            pass  # bootstrap normally creates it; keep going anyway
+        for name, entry in entries.items():
+            if not isinstance(name, str) or not name:
+                logger.warning(
+                    "its-in-your-head: reinforced persist: invalid name "
+                    "%r; skipped", name)
+                continue
+            if not isinstance(entry, dict):
+                continue
+            prompt_blob = _pack_vector(entry.get("prompt_anchor"))
+            agent_blob = _pack_vector(entry.get("agent_anchor"))
+            if prompt_blob is None or agent_blob is None:
+                logger.warning(
+                    "its-in-your-head: reinforced persist: %r missing "
+                    "valid anchors; skipped", name)
+                continue
+            try:
+                evidence = int(entry.get("evidence") or 0)
+            except (TypeError, ValueError):
+                evidence = 0
+            now = time.time()
+            existing = None
+            try:
+                row = conn.execute(
+                    "SELECT updated_at FROM pattern_bank "
+                    "WHERE pattern_name = ?", (name,)).fetchone()
+                existing = float(row[0]) if row else None
+            except Exception:
+                existing = None
+            if existing is not None and now <= existing:
+                now = existing + 0.001  # keep updated_at monotonic
+            conn.execute(
+                "INSERT OR REPLACE INTO pattern_bank "
+                "(pattern_name, prompt_anchor, agent_anchor, evidence, "
+                "updated_at) VALUES (?, ?, ?, ?, ?)",
+                (name, prompt_blob, agent_blob, max(0, evidence), now))
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    except Exception:
+        logger.exception(
+            "its-in-your-head: reinforced pattern persist failed")
+
+
+def load_reinforced(conn) -> dict:
+    """Load persisted reinforced anchors as
+    {name: {prompt_anchor, agent_anchor, evidence}} (float32 tolerance).
+    Empty/absent/unreadable -> {}. Log-and-never-raise.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT pattern_name, prompt_anchor, agent_anchor, evidence "
+            "FROM pattern_bank").fetchall()
+    except Exception:
+        logger.exception(
+            "its-in-your-head: reinforced pattern load failed")
+        return {}
+    out = {}
+    for name, prompt_blob, agent_blob, evidence in rows:
+        prompt = _unpack_vector(prompt_blob)
+        agent = _unpack_vector(agent_blob)
+        if prompt is None or agent is None:
+            continue
+        try:
+            ev = int(evidence or 0)
+        except (TypeError, ValueError):
+            ev = 0
+        out[str(name)] = {
+            "prompt_anchor": prompt,
+            "agent_anchor": agent,
+            "evidence": ev,
+        }
+    return out
 
 
 def score_turn(prompt_vector, reaction_vector, bank: dict) -> dict:

@@ -22,6 +22,13 @@ DEFAULTS = {
     "adaptation.rules": [],
     # S2 adjudication 2026-11-06: values tier-0 | tier-1-onnx (default tier-0)
     "perception.encoder": "tier-0",
+    # D3 upscale route B (manual injection): extra bank patterns, each an
+    # object {name: str, prompt: [str, ...], agent: [str, ...]}.
+    "perception.custom_patterns": [],
+    # D3 upscale route A (context): reinforce agent anchors on strong
+    # paired observations; minimum amplification to qualify.
+    "perception.reinforce": True,
+    "perception.reinforce_min_amplification": 0.15,
 }
 
 

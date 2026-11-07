@@ -59,7 +59,25 @@ Keys (land with S5; `adaptation.enabled` defaults **false**):
 `pulse.prototype_cap`, `pulse.min_labeled`, `pulse.thresholds.{goal,good,friction}`,
 `adaptation.enabled`, `adaptation.rules[]`,
 `perception.encoder` (S2 adjudication 2026-11-06: values `tier-0` | `tier-1-onnx`,
-default `tier-0`; Tier-1 ONNX revision/sha256 pin pending vendor download).
+default `tier-0`; Tier-1 ONNX revision/sha256 pin pending vendor download),
+`perception.custom_patterns[]` (D3 upscale route B, default `[]`; each entry
+an object `{name, prompt[], agent[]}` — paraphrase lists, never raw content),
+`perception.reinforce` (D3 upscale route A, default **true**),
+`perception.reinforce_min_amplification` (default `0.15`).
+
+### D3 upscale adjudication (2026-11-07, L5): schema v6 `pattern_bank`
+
+Schema v6 adds `pattern_bank` — one row per reinforced pattern name:
+`pattern_name TEXT PRIMARY KEY`, `prompt_anchor BLOB NOT NULL`,
+`agent_anchor BLOB NOT NULL`, `evidence INTEGER NOT NULL DEFAULT 0`,
+`updated_at REAL NOT NULL`. Anchors are derived vectors only (float32
+struct-packed BLOBs); `pattern_name` is a bank name (preset or custom),
+never free text; no raw-content column exists. Reinforcement is an EMA
+(`REINFORCE_ALPHA = 0.05`) on the AGENT anchor only — the prompt anchor
+is authored ground truth and never drifts. The pattern-bank cache key is
+`(model_version, PATTERN_BANK_VERSION, sha256(sorted custom+reinforced
+inputs))`; `PATTERN_BANK_VERSION` stays `"1"` (preset content untouched,
+custom/reinforced are additive inputs).
 
 ## C5 — hook matrix (live: pre_llm_call, post_api_request, api_request_error)
 
