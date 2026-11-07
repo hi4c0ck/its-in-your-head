@@ -100,6 +100,28 @@ CONFIDENCE_ALPHA = 1.0 / math.log(1.0 + CONFIDENCE_SATURATION_N)  # n=10 -> 1.0
 CONFIDENCE_HALF_LIFE_S = 7 * 24 * 60 * 60  # 7-day half-life
 CONFIDENCE_LAMBDA = math.log(2.0) / CONFIDENCE_HALF_LIFE_S
 
+# L11 data-calibrated constants (live snapshot, 23 pattern_affinity_history
+# rows, 2026-11-07). Margin-aware branch only; margin=None keeps the legacy
+# constants above exactly.
+# Margin gate: 1 - exp(-margin / K). Observed top_margin: min 0.0016 /
+# median 0.02304 / max 0.06659. K = median / ln(2) so the median margin
+# lands at 0.5x: K = 0.02304 / 0.6931 = 0.0332. Then margin 0.20 -> 0.998x
+# (exceeds the ~0.97x target), 0.067 -> 0.867x, 0.002 -> 0.058x.
+CONFIDENCE_MARGIN_K = 0.0332
+# Alpha fitted so fresh (age<1h) ev=2, agreement=0.5, median margin
+# (gate 0.5) displays 0.45: alpha = 0.45 / (ln(3) * 0.5 * 0.5) = 1.639.
+# The 7-day half-life (CONFIDENCE_LAMBDA) is unchanged in the calibrated
+# branch, preserving the decay intent; at 1-2h ages the decay factor is
+# ~0.99, so hours-old rows stay below fresh ones only via the much larger
+# agreement/margin spread, never by inversion of the age term itself.
+CONFIDENCE_ALPHA_CAL = 1.639
+
+
+def margin_gate(margin) -> float:
+    """Smooth margin gate in [0, 1]: 1 - exp(-max(margin,0)/K)."""
+    m = max(0.0, float(margin))
+    return 1.0 - math.exp(-m / CONFIDENCE_MARGIN_K)
+
 # Reinforcement step size (pinned, D3 route A): EMA weight of each new
 # reaction vector into the agent anchor. Small on purpose — one strong
 # observation nudges the interpretation, it does not rewrite it.
@@ -598,19 +620,40 @@ def score_turn(prompt_vector, reaction_vector, bank: dict) -> dict:
     return {"patterns": patterns, "dim_signals": dim_signals}
 
 
-def confidence_from_evidence(n, agreement, age_s=None, now_s=None) -> float:
-    """First-principles confidence fusion in [0, 1] (pinned, tuned later).
+def confidence_from_evidence(n, agreement, age_s=None, now_s=None,
+                             margin=None, amplification=None) -> float:
+    """Confidence fusion in [0, 1]; legacy (margin=None) and L11-calibrated
+    (margin given) branches.
 
-    ``alpha * log(1 + n) * agreement * exp(-lambda * age)`` where
-    ``alpha = 1 / log(11)`` (so n=10 saturates at 1.0), agreement is in
-    [0, 1], and ``lambda = ln(2) / (7 days in seconds)`` (7-day half-life).
+    Legacy (``margin is None``) — exact pre-L11 output, preserved for
+    backward compatibility with existing engine call sites:
+    ``alpha * log(1+n) * agreement * exp(-lambda*age)`` with
+    ``alpha = 1/log(11)``, ``lambda = ln(2)/(7 days)``.
 
-    ``age_s`` is the age of the evidence in seconds; ``now_s`` is an
-    optional reference time. If ``age_s`` looks like an epoch timestamp
-    (>= 1e8) and ``now_s`` is provided at/after it, the age is computed as
-    ``now_s - age_s``; otherwise ``age_s`` is taken as the age directly.
-    No canonical formula exists for this fusion — it is calibrated in
-    tests and tuned later against observed agreement rates.
+    Calibrated (``margin`` given) — live-data justification (23 rows,
+    ``data/live-snapshot.db``): top-1 margins are noise-level
+    (min 0.0016 / median 0.0230 / max 0.0666) yet legacy confidence has
+    no margin sensitivity — ev=2 rows all display 0.229 regardless of
+    margin. The calibrated branch therefore multiplies by
+    ``margin_gate(margin) = 1 - exp(-margin/K)``, ``K = 0.0332``
+    (median/ln2, so the median margin gates at 0.5x; 0.20 -> 0.998x),
+    and uses ``CONFIDENCE_ALPHA_CAL = 1.639`` so fresh ev=2 /
+    agreement 0.5 / median margin displays ~0.45 (not 0.229). The
+    7-day half-life is unchanged, so age decay is monotone (no
+    inversion: older evidence never scores above identical fresh
+    evidence).
+
+    ``amplification`` is accepted for call-site symmetry but does not
+    affect the output: in the live rows negative-amplification rows
+    have mean implied agreement 0.431 vs 0.574 for positive rows, but
+    medians are identical (0.50), the correlation is weak (r=0.33,
+    n=23), and amplification is mechanically agent-minus-prompt
+    affinity, so a sign-aware term would double-count; kept symmetric.
+
+    ``age_s``/``now_s`` semantics as before: sub-1e8 ``age_s`` is a
+    plain age in seconds (engine passes plain seconds); an epoch-like
+    ``age_s`` (>=1e8) with ``now_s`` at/after it is converted to
+    ``now_s - age_s``. Result is clipped to [0, 1].
     """
     n = max(0, int(n))
     agreement = max(0.0, min(1.0, float(agreement)))
@@ -621,6 +664,11 @@ def confidence_from_evidence(n, agreement, age_s=None, now_s=None) -> float:
         if now_s is not None and age >= 1e8 and float(now_s) >= age:
             age = float(now_s) - age
     age = max(0.0, age)
-    value = (CONFIDENCE_ALPHA * math.log(1.0 + n) * agreement
-             * math.exp(-CONFIDENCE_LAMBDA * age))
+    if margin is None:
+        value = (CONFIDENCE_ALPHA * math.log(1.0 + n) * agreement
+                 * math.exp(-CONFIDENCE_LAMBDA * age))
+    else:
+        value = (CONFIDENCE_ALPHA_CAL * math.log(1.0 + n) * agreement
+                 * margin_gate(margin)
+                 * math.exp(-CONFIDENCE_LAMBDA * age))
     return max(0.0, min(1.0, value))
