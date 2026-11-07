@@ -230,9 +230,51 @@ function selectPulseRows(rows, cap) {
 // never shifts. Same encoding contract as the retired heat lane: cells
 // carry the host accent at 0.12..1.0 alpha (friction uses the danger
 // token, same alpha scale) over the host surface; no hardcoded colors.
+// PULSE live-glow: one-shot box-shadow pulse on value change. Theme vars
+// only (accent phosphor for value cells, destructive for friction). One
+// <style> tag per surface; namespaced keyframes make re-injection inert.
+const PULSE_GLOW_CSS =
+  '.iyh-glow{animation:iyh-glow-kf .9s ease-out 1}' +
+  '.iyh-glow-warn{animation-name:iyh-glow-warn-kf}' +
+  '@keyframes iyh-glow-kf{0%{box-shadow:0 0 10px 2px var(--ui-accent, rgba(130,170,255,.55))}100%{box-shadow:0 0 0 0 transparent}}' +
+  '@keyframes iyh-glow-warn-kf{0%{box-shadow:0 0 10px 2px var(--dt-destructive, var(--ui-accent, rgba(255,90,90,.55)))}100%{box-shadow:0 0 0 0 transparent}}'
+
 function PulseMatrix({ pulse }) {
   const columns = pulseColumns(pulse)
   const rows = pulse && Array.isArray(pulse.rows) ? pulse.rows : []
+  const shown = selectPulseRows(rows, PULSE_MAX_ROWS)
+  // Live-glow on value change: remember each cell's value from the last
+  // poll; a changed value (or null->value on a row that existed) bumps a
+  // per-cell counter baked into the key -> the CSS animation re-starts.
+  // First render seeds the map without glowing; brand-new rows don't glow
+  // (their appearance is already the signal).
+  const prevValsRef = useRef(null)
+  const glowRef = useRef({})
+  const cellKey = (ri, col) => String((shown[ri] && (shown[ri].tool_name || shown[ri].tool)) || ri) + '|' + col
+  if (prevValsRef.current && typeof prevValsRef.current === 'object') {
+    const now = {}
+    shown.forEach((row, ri) => {
+      columns.forEach((col) => {
+        const v = col === 'live' ? pulseLiveValue(row) : pulseCellValue(row ? row[col] : null)
+        const k = cellKey(ri, col)
+        now[k] = v
+        if (prevValsRef.current[k] !== undefined && prevValsRef.current[k] !== v) {
+          glowRef.current[k] = (glowRef.current[k] || 0) + 1
+        }
+      })
+    })
+    prevValsRef.current = now
+  } else if (prevValsRef.current === null) {
+    // Seed: remember values, glow nothing on the first paint.
+    const seed = {}
+    shown.forEach((row, ri) => {
+      columns.forEach((col) => {
+        seed[cellKey(ri, col)] =
+          col === 'live' ? pulseLiveValue(row) : pulseCellValue(row ? row[col] : null)
+      })
+    })
+    prevValsRef.current = seed
+  }
   if (rows.length === 0) {
     return jsx('div', {
       className: 'flex flex-1 items-center justify-center',
@@ -243,7 +285,6 @@ function PulseMatrix({ pulse }) {
       children: 'pulse matrix · 4 semantic columns',
     })
   }
-  const shown = selectPulseRows(rows, PULSE_MAX_ROWS)
   const cells = []
   shown.forEach((row, ri) => {
     const tool = String((row && row.tool_name) || (row && row.tool) || '—')
@@ -268,8 +309,13 @@ function PulseMatrix({ pulse }) {
       const a = v === null || v <= 0
         ? 0
         : (0.12 + 0.88 * v) * (isLive ? 1 : 0.45)
+      // A changed value since the last poll carries the glow counter in
+      // the key: the remount re-starts the one-shot keyframe flash.
+      const gk = cellKey(ri, col)
+      const g = glowRef.current[gk]
       cells.push(jsx('div', {
-        key: col + '-' + ri + '-' + ci,
+        key: gk + (g ? ':' + g : ''),
+        className: g ? 'iyh-glow' + (col === 'friction' ? ' iyh-glow-warn' : '') : undefined,
         title: col,
         style: {
           background: col === 'friction' ? V_DANGER : V_ACCENT,
@@ -367,6 +413,12 @@ function clamp01(v) {
 // and never blended: observed (user) and interpreted (agent, absent when
 // all agent values are null).
 const GLYPH_DIMS = ['directness', 'context_richness', 'exploration', 'analytical_depth', 'iteration', 'scope']
+// Compact flank labels: three-letter track abbreviations (full names stay
+// in the tooltips; numeric inspection stays in the expanded view).
+const FLANK_ABBR = {
+  directness: 'dir', context_richness: 'ctx', exploration: 'exp',
+  analytical_depth: 'dep', iteration: 'itr', scope: 'scp',
+}
 const GLYPH_ACCENT = 'var(--ui-accent)'
 const GLYPH_SEC = 'var(--ui-text-secondary)'
 const GLYPH_QUAT = 'var(--ui-text-quaternary)'
@@ -521,7 +573,7 @@ function buildGlyph(input) {
 }
 // PORTRAIT-GLYPH-END
 
-function PortraitView({ data, drift }) {
+function PortraitView({ data, drift, narrow, canExpand }) {
   const dims =
     data && data.dimensions && typeof data.dimensions === 'object'
       ? Object.keys(data.dimensions)
@@ -558,15 +610,82 @@ function PortraitView({ data, drift }) {
     confidence: data.confidence,
     evidenceCount,
   })
+  const confNum = typeof data.confidence === 'number' && Number.isFinite(data.confidence)
+    ? String(Math.round(data.confidence * 100) / 100)
+    : null
+  // The flank: the two evidence tracks as 3px ticks (absent = faint, never
+  // fabricated). Ticks are the glyph's ingredient echo — not bars, not
+  // numbers; the six measurements stay in the expanded inspection.
+  const flank = jsxs('div', {
+    className: 'flex flex-col justify-center',
+    title: 'observed track (accent) + interpreted track (muted) — presence and strength, per dimension',
+    style: {
+      gap: 3, flexShrink: 0,
+      fontFamily: 'var(--ui-font-mono, monospace)',
+    },
+    children: (dims.length > 0 ? dims : GLYPH_DIMS).map((d) => {
+      const ov = clamp01(data.user && data.user[d])
+      const iv = clamp01(data.agent && data.agent[d])
+      return jsxs('div', {
+        key: d,
+        className: 'flex items-center',
+        title: d + ' · observed ' + (ov === null ? '—' : String(Math.round(ov * 100) / 100))
+          + ' · interpreted ' + (iv === null ? '—' : String(Math.round(iv * 100) / 100)),
+        style: { gap: 6 },
+        children: [
+          jsx('span', {
+            style: {
+              width: 30, fontSize: 8, color: V_QUAT, letterSpacing: 0.5,
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            },
+            children: FLANK_ABBR[d] || d.slice(0, 3),
+          }),
+          jsx('span', {
+            title: 'observed',
+            style: {
+              width: 10, height: 3, borderRadius: 1, background: V_ACCENT,
+              opacity: ov === null ? 0.15 : 0.25 + 0.75 * ov,
+            },
+          }),
+          jsx('span', {
+            title: 'interpreted',
+            style: {
+              width: 10, height: 3, borderRadius: 1, background: V_SEC,
+              opacity: iv === null ? 0.15 : 0.25 + 0.75 * iv,
+            },
+          }),
+        ],
+      })
+    }),
+  })
+  const readout = jsxs('div', {
+    className: 'flex items-center',
+    style: {
+      flex: 1, minWidth: 0, justifyContent: 'flex-end',
+      fontSize: 8, color: V_QUAT,
+      fontFamily: 'var(--ui-font-mono, monospace)',
+      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+      textAlign: 'right',
+    },
+    title: (canExpand ? 'expand for full inspection · ' : '') + 'confidence ' + (confNum || '—')
+      + ' · ' + (evidenceCount > 0 ? evidenceCount + ' evidence snapshots' : 'no evidence snapshots yet'),
+    children: [
+      confNum ? confNum + ' conf · ' : '',
+      evidenceCount > 0 ? evidenceCount + ' snap' : 'evidence…',
+      ...(canExpand ? [' · ⛶ full'] : []),
+    ],
+  })
   return jsxs('div', {
     className: 'flex flex-1 items-center',
     style: { gap: 12, minHeight: 0, overflow: 'hidden' },
     children: [
       jsx('span', {
-        title: 'portrait glyph',
+        title: 'portrait glyph — accumulated resemblance, not a measurement',
         style: { width: 48, height: 48, flexShrink: 0, overflow: 'hidden' },
         dangerouslySetInnerHTML: { __html: glyph },
       }),
+      flank,
+      ...(!narrow ? [readout] : []),
     ],
   })
 }
@@ -1165,7 +1284,12 @@ function Strip({ source, rest }) {
           ],
         })
       : tab === 'portrait'
-        ? jsx(PortraitView, { data: portraitQ.data, drift: driftQ.data })
+        ? jsx(PortraitView, {
+            data: portraitQ.data,
+            drift: driftQ.data,
+            narrow,
+            canExpand: wsCan,
+          })
         : jsx(DriftView, { data: driftQ.data, narrow })
 
   const popover = panel && jsxs('div', {
@@ -1234,6 +1358,8 @@ function Strip({ source, rest }) {
       overflow: 'hidden',
     },
     children: [
+      // PULSE live-glow keyframes (namespaced; inert if already injected).
+      jsx('style', { children: PULSE_GLOW_CSS }),
       jsxs('div', {
         className: 'flex items-center',
         style: { height: 22, fontSize: 11, gap: 6, flexShrink: 0 },

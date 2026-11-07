@@ -103,7 +103,9 @@ ok(buildGlyph(base({ user: full(0.6), agent: full(0.6) })) === buildGlyph(base({
 
 // pane wiring (source level)
 ok(src.includes('dangerouslySetInnerHTML'), 'pane mounts buildGlyph string as single source of truth')
-ok(src.includes('jsx(PortraitView, { data: portraitQ.data, drift: driftQ.data })'), 'pane passes drift series evidence to PortraitView')
+ok(src.includes('jsx(PortraitView, {') && src.includes('drift: driftQ.data'), 'pane passes drift series evidence to PortraitView')
+ok(src.includes('FLANK_ABBR'), 'compact portrait flank: observed/interpreted tick tracks (the glyph is no longer lonely)')
+ok(src.includes("' · ⛶ full'"), 'wide-frame portrait readout points to the expanded inspection')
 const pv = src.slice(src.indexOf('function PortraitView'), src.indexOf('function driftDelta'))
 ok(!pv.includes("d.slice(0, 10)") && !pv.includes('Math.round(u * 100)'), 'bar body removed')
 

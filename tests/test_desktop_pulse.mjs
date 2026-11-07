@@ -90,6 +90,9 @@ assert.equal((src.match(/useEffect\(/g) || []).length, 1,
 assert.ok(src.includes('pulse.columns'), 'server columns still consumed (via pulseColumns)')
 assert.ok(src.includes('tool_name'), 'pulse rows stay dynamic (tool_name)')
 assert.ok(src.includes('NARROW_W'), 'narrow-dock threshold defined (sidebar frame)')
+assert.ok(src.includes('PULSE_GLOW_CSS'), 'live-glow keyframes: theme-var box-shadow pulse on value change')
+assert.ok(src.includes('iyh-glow-warn'), 'friction cells glow on the destructive token (value cells on accent)')
+assert.ok(src.includes("className: g ? 'iyh-glow'"), 'changed cells carry the one-shot glow class (key counter restarts the keyframe)')
 assert.ok(src.includes("flex: narrow ? '1 1 30%' : undefined"),
   'drift wraps 3x2 in the narrow dock (labels to tooltip, numbers stay)')
 assert.ok(src.indexOf('...(!narrow') > -1,
