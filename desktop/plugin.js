@@ -610,8 +610,19 @@ function PortraitView({ data, drift, narrow, canExpand }) {
     confidence: data.confidence,
     evidenceCount,
   })
-  const confNum = typeof data.confidence === 'number' && Number.isFinite(data.confidence)
-    ? String(Math.round(data.confidence * 100) / 100)
+  const confVals = (() => {
+    if (data && data.confidence && typeof data.confidence === 'object') {
+      const vals = []
+      for (const d of dims) {
+        const v = data.confidence[d]
+        if (typeof v === 'number' && Number.isFinite(v)) vals.push(v)
+      }
+      return vals
+    }
+    return typeof data.confidence === 'number' && Number.isFinite(data.confidence) ? [data.confidence] : []
+  })()
+  const confNum = confVals.length > 0
+    ? String(Math.round((confVals.reduce((a, b) => a + b, 0) / confVals.length) * 100) / 100)
     : null
   // The flank: the two evidence tracks as 3px ticks (absent = faint, never
   // fabricated). Ticks are the glyph's ingredient echo — not bars, not
@@ -927,6 +938,75 @@ function ExpandedPortrait({ data, drift }) {
   }, 160)
   const num = (v) => (v === null || typeof v !== 'number' || !Number.isFinite(v) ? '—' : String(Math.round(v * 100) / 100))
   const axes = dims.length > 0 ? dims : GLYPH_DIMS
+  // Perception (D5): pure render of the additive 'perception' payload key.
+  // Affinity and confidence are separate channels; prompt and agent are
+  // never blended; absence renders neutral/faint, never negative.
+  const perception = data && data.perception && typeof data.perception === 'object' ? data.perception : null
+  const percOn = !!(perception && perception.perception_available)
+  const patterns = percOn && Array.isArray(perception.patterns) ? perception.patterns : []
+  const dimSignals = percOn && perception.dim_signals && typeof perception.dim_signals === 'object' ? perception.dim_signals : {}
+  let strongest = null
+  for (const p of patterns) {
+    if (!p || typeof p !== 'object') continue
+    const score = typeof p.agent_affinity === 'number' && Number.isFinite(p.agent_affinity)
+      ? p.agent_affinity
+      : (typeof p.prompt_affinity === 'number' && Number.isFinite(p.prompt_affinity) ? p.prompt_affinity : null)
+    if (strongest === null) { strongest = { p, score }; continue }
+    if (score !== null && (strongest.score === null || score > strongest.score
+      || (score === strongest.score && String(p.name || '') < String(strongest.p.name || '')))) {
+      strongest = { p, score }
+    }
+  }
+  const strongP = strongest ? strongest.p : null
+  const dimKeys = axes.filter((d) => dimSignals && Object.prototype.hasOwnProperty.call(dimSignals, d))
+  const dimRows = (dimKeys.length > 0 ? dimKeys : Object.keys(dimSignals))
+  const percSection = jsxs('div', {
+    style: {
+      width: '100%', maxWidth: 480, fontSize: 8, fontFamily: 'var(--ui-font-mono, monospace)',
+      opacity: percOn ? 1 : 0.55,
+    },
+    children: [
+      jsxs('div', {
+        className: 'flex',
+        style: { gap: 8, padding: '3px 0', borderBottom: '1px solid ' + V_STROKE, color: V_SEC, letterSpacing: 1 },
+        children: [
+          jsx('span', { style: { flex: '0 0 140px' }, children: 'PERCEPTION' }),
+          jsx('span', { style: { flex: 1, textAlign: 'right' }, children: percOn && strongP ? 'STRONGEST' : '—' }),
+          jsx('span', { style: { flex: 1, textAlign: 'right' }, children: percOn ? 'AGENT' : '' }),
+          jsx('span', { style: { flex: 1, textAlign: 'right' }, children: percOn ? 'PROMPT' : '' }),
+        ],
+      }),
+      percOn && strongP
+        ? jsxs('div', {
+            className: 'flex',
+            style: { gap: 8, padding: '3px 0', borderBottom: '1px solid ' + V_STROKE, color: V_QUAT },
+            children: [
+              jsx('span', { style: { flex: '0 0 140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: V_SEC }, title: strongP.name, children: String(strongP.name || '—') + (strongP.repeated === true ? ' · repeated' : '') }),
+              jsx('span', { style: { flex: 1, textAlign: 'right', color: V_SEC }, title: 'agent affinity', children: num(strongP.agent_affinity) }),
+              jsx('span', { style: { flex: 1, textAlign: 'right', color: V_SEC }, title: 'prompt affinity', children: num(strongP.prompt_affinity) }),
+              jsx('span', { style: { flex: 1, textAlign: 'right' }, title: 'margin · amplification · evidence', children: num(strongP.margin) + ' m · ' + num(strongP.amplification) + ' amp · ' + (typeof strongP.evidence === 'number' && Number.isFinite(strongP.evidence) ? String(strongP.evidence) : '—') + ' ev' }),
+            ],
+          })
+        : jsx('div', {
+            style: { padding: '3px 0', color: V_QUAT, letterSpacing: 1 },
+            children: 'PERCEPTION · no data yet',
+          }),
+      ...(percOn ? dimRows.map((d) => {
+        const sig = dimSignals[d] && typeof dimSignals[d] === 'object' ? dimSignals[d] : {}
+        return jsxs('div', {
+          key: d,
+          className: 'flex',
+          style: { gap: 8, padding: '3px 0', borderBottom: '1px solid ' + V_STROKE, color: V_QUAT },
+          children: [
+            jsx('span', { style: { flex: '0 0 140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: d, children: d }),
+            jsx('span', { style: { flex: 1, textAlign: 'right', color: V_SEC }, title: 'agent signal', children: num(sig.agent) }),
+            jsx('span', { style: { flex: 1, textAlign: 'right', color: V_SEC }, title: 'prompt signal', children: num(sig.prompt) }),
+            jsx('span', { style: { flex: 1, textAlign: 'right' }, title: 'confidence (separate channel)', children: num(data && data.confidence && data.confidence[d]) }),
+          ],
+        })
+      }) : []),
+    ],
+  })
   return jsxs('div', {
     className: 'flex-1',
     style: { minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, padding: '8px 0' },
@@ -973,6 +1053,7 @@ function ExpandedPortrait({ data, drift }) {
           }),
         ],
       }),
+      percSection,
     ],
   })
 }
