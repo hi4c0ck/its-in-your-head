@@ -1071,6 +1071,25 @@ function ExpandedPortrait({ data, drift }) {
     }
   }
   const strongP = strongest ? strongest.p : null
+  // E2 (spec §6 readout): per-pattern observed/interpreted ticks follow
+  // the v0.1.4 flank convention (10x3 ticks, accent observed / secondary
+  // interpreted, opacity 0.25+0.75v, absent 0.15 — never fabricated).
+  // HIGH_SIGNAL hardcodes the 0.15 default of
+  // perception.reinforce_min_amplification (core/settings.py;
+  // engine._reinforce_allowed reads it with the same default; this
+  // surface has no settings query — disclosed in
+  // tests/test_desktop_perception_expansion.mjs).
+  const HIGH_SIGNAL = 0.15
+  const affTick = (v, bg, title) => jsx('span', {
+    title: title,
+    style: {
+      width: 10, height: 3, borderRadius: 1, background: bg,
+      opacity: typeof v === 'number' && Number.isFinite(v)
+        ? 0.25 + 0.75 * Math.min(1, Math.max(0, v))
+        : 0.15,
+      display: 'inline-block', flexShrink: 0, verticalAlign: 'middle',
+    },
+  })
   const dimKeys = axes.filter((d) => dimSignals && Object.prototype.hasOwnProperty.call(dimSignals, d))
   const dimRows = (dimKeys.length > 0 ? dimKeys : Object.keys(dimSignals))
   const percSection = jsxs('div', {
@@ -1094,7 +1113,7 @@ function ExpandedPortrait({ data, drift }) {
             className: 'flex',
             style: { gap: 8, padding: '3px 0', borderBottom: '1px solid ' + V_STROKE, color: V_QUAT },
             children: [
-              jsx('span', { style: { flex: '0 0 140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: V_SEC }, title: strongP.name, children: String(strongP.name || '—') + (strongP.repeated === true ? ' · repeated' : '') }),
+              jsx('span', { style: { flex: '0 0 140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: V_SEC }, title: strongP.name, children: String(strongP.name || '—') + (strongP.repeated === true ? ' · repeated' : '') + (typeof strongP.amplification === 'number' && strongP.amplification >= HIGH_SIGNAL ? ' · HIGH SIGNAL' : '') }),
               jsx('span', { style: { flex: 1, textAlign: 'right', color: V_SEC }, title: 'agent affinity', children: num(strongP.agent_affinity) }),
               jsx('span', { style: { flex: 1, textAlign: 'right', color: V_SEC }, title: 'prompt affinity', children: num(strongP.prompt_affinity) }),
               jsx('span', { style: { flex: 1, textAlign: 'right' }, title: 'margin · amplification · evidence', children: num(strongP.margin) + ' m · ' + num(strongP.amplification) + ' amp · ' + (typeof strongP.evidence === 'number' && Number.isFinite(strongP.evidence) ? String(strongP.evidence) : '—') + ' ev' }),
@@ -1104,6 +1123,60 @@ function ExpandedPortrait({ data, drift }) {
             style: { padding: '3px 0', color: V_QUAT, letterSpacing: 1 },
             children: 'PERCEPTION · no data yet',
           }),
+      // E2 (spec §6 readout): one row per persisted pattern entry
+      // (payload order; at most six — the reader-side cap). Each row:
+      // name (repeated mark ▪), observed tick+value (prompt_affinity),
+      // interpreted tick+value (agent_affinity), confidence in its own
+      // cell, signed amplification tick. A None-valued entry renders
+      // '—' (num guard), never a number.
+      ...(percOn && patterns.length > 0 ? [
+        jsxs('div', {
+          className: 'flex',
+          style: { gap: 8, padding: '2px 0', borderBottom: '1px solid ' + V_STROKE, color: V_QUAT, letterSpacing: 1 },
+          children: [
+            jsx('span', { style: { flex: '0 0 140px' }, children: 'PATTERNS' }),
+            jsx('span', { style: { flex: 1, textAlign: 'right' }, children: 'OBSERVED' }),
+            jsx('span', { style: { flex: 1, textAlign: 'right' }, children: 'INTERPRETED' }),
+            jsx('span', { style: { flex: 1, textAlign: 'right' }, children: 'CONF' }),
+            jsx('span', { style: { flex: '0 0 24px', textAlign: 'right' }, children: 'AMP' }),
+          ],
+        }),
+        ...patterns.slice(0, 6).map((p, i) => {
+          const amp = p && typeof p.amplification === 'number' && Number.isFinite(p.amplification) ? p.amplification : null
+          return jsxs('div', {
+            key: 'pat-' + i + '-' + String((p && p.name) || 'x'),
+            className: 'flex',
+            style: { gap: 8, padding: '2px 0', borderBottom: '1px solid ' + V_STROKE, color: V_QUAT },
+            children: [
+              jsx('span', {
+                style: { flex: '0 0 140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                title: ((p && p.name) || '—') + (p && p.repeated === true ? ' · repeated' : ''),
+                children: String((p && p.name) || '—') + (p && p.repeated === true ? ' ▪' : ''),
+              }),
+              jsxs('span', {
+                style: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 3 },
+                children: [
+                  affTick(p && p.prompt_affinity, V_ACCENT, 'observed (prompt affinity)'),
+                  jsx('span', { style: { color: V_SEC }, children: num(p && p.prompt_affinity) }),
+                ],
+              }),
+              jsxs('span', {
+                style: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 3 },
+                children: [
+                  affTick(p && p.agent_affinity, V_SEC, 'interpreted (agent affinity)'),
+                  jsx('span', { style: { color: V_SEC }, children: num(p && p.agent_affinity) }),
+                ],
+              }),
+              jsx('span', { style: { flex: 1, textAlign: 'right' }, title: 'confidence (separate channel)', children: num(p && p.confidence) }),
+              jsx('span', {
+                style: { flex: '0 0 24px', textAlign: 'right', color: V_SEC },
+                title: 'amplification ' + (amp === null ? '—' : num(amp)),
+                children: amp !== null && amp > HIGH_SIGNAL ? '▲' : amp !== null && amp < -HIGH_SIGNAL ? '▼' : '',
+              }),
+            ],
+          })
+        }),
+      ] : []),
       ...(percOn ? dimRows.map((d) => {
         const sig = dimSignals[d] && typeof dimSignals[d] === 'object' ? dimSignals[d] : {}
         return jsxs('div', {
