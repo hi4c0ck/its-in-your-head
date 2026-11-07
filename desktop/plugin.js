@@ -4,15 +4,13 @@
 // - imports: ONLY @hermes/plugin-sdk + react / react/jsx-runtime; jsx() calls,
 //   never JSX syntax (the file loads uncompiled).
 // - theme vars only — the pane already sits on the app's editor background;
-//   canvas colors resolve via getComputedStyle, no hardcoded color values.
-// - canvas panes MUST track their container with a ResizeObserver (re-size the
-//   width/height attributes, not just CSS).
+//   no hardcoded color values (DOM cells take theme vars directly).
 // - data: useQuery (the app's one React Query client) polling ctx.rest — the
 //   mandatory fallback; host.onEvent('plugin.its-in-your-head.tick') is the
 //   live accelerator (ctx.socket is a no-op on OAuth remotes).
 // - layout budget 96px: 22 header/tabs, 48 main, 18 ticker, 8 separators.
 //   Overflow goes to the settings popover, never in-pane scrolling.
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { host, useQuery, queryClient } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
@@ -23,6 +21,10 @@ const PULSE_POLL_MS = 15000
 // fallback on every route.
 const IO_WIDTH = 220   // fixed I/O-frame column
 const IO_LINES = 4
+// PULSE matrix rows shown in the main lane: the lane is ~48px, so at most
+// 4 rows at a legible 10px pitch — the rest stay reachable through the
+// /pulse response and the settings popover, never in-pane scrolling.
+const PULSE_MAX_ROWS = 4
 const STALE_S = 60     // pet returns to idle after this many quiet seconds
 const OK_WINDOW_S = 30 // a successful completion stays 'successful' this long
 
@@ -95,24 +97,6 @@ function tickerPhrase(ev, nowSec) {
   return 'event ok' + ageTxt
 }
 // PETSTATE-END
-
-// Canvas can't use CSS var() strings — resolve the app's theme vars once per
-// draw. The danger tint probes a small set of semantic vars; if the active
-// theme defines none, it falls back to the accent (never a hardcoded color).
-function resolveColors(canvas) {
-  const cs = getComputedStyle(canvas)
-  const accent = cs.getPropertyValue('--ui-accent').trim() || 'currentColor'
-  const stroke = cs.getPropertyValue('--ui-stroke-secondary').trim() || 'transparent'
-  let danger = ''
-  // --destructive / --ui-danger / --ui-error / --danger are absent in the
-  // installed build (verified against its styles.css); probe the real
-  // tokens --dt-destructive / --color-destructive first.
-  for (const v of ['--dt-destructive', '--color-destructive', '--destructive', '--ui-danger', '--ui-error', '--danger']) {
-    danger = cs.getPropertyValue(v).trim()
-    if (danger) break
-  }
-  return { accent, stroke, danger: danger || accent }
-}
 
 function fmtTokens(n) {
   if (n === null || n === undefined) return '–'
@@ -213,76 +197,107 @@ function pulseLiveValue(row) {
   if (total <= 0) return null
   return 1 - 1 / (1 + total)
 }
+// Row selection is deterministic and view-side only: the server returns
+// rows in first_seen order; the pane shows the most relevant `cap` of them.
+// Ranking: (1) live activity total descending — rows the response records
+// activity for rank ahead of rows with none; (2) strongest semantic cell
+// (goal/good/friction max 0..1) descending; (3) original server order
+// (stable). No hardcoded tool list, no randomness.
+function selectPulseRows(rows, cap) {
+  if (!Array.isArray(rows) || cap <= 0) return []
+  const ranked = rows.map((row, i) => {
+    const live = pulseLiveValue(row)
+    const liveT = live === null ? -1 : live
+    let sem = 0
+    ;['goal', 'good', 'friction'].forEach((c) => {
+      const v = pulseCellValue(row ? row[c] : null)
+      if (v !== null && v > sem) sem = v
+    })
+    return { row: row, i: i, liveT: liveT, sem: sem }
+  })
+  ranked.sort((a, b) => (b.liveT - a.liveT) || (b.sem - a.sem) || (a.i - b.i))
+  return ranked.slice(0, cap).map((r) => r.row)
+}
 // PULSE-END
 
-function drawPulse(canvas, pulse) {
-  const c2d = canvas.getContext('2d')
-  if (!c2d) return
-  c2d.clearRect(0, 0, canvas.width, canvas.height)
-  // Same encoding contract as the retired heat lane: cells are painted in the
-  // host accent at 0.12..1.0 alpha over a cleared canvas, so the host surface
-  // itself is the blend base in both themes. The hottest cell (full accent;
-  // default build accent #0053fd) holds >=3:1 contrast on the light card
-  // (#fcfcfc) and the dark card (#161618) — see
-  // tests/test_desktop_themecompat.mjs. Friction cells use the danger tint
-  // (same alpha encoding) where the existing danger token applies. Rows are
-  // dynamic: whichever tool rows GET /pulse carries, never a hardcoded list.
-  // Missing cells (e.g. a column the row does not carry) stay neutral.
-  const colors = resolveColors(canvas)
-  const dpr = window.devicePixelRatio || 1
-  // Columns: LIVE first (derived from row.live), then GOAL / GOOD /
-  // FRICTION. The legacy 'unlabeled' server entry folds into the
-  // goal/good/friction cell states (see pulseColumns) and is not shown.
+// PULSE matrix structure: a real grid of row × column cells (a DOM table,
+// not a painted canvas). The label and its four graphic cells are sibling
+// cells of one grid row, so the layout engine — not pitch arithmetic —
+// guarantees every tool label sits on its own row of cells. Rows are
+// dynamic (whichever tool rows GET /pulse carries, selected by
+// selectPulseRows); empty cells reserve their slot, so the grid geometry
+// never shifts. Same encoding contract as the retired heat lane: cells
+// carry the host accent at 0.12..1.0 alpha (friction uses the danger
+// token, same alpha scale) over the host surface; no hardcoded colors.
+function PulseMatrix({ pulse }) {
   const columns = pulseColumns(pulse)
   const rows = pulse && Array.isArray(pulse.rows) ? pulse.rows : []
-  const pad = 2 * dpr
-  const laneW = Math.max(1, canvas.width - 2 * pad)
-  const laneH = Math.max(1, canvas.height - 2 * pad)
-  const labelW = Math.min(84 * dpr, laneW * 0.34)
-  const gridW = Math.max(1, laneW - labelW)
-  const cellW = gridW / columns.length
-  const maxRows = 8
-  const rowH = laneH / Math.max(1, Math.min(maxRows, rows.length || 1))
-  c2d.font = Math.round(8 * dpr) + 'px monospace'
-  c2d.textBaseline = 'middle'
-  rows.slice(0, maxRows).forEach((row, ri) => {
-    const y = pad + ri * rowH
-    const tool = String(row.tool_name || row.tool || '—')
+  if (rows.length === 0) {
+    return jsx('div', {
+      className: 'flex flex-1 items-center justify-center',
+      style: {
+        fontSize: 10, color: 'var(--ui-text-quaternary)',
+        fontFamily: 'var(--ui-font-mono, monospace)', letterSpacing: 1,
+      },
+      children: 'pulse matrix · 4 semantic columns',
+    })
+  }
+  const shown = selectPulseRows(rows, PULSE_MAX_ROWS)
+  const cells = []
+  shown.forEach((row, ri) => {
+    const tool = String((row && row.tool_name) || (row && row.tool) || '—')
     // A row is live when the response records activity for it (row.live
     // counts); live rows are highlighted, rows with no activity yet are
-    // muted — same accent/alpha encoding, no new colors.
+    // muted — no new colors.
     const liveV = pulseLiveValue(row)
     const isLive = liveV !== null
-    c2d.fillStyle = colors.accent
-    c2d.globalAlpha = isLive ? 0.85 : 0.35
-    c2d.fillText(tool.slice(0, 16), pad, y + rowH / 2)
-    c2d.globalAlpha = 1
+    cells.push(jsx('div', {
+      key: 'lbl-' + ri,
+      title: tool,
+      className: 'flex items-center overflow-hidden',
+      style: {
+        fontSize: 9, lineHeight: '14px', minWidth: 0,
+        fontFamily: 'var(--ui-font-mono, monospace)',
+        color: isLive ? V_SEC : V_QUAT,
+      },
+      children: tool.slice(0, 16),
+    }))
     columns.forEach((col, ci) => {
-      const v = col === 'live' ? liveV : pulseCellValue(row[col])
-      const x = pad + labelW + ci * cellW
-      const gap = Math.max(dpr, cellW * 0.08)
-      if (v !== null && v > 0) {
-        c2d.fillStyle = col === 'friction' ? colors.danger : colors.accent
-        c2d.globalAlpha = 0.12 + 0.88 * v
-        if (!isLive) c2d.globalAlpha *= 0.45
-        c2d.fillRect(x + gap, y + gap,
-          Math.max(gap, cellW - 2 * gap), Math.max(gap, rowH - 2 * gap))
-      }
-      c2d.globalAlpha = 1
+      const v = col === 'live' ? liveV : pulseCellValue(row ? row[col] : null)
+      const a = v === null || v <= 0
+        ? 0
+        : (0.12 + 0.88 * v) * (isLive ? 1 : 0.45)
+      cells.push(jsx('div', {
+        key: col + '-' + ri + '-' + ci,
+        title: col,
+        style: {
+          background: col === 'friction' ? V_DANGER : V_ACCENT,
+          opacity: a,
+          borderRadius: 2,
+          minHeight: 4,
+        },
+      }))
     })
   })
-  if (rows.length === 0) {
-    c2d.fillStyle = colors.accent
-    c2d.globalAlpha = 0.7
-    c2d.fillText('no pulse rows yet', pad, pad + rowH / 2)
-    c2d.globalAlpha = 1
-  }
+  return jsx('div', {
+    role: 'grid',
+    'aria-label': 'pulse matrix',
+    className: 'flex-1',
+    style: {
+      display: 'grid',
+      minWidth: 0,
+      gridTemplateColumns: 'minmax(56px, 34%) repeat(' + (columns.length - 1) + ', 1fr)',
+      gridTemplateRows: 'repeat(' + PULSE_MAX_ROWS + ', 1fr)',
+      gap: '2px 3px',
+    },
+    children: cells,
+  })
 }
 
 function IoLine({ ev }) {
   let tag, body, dot
   // DOM dots use theme vars directly (var() with a nested fallback — no
-  // hardcoded color values); only the canvas needs getComputedStyle.
+  // hardcoded color values).
   if (ev.type === 'turn') {
     tag = 'U'; body = ev.model || 'turn'; dot = 'var(--ui-stroke-secondary)'
   } else if (ev.type === 'api') {
@@ -676,8 +691,6 @@ function IconButton({ title, label, onClick }) {
 }
 
 function Strip({ source, rest }) {
-  const wrapRef = useRef(null)
-  const canvasRef = useRef(null)
   const [tab, setTab] = useState('pulse')
   const [panel, setPanel] = useState(null) // null | 'settings' | 'help'
 
@@ -720,35 +733,6 @@ function Strip({ source, rest }) {
     retry: false,
   })
 
-  // Latest pulse data in a ref so the ResizeObserver callback (mounted once)
-  // never draws a stale value after a data refresh.
-  const pulseRef = useRef(null)
-  pulseRef.current = pulseQ.data
-
-  // ResizeObserver: re-size the canvas attributes (not just CSS) on every
-  // container change — sash drags, layout switches, tab remounts.
-  useEffect(() => {
-    const wrap = wrapRef.current
-    const canvas = canvasRef.current
-    if (!wrap || !canvas) return
-    const dpr = window.devicePixelRatio || 1
-    const fit = () => {
-      const r = wrap.getBoundingClientRect()
-      canvas.width = Math.max(1, Math.round(r.width * dpr))
-      canvas.height = Math.max(1, Math.round(r.height * dpr))
-      drawPulse(canvas, pulseRef.current)
-    }
-    const ro = new ResizeObserver(fit)
-    ro.observe(wrap)
-    return () => ro.disconnect()
-  }, [tab])
-
-  // Re-draw when pulse data arrives (query refetch / tick invalidation).
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (canvas && canvas.width > 0) drawPulse(canvas, pulseQ.data)
-  }, [pulseQ.data, tab])
-
   const metrics = metricsQ.data
   let status
   if (metricsQ.isError && !metrics) {
@@ -782,27 +766,7 @@ function Strip({ source, rest }) {
           className: 'flex flex-1 items-stretch',
           style: { gap: 8, minHeight: 0 },
           children: [
-            jsxs('div', {
-              ref: wrapRef,
-              className: 'relative flex-1',
-              style: { minWidth: 0 },
-              children: [
-                jsx('canvas', {
-                  ref: canvasRef,
-                  // Sizing comes from the ResizeObserver width/height attributes
-                  // (inset stretches the box); no CSS width/height here.
-                  style: { position: 'absolute', inset: 0 },
-                }),
-                !pulseQ.data && jsx('span', {
-                  style: {
-                    position: 'absolute', inset: 0, display: 'flex',
-                    alignItems: 'center', justifyContent: 'center',
-                    fontSize: 10, color: 'var(--ui-text-quaternary)',
-                  },
-                  children: 'pulse matrix · 4 semantic columns',
-                }),
-              ],
-            }),
+            jsx(PulseMatrix, { pulse: pulseQ.data }),
             jsxs('div', {
               className: 'flex flex-col justify-end overflow-hidden',
               style: { width: IO_WIDTH, gap: 2 },

@@ -12,8 +12,8 @@ const dir = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(dir, '..', 'desktop', 'plugin.js'), 'utf8')
 const block = src.slice(src.indexOf('// PULSE-START'), src.indexOf('// PULSE-END'))
 assert.ok(block.length > 0, 'PULSE markers found in plugin.js')
-const { pulseCellValue, pulseColumns, pulseLiveValue } =
-  new Function(block + '\n;return { pulseCellValue, pulseColumns, pulseLiveValue };')()
+const { pulseCellValue, pulseColumns, pulseLiveValue, selectPulseRows } =
+  new Function(block + '\n;return { pulseCellValue, pulseColumns, pulseLiveValue, selectPulseRows };')()
 
 let n = 0
 const eq = (actual, expected, label) => {
@@ -65,21 +65,68 @@ eq(pulseCellValue({}), null, 'cell without value -> null')
 eq(pulseCellValue(null), null, 'null cell -> null')
 eq(pulseCellValue({ value: 'x' }), null, 'non-numeric cell -> null')
 
-// 4. drawPulse wiring (source-level, same style as the themecompat checks).
-assert.ok(src.includes('const columns = pulseColumns(pulse)'), 'drawPulse uses pulseColumns')
-assert.ok(src.includes("col === 'live' ? liveV : pulseCellValue(row[col])"),
-  'LIVE column reads the derived live value, other columns read their cells')
-assert.ok(src.includes('const isLive = liveV !== null'), 'live rows flagged from row.live activity')
-assert.ok(src.includes('c2d.globalAlpha = isLive ? 0.85 : 0.35'),
-  'live rows highlighted vs muted tool labels')
-assert.ok(src.includes('if (!isLive) c2d.globalAlpha *= 0.45'),
-  'non-live rows muted cell alpha')
-assert.ok(src.includes('globalAlpha = 0.12 + 0.88'), 'heat alpha encoding unchanged')
+// 4. PULSE matrix structure (DOM table, not a painted canvas).
+assert.ok(src.includes('function PulseMatrix'), 'PulseMatrix DOM component present')
+assert.ok(src.includes("role: 'grid'"), 'matrix root carries role="grid"')
+assert.ok(src.includes("gridTemplateColumns: 'minmax(56px, 34%) repeat("),
+  'matrix columns: label track + one 1fr track per semantic column')
+assert.ok(src.includes("gridTemplateRows: 'repeat(' + PULSE_MAX_ROWS + ', 1fr)'"),
+  'row count is a fixed track structure (no pitch arithmetic)')
+assert.ok(src.includes('selectPulseRows(rows, PULSE_MAX_ROWS)'),
+  'row selection is deterministic (live activity, then semantic, then server order)')
+assert.ok(src.includes("col === 'friction' ? V_DANGER : V_ACCENT"),
+  'friction cells take the danger token, others the accent (theme vars only)')
+assert.ok(src.includes('(0.12 + 0.88 * v)'), 'heat alpha encoding preserved')
+assert.ok(src.includes('isLive ? 1 : 0.45'), 'non-live rows muted on their cells')
+assert.ok(src.includes('color: isLive ? V_SEC : V_QUAT'),
+  'live rows highlighted vs muted tool labels (no new colors)')
+assert.ok(!src.includes("getContext('2d')"), 'canvas painting retired')
+assert.ok(!src.includes('drawPulse'), 'drawPulse removed')
+assert.ok(!src.includes('resolveColors'), 'resolveColors removed')
+assert.ok(!src.includes('ResizeObserver'), 'no ResizeObserver needed (layout engine sizes the grid)')
+assert.ok(!src.includes('useEffect'), 'no canvas re-draw effects left')
 assert.ok(src.includes('pulse.columns'), 'server columns still consumed (via pulseColumns)')
 assert.ok(src.includes('tool_name'), 'pulse rows stay dynamic (tool_name)')
-assert.ok(src.includes("'unlabeled'"), "'unlabeled' mapping documented (folds into cell states)")
-assert.ok(src.indexOf('// PULSE-START') < src.indexOf('function pulseColumns'),
+assert.ok(src.indexOf('// PULSE-START') < src.indexOf('function selectPulseRows'),
   'pure helpers live between the PULSE markers')
-console.log('ok ' + (++n) + ' - drawPulse wiring assertions')
+console.log('ok ' + (++n) + ' - matrix structure assertions')
 
+// 5. selectPulseRows: deterministic row selection for the matrix.
+eq(selectPulseRows(null, 4), [], 'null pulse rows -> []')
+eq(selectPulseRows('nope', 4), [], 'non-array -> []')
+eq(selectPulseRows([{ tool_name: 'a' }], 0), [], 'cap 0 -> []')
+eq(selectPulseRows([{ tool_name: 'a' }], -2), [], 'negative cap -> []')
+const many = ['a', 'b', 'c', 'd', 'e', 'f'].map((t) => ({ tool_name: t }))
+eq(selectPulseRows(many, 4).map((r) => r.tool_name), ['a', 'b', 'c', 'd'],
+  'cap respected, server order kept when nothing else ranks')
+const rowsMixed = [
+  { tool_name: 'quiet', goal: { value: 0.9 }, good: { value: 0.8 }, friction: { value: 0.7 } },
+  { tool_name: 'lively', live: { calls_started: 1 } },
+]
+eq(selectPulseRows(rowsMixed, 2).map((r) => r.tool_name), ['lively', 'quiet'],
+  'live activity ranks ahead of strong-but-unlive cells')
+const twoLive = [
+  { tool_name: 'low', live: { calls_started: 1 } },
+  { tool_name: 'high', live: { calls_started: 5, calls_completed: 9 } },
+]
+eq(selectPulseRows(twoLive, 2).map((r) => r.tool_name), ['high', 'low'],
+  'higher live total ranks first')
+const semTie = [
+  { tool_name: 'soft', good: { value: 0.2 } },
+  { tool_name: 'hard', goal: { value: 0.9 } },
+  { tool_name: 'mid', friction: { value: 0.5 } },
+]
+eq(selectPulseRows(semTie, 3).map((r) => r.tool_name), ['hard', 'mid', 'soft'],
+  'among non-live rows: strongest semantic cell first, stable server order')
+const stable = [
+  { tool_name: 'x', live: { calls_started: 3 } },
+  { tool_name: 'y', live: { calls_started: 3 } },
+  { tool_name: 'z', live: { calls_started: 3 } },
+]
+eq(selectPulseRows(stable, 2).map((r) => r.tool_name), ['x', 'y'],
+  'ties keep server (first_seen) order — stable, deterministic')
+const again = selectPulseRows(stable, 2)
+eq(again.map((r) => r.tool_name),
+  selectPulseRows(stable, 2).map((r) => r.tool_name),
+  'repeated calls are identical (deterministic)')
 console.log('PASS pulse: ' + n + ' assertions')

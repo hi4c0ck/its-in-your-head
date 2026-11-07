@@ -52,10 +52,13 @@ assert.ok(src.includes('var(--dt-popover'), 'popover uses the real --dt-popover 
 assert.ok(src.includes('var(--ui-bg-elevated'), 'popover falls back to --ui-bg-elevated')
 assert.ok(src.includes('color-mix(in srgb, var(--dt-card'), 'popover has translucent color-mix fallback')
 assert.ok(src.includes('var(--dt-border'), 'popover border has --dt-border fallback')
-assert.ok(src.includes("'--dt-destructive'"), 'danger probe prefers the real --dt-destructive')
+assert.ok(src.includes('var(--dt-destructive, var(--ui-accent))'),
+  'danger token governs friction cells / negative drift (--dt-destructive, accent fallback)')
 
-// resolveColors probe: ends with the accent fallback, never a hardcoded color.
-assert.ok(src.includes("danger: danger || accent"), 'danger falls back to accent')
+// V_DANGER is the single danger token: ends with the accent fallback,
+// never a hardcoded color.
+assert.ok(src.includes("const V_DANGER = 'var(--dt-destructive, var(--ui-accent))'"),
+  'danger falls back to accent (theme token, not a hardcoded color)')
 
 // 2. Heat contrast: the hottest cell is the full accent over the host surface
 // (alpha-blend encoding, surface-relative). Default build accent --theme-
@@ -81,8 +84,9 @@ for (const [fg, label] of [['#0053fd', 'hottest cell (accent)'], ['#cf2d56', 'da
   }
 }
 
-// Alpha-blend encoding stays surface-relative (unchanged behavior).
-assert.ok(src.includes('globalAlpha = 0.12 + 0.88'), 'heat cells use accent alpha over cleared canvas')
+// Alpha encoding stays surface-relative (DOM opacity on theme-token
+// backgrounds — same 0.12..1.0 scale, host surface is the blend base).
+assert.ok(src.includes('(0.12 + 0.88 * v)'), 'heat cells use accent alpha over the host surface')
 
 // 3. Semantic rendering (P1 lane 3): the pane is driven by the semantic
 // routes, not by the legacy hourly lane; it never invents values.
@@ -102,8 +106,9 @@ assert.ok(src.includes('data.available'), 'portrait gates on the evidence flag')
 assert.ok(src.includes('evidence empty'), 'portrait renders the honest placeholder when empty')
 assert.ok(src.includes('data.series'), 'drift consumes per-axis series')
 assert.ok(src.includes('driftDelta'), 'drift renders per-axis deltas vs last snapshot')
-assert.ok(src.includes("'--dt-destructive'"), 'danger token still governs negative drift')
-assert.ok(src.includes('new ResizeObserver'), 'ResizeObserver stays mandatory')
+assert.ok(src.includes('V_DANGER'), 'danger token (V_DANGER) still governs negative drift + friction cells')
+assert.ok(src.includes('gridTemplateRows'),
+  'PULSE lane is a CSS-grid matrix structure (the layout engine sizes it; no ResizeObserver needed)')
 assert.ok(src.includes('refetchInterval: PULSE_POLL_MS'), 'polling fallback stays mandatory')
 assert.ok(src.includes('refetchInterval: POLL_MS'), 'polling fallback stays on every route')
 
