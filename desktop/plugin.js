@@ -11,7 +11,7 @@
 // - layout budget 96px: 22 header/tabs, 48 main, 18 ticker, 8 separators.
 //   Overflow goes to the settings popover, never in-pane scrolling.
 import { useState, useRef, useEffect } from 'react'
-import { host, icons, useQuery, queryClient } from '@hermes/plugin-sdk'
+import { host, useQuery, queryClient } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const POLL_MS = 5000
@@ -32,18 +32,20 @@ const OK_WINDOW_S = 30 // a successful completion stays 'successful' this long
 // PETSTATE-START
 // Pure pet state machine: 7 deterministic states, a pure function of the last
 // polled event plus time-since. No I/O, no globals — unit-testable.
-const PET_GLYPHS = {
-  idle: '(-.-)',
-  processing: '(o.o)',
-  reading: '(o>o)',
-  writing: '(o<o)',
-  verifying: '(o.o)~',
-  successful: '(^.^)',
-  friction: '(>_<)',
+// The seven states map onto the plugin's own tintable icon atlas (below,
+// IYH-ICONS): the pet is an operational creature drawn in SVG, not ASCII.
+const PET_ICONS = {
+  idle: 'pet-idle',
+  processing: 'pet-processing',
+  reading: 'pet-reading',
+  writing: 'pet-writing',
+  verifying: 'pet-verifying',
+  successful: 'pet-successful',
+  friction: 'pet-friction',
 }
 
-function petGlyph(state) {
-  return PET_GLYPHS[state] || PET_GLYPHS.idle
+function petIconName(state) {
+  return PET_ICONS[state] || PET_ICONS.idle
 }
 
 function toolNameOf(ev) {
@@ -98,6 +100,117 @@ function tickerPhrase(ev, nowSec) {
   return 'event ok' + ageTxt
 }
 // PETSTATE-END
+
+// IYH-ICONS-START
+// The plugin's own icon set: a single tintable SVG atlas (14x14 symbol grid,
+// stroke-based, currentColor only — NO hardcoded colors anywhere in the
+// defs; tinting happens at the use site via CSS color, i.e. theme vars).
+// Two independent mount surfaces (the compact Strip, the ExpandedWorkspace)
+// each render their OWN atlas copy under a distinct id prefix — symbol ids
+// are document-global, so one shared set of ids would break the moment
+// both surfaces are open at once.
+const IYH_IC = 'iyhs' // compact strip atlas prefix
+const IYH_WS_IC = 'iyhw' // expanded workspace atlas prefix
+
+const IYH_ICON_DEFS = {
+  // The pet: one little operational creature, seven states. Shared body:
+  // a rounded 10x7 square; state rides in the eyes, ears and one prop.
+  'pet-idle':
+    '<rect x="2" y="5.5" width="10" height="6.5" rx="2"/>' +
+    '<path d="M5.2 8.4h1.6 M7.2 8.4h1.6"/>' +
+    '<path d="M4.6 5.5V4.2 M9.4 5.5V4.2"/>',
+  'pet-processing':
+    '<rect x="2" y="5" width="10" height="7" rx="2"/>' +
+    '<circle cx="5.6" cy="8.4" r="0.9" fill="currentColor" stroke="none"/>' +
+    '<circle cx="8.4" cy="8.4" r="0.9" fill="currentColor" stroke="none"/>' +
+    '<circle cx="12.2" cy="2.8" r="0.8" fill="currentColor" stroke="none"/>' +
+    '<path d="M4.6 5V3.8 M9.4 5V3.8"/>',
+  'pet-reading':
+    '<rect x="2" y="5" width="10" height="7" rx="2"/>' +
+    '<circle cx="5.8" cy="8.4" r="1.7"/>' +
+    '<circle cx="9.4" cy="8.4" r="0.7" fill="currentColor" stroke="none"/>' +
+    '<path d="M4.6 5V3.8 M9.4 5V3.8"/>',
+  'pet-writing':
+    '<rect x="2" y="5" width="10" height="7" rx="2"/>' +
+    '<circle cx="5.6" cy="8.4" r="0.9" fill="currentColor" stroke="none"/>' +
+    '<circle cx="8.4" cy="8.4" r="0.9" fill="currentColor" stroke="none"/>' +
+    '<path d="M11.2 12.6l1.6-2.8"/>' +
+    '<path d="M4.6 5V3.8 M9.4 5V3.8"/>',
+  'pet-verifying':
+    '<rect x="2" y="5" width="10" height="7" rx="2"/>' +
+    '<circle cx="5.6" cy="8.4" r="0.9" fill="currentColor" stroke="none"/>' +
+    '<circle cx="8.4" cy="8.4" r="0.9" fill="currentColor" stroke="none"/>' +
+    '<path d="M4.8 2.2l0.9 0.9 1.5-1.8"/>',
+  'pet-successful':
+    '<rect x="2" y="5" width="10" height="7" rx="2"/>' +
+    '<path d="M4.9 8.5q0.8-1 1.7 0 M7.4 8.5q0.8-1 1.7 0"/>' +
+    '<path d="M11.9 1.6v1.8 M11 2.5h1.8"/>' +
+    '<path d="M4.6 5V3.8 M9.4 5V3.8"/>',
+  'pet-friction':
+    '<rect x="2" y="5.5" width="10" height="6.5" rx="2"/>' +
+    '<path d="M4.8 7.9l1.5 0.9-1.5 0.9 M9.2 7.9l-1.5 0.9 1.5 0.9"/>' +
+    '<path d="M5.6 2l1 0.9 1-0.9"/>' +
+    '<path d="M4.6 5.5V4.2 M9.4 5.5V4.2"/>',
+  // UI chrome (the thin-instrument set: 1.25 stroke, round caps, 14 grid).
+  help:
+    '<circle cx="7" cy="7" r="5.4"/>' +
+    '<path d="M5.7 5.6c0-1 0.9-1.5 1.6-1.3 0.8 0.2 1.2 0.8 1 1.5-0.3 0.9-1.3 0.9-1.3 1.8"/>' +
+    '<circle cx="7" cy="9.9" r="0.65" fill="currentColor" stroke="none"/>',
+  gear:
+    '<circle cx="7" cy="7" r="2.3"/>' +
+    '<path d="M7 1.6v2 M7 10.4v2 M1.6 7h2 M10.4 7h2 M3.2 3.2l1.4 1.4 M9.4 9.4l1.4 1.4 M10.8 3.2L9.4 4.6 M4.6 9.4L3.2 10.8"/>',
+  expand:
+    '<path d="M9.4 1.6h3v3 M12.4 1.6L7.6 6.4 M4.6 12.4h-3v-3 M1.6 12.4l4.8-4.8"/>',
+  close:
+    '<path d="M4.2 4.2l5.6 5.6 M9.8 4.2l-5.6 5.6"/>',
+}
+
+// Build one surface's atlas: a hidden <svg> of <symbol> defs. The tintable
+// contract lives on the symbol: stroke/fill = currentColor, so every use
+// site picks its color with plain CSS (theme vars).
+function iyhAtlasSvg(prefix) {
+  return '<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">' +
+    Object.keys(IYH_ICON_DEFS).map((n) =>
+      '<symbol id="' + prefix + '-' + n + '" viewBox="0 0 14 14" fill="none" ' +
+      'stroke="currentColor" stroke-width="1.25" stroke-linecap="round" ' +
+      'stroke-linejoin="round">' + IYH_ICON_DEFS[n] + '</symbol>'
+    ).join('') +
+    '</svg>'
+}
+
+function IyhAtlas({ prefix }) {
+  return jsx('div', {
+    'aria-hidden': true,
+    style: { display: 'none' },
+    dangerouslySetInnerHTML: { __html: iyhAtlasSvg(prefix) },
+  })
+}
+
+// One tintable use: <svg><use href="#prefix-name"/></svg>. `color` takes
+// any CSS color — theme vars included; that is the tinting seam.
+function IyhIcon({ prefix, name, size = 14, color, style }) {
+  return jsx('svg', {
+    width: size,
+    height: size,
+    viewBox: '0 0 14 14',
+    style: {
+      color: color || 'var(--ui-text-secondary)',
+      flexShrink: 0,
+      display: 'block',
+    },
+    'aria-hidden': true,
+    children: jsx('use', { href: '#' + prefix + '-' + name }),
+  })
+}
+
+// Pet tint: operational states ride the instrument tokens — friction on the
+// destructive token, success on the accent phosphor, everything else muted.
+function petIconColor(state) {
+  if (state === 'friction') return 'var(--dt-destructive, var(--ui-accent))'
+  if (state === 'successful') return 'var(--ui-accent)'
+  return 'var(--ui-text-secondary)'
+}
+// IYH-ICONS-END
 
 function fmtTokens(n) {
   if (n === null || n === undefined) return '–'
@@ -1151,6 +1264,9 @@ function ExpandedWorkspace({ source, rest }) {
       overflow: 'hidden',
     },
     children: [
+      // This surface's copy of the tintable icon atlas (IYH_WS_IC prefix —
+      // symbol ids are document-global; the strip runs its own under IYH_IC).
+      jsx(IyhAtlas, { prefix: IYH_WS_IC }),
       jsxs('div', {
         className: 'flex items-center',
         style: { height: 22, flexShrink: 0, gap: 8, fontSize: 11 },
@@ -1399,9 +1515,10 @@ function Strip({ source, rest }) {
             type: 'button', title: 'Close', onClick: () => setPanel(null),
             style: {
               background: 'transparent', border: 'none', cursor: 'pointer',
-              color: 'var(--ui-text-quaternary)', fontSize: 11,
+              color: 'var(--ui-text-quaternary)',
+              display: 'inline-flex', alignItems: 'center',
             },
-            children: '×',
+            children: jsx(IyhIcon, { prefix: IYH_IC, name: 'close', size: 11 }),
           }),
         ],
       }),
@@ -1441,6 +1558,8 @@ function Strip({ source, rest }) {
     children: [
       // PULSE live-glow keyframes (namespaced; inert if already injected).
       jsx('style', { children: PULSE_GLOW_CSS }),
+      // This surface's copy of the tintable icon atlas (see IYH-ICONS).
+      jsx(IyhAtlas, { prefix: IYH_IC }),
       jsxs('div', {
         className: 'flex items-center',
         style: { height: 22, fontSize: 11, gap: 6, flexShrink: 0 },
@@ -1452,10 +1571,13 @@ function Strip({ source, rest }) {
               ? "It's in Your Head · pet: " + pet + ' · ' + status
               : 'pet: ' + pet,
             style: {
-              fontFamily: 'var(--ui-font-mono, monospace)', fontSize: 10,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
               color: 'var(--ui-text-quaternary)', width: 36, flexShrink: 0,
             },
-            children: petGlyph(pet),
+            children: jsx(IyhIcon, {
+              prefix: IYH_IC, name: petIconName(pet), size: 14,
+              color: petIconColor(pet),
+            }),
           }),
           ...(!narrow
             ? [jsx('span', { style: { fontWeight: 500, flexShrink: 0 }, children: "It's in Your Head" })]
@@ -1481,19 +1603,19 @@ function Strip({ source, rest }) {
             : [jsx('span', { style: { flex: 1, flexShrink: 1 }, children: '' })]),
           jsx(IconButton, {
             title: 'Help — about this strip',
-            label: '?',
+            label: jsx(IyhIcon, { prefix: IYH_IC, name: 'help', size: 13 }),
             onClick: () => setPanel(panel === 'help' ? null : 'help'),
           }),
           jsx(IconButton, {
             title: 'Settings (read-only until /settings POST lands)',
-            label: '⚙',
+            label: jsx(IyhIcon, { prefix: IYH_IC, name: 'gear', size: 13 }),
             onClick: () => setPanel(panel === 'settings' ? null : 'settings'),
           }),
           jsx(IconButton, {
             title: wsCan
               ? 'Open workspace — PULSE / PORTRAIT / DRIFT, expanded inspection'
               : 'Workspace unavailable — this desktop build predates host.openWorkspace',
-            label: jsx(icons.Maximize, { size: 12 }),
+            label: jsx(IyhIcon, { prefix: IYH_IC, name: 'expand', size: 13 }),
             onClick: openWs,
             disabled: !wsCan,
           }),

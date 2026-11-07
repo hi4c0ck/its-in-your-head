@@ -15,8 +15,15 @@ const consts = ['STALE_S', 'OK_WINDOW_S'].map((name) => {
   assert.ok(m, name + ' defined in plugin.js')
   return m[0]
 }).join('\n')
-const { petState, petGlyph, tickerPhrase, PET_GLYPHS } =
-  new Function(consts + '\n' + block + '\n;return { petState, petGlyph, tickerPhrase, PET_GLYPHS };')()
+const { petState, petIconName, tickerPhrase, PET_ICONS } =
+  new Function(consts + '\n' + block + '\n;return { petState, petIconName, tickerPhrase, PET_ICONS };')()
+
+// The tintable icon atlas (module level): pull its defs to check the pet
+// icon names actually exist as symbols, and that the set is color-free.
+const iconBlock = src.slice(src.indexOf('// IYH-ICONS-START'), src.indexOf('// IYH-ICONS-END'))
+assert.ok(iconBlock.length > 0, 'IYH-ICONS markers found in plugin.js')
+const { IYH_ICON_DEFS } = new Function(
+  iconBlock + '\n;return { IYH_ICON_DEFS };')()
 
 const NOW = 1000000
 let n = 0
@@ -25,9 +32,9 @@ const eq = (actual, expected, label) => {
   console.log('ok ' + (++n) + ' - ' + label)
 }
 
-// 1. No events -> idle, glyph is the idle glyph.
+// 1. No events -> idle, icon is the idle pet symbol.
 eq(petState(null, NOW), 'idle', 'no event -> idle')
-eq(petGlyph('idle'), PET_GLYPHS.idle, 'idle glyph resolves')
+eq(petIconName('idle'), PET_ICONS.idle, 'idle icon resolves')
 
 // 2. Fresh turn / api event -> processing.
 eq(petState({ type: 'turn', ts: NOW - 5 }, NOW), 'processing', 'fresh turn -> processing')
@@ -49,10 +56,19 @@ eq(petState({ type: 'api', ts: NOW - 5, tool_name: 'run_tests' }, NOW), 'verifyi
 // 6. Stale anything -> idle.
 eq(petState({ type: 'error', ts: NOW - 3600 }, NOW), 'idle', 'stale error -> idle')
 
-// 7. All 7 states have distinct non-empty glyphs.
-const glyphs = new Set(Object.values(PET_GLYPHS))
-eq(Object.keys(PET_GLYPHS).length, 7, 'exactly 7 pet states')
-eq(glyphs.size, 7, '7 distinct glyphs')
+// 7. All 7 states map to distinct pet icon names, every one a real symbol
+// in the tintable atlas — and the atlas carries no hardcoded colors
+// (currentColor only; tinting happens at the use site via CSS color).
+const iconNames = new Set(Object.values(PET_ICONS))
+eq(Object.keys(PET_ICONS).length, 7, 'exactly 7 pet states')
+eq(iconNames.size, 7, '7 distinct pet icon names')
+for (const name of iconNames) {
+  assert.ok(IYH_ICON_DEFS[name], 'atlas symbol exists: ' + name)
+}
+eq(Object.keys(IYH_ICON_DEFS).length >= 11, true,
+  'atlas covers the 7 pet states + UI chrome (help, gear, expand, close)')
+assert.ok(!/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/.test(JSON.stringify(IYH_ICON_DEFS)),
+  'atlas defs are color-free (no hex/rgb values — currentColor only)')
 
 // 8. Ticker: public phrasing only, never payload text.
 eq(tickerPhrase(null, NOW), 'no events yet', 'ticker empty')

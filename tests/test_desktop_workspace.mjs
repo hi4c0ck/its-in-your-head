@@ -82,7 +82,9 @@ ok(src.includes('host.openWorkspace(WS_WORKSPACE_ID, {'),
   'expand click calls host.openWorkspace with the stable id')
 ok(src.includes("jsx(ExpandedWorkspace, { source: source, rest: rest })"),
   'workspace render is the ExpandedWorkspace component with the pane ctx bridge')
-ok(src.includes('icons.Maximize'), 'expand icon uses the SDK icons namespace (maximize)')
+ok(src.includes("name: 'expand'") && src.includes('IYH_IC'),
+  'expand icon is the plugin atlas symbol (iyh expand, tintable) — not the SDK set')
+ok(!src.includes('icons.Maximize'), 'SDK icons namespace retired in favor of the custom atlas')
 ok(src.includes('disabled: !wsCan'), 'icon is disabled when the host API is absent')
 ok(src.includes("title: \"It's in Your Head\""), 'workspace tab carries the plugin title')
 
