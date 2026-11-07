@@ -25,6 +25,7 @@ Event schema (dicts enqueued by hooks; the worker flattens them to rows):
           retry_count?, retryable?, reason?, error: {type?, message?}}
 """
 import collections
+import contextvars
 import logging
 import sqlite3
 import threading
@@ -375,14 +376,37 @@ def start_worker() -> None:
     """Daemon thread draining _queue: embed turn prompts, aggregate, persist
     through the lazy-opened plugin DB, optionally broadcast ticks.
     Idempotent — a second call while the worker is alive is a no-op.
-    Call from register(ctx); the DB opens on the first event, never here."""
+    Call from register(ctx); the DB opens on the first event, never here.
+
+    Hermes loads each profile's plugins under that profile's context-local
+    HERMES_HOME override. Preserve that context in the worker: otherwise
+    plugin_data_dir()/plugin_db() can fall back to the gateway's launch
+    (default) home and split the writer from the profile-scoped dashboard.
+    """
     global _worker_thread
     with _worker_lock:
         if _worker_thread is not None and _worker_thread.is_alive():
             return
         _shutdown.clear()
-        _worker_thread = threading.Thread(
-            target=_worker_main, name="its-in-your-head-metrics", daemon=True)
+        try:
+            # Hermes' helper copies the current ContextVars into the new
+            # thread. PluginManager loads a profile's plugin under that
+            # profile's HERMES_HOME scope, so this worker remains bound to
+            # the same profile as register(ctx) and its dashboard child.
+            from agent.memory_provider import spawn_context_thread
+        except ModuleNotFoundError as exc:
+            # The standalone plugin test suite intentionally runs without
+            # the Hermes runtime installed. Keep the exact context-copy
+            # semantics there, using only the Python standard library.
+            if exc.name not in {"agent", "agent.memory_provider"}:
+                raise
+            context = contextvars.copy_context()
+            _worker_thread = threading.Thread(
+                target=context.run, args=(_worker_main,),
+                name="its-in-your-head-metrics", daemon=True)
+        else:
+            _worker_thread = spawn_context_thread(
+                _worker_main, name="its-in-your-head-metrics", daemon=True)
         _worker_thread.start()
 
 
