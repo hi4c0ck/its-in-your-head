@@ -6,11 +6,17 @@ Deterministic, stdlib + repo imports only. Zero network, no LLM, no
 randomness, no timestamps. Re-runnable: same input -> identical report
 body (sha256 printed at the end).
 
-Run from the repo root:  python tools/probe_pattern_quality.py
-Writes probe-report.md at the repo root of this clone + a console summary.
+Run from the repo root:  python tools/probe_pattern_quality.py [--tier tier0|tier1]
+Default (tier0) writes probe-report.md at the repo root of this clone;
+--tier tier1 writes probe-report-tier1.md (same layout plus a Tier-0 vs
+Tier-1 comparison table and a Tier-1 verdict) using the repo's ONNX
+Tier-1 backend (worker subprocess, model dir from --model-dir or the
+sibling .modeldir dir), with model_version pinned to the int8 graph's
+sha256 so the bank cache key separates from Tier-0 by design.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import sys
 from collections import Counter
@@ -23,6 +29,12 @@ if str(REPO_ROOT) not in sys.path:
 from perception import patterns as pat  # noqa: E402
 from perception.anchors import ANCHORS, DIMENSIONS  # noqa: E402
 from perception.encoder import Tier0SketchBackend, TIER0_MODEL_VERSION  # noqa: E402
+from perception.encoder import OnnxMiniLMBackend  # noqa: E402
+
+# Tier-1 pinned artifact (onnx/manifest.json int8 graph sha256). The probe's
+# Tier-1 backend uses this as model_version so the bank cache key separates
+# from Tier-0 by design (Tier-0 key is TIER0_MODEL_VERSION).
+ONNX_MODEL_SHA256 = "0029fce9c82365d8a2bf20e03a476e84785a872d8d423c8bac0fd0f350df88dc"
 
 # --------------------------------------------------------------------------
 # Authored probe sets (inline; short, deterministic)
@@ -187,13 +199,165 @@ def score_with_reaction(vec, rvec, bank):
 
 
 # --------------------------------------------------------------------------
+# Tier-1 backend (worker subprocess; guarded for test-interpreter runtime)
+# --------------------------------------------------------------------------
+
+
+class _Tier1CheckedBackend:
+    """Wraps OnnxMiniLMBackend: refuses any silent Tier-0 fallback.
+
+    The repo backend degrades to Tier-0 on any worker failure (by design in
+    production). For a quality probe that would fabricate Tier-1 numbers —
+    so this wrapper raises instead, and pins model_version to the ONNX
+    sha256. A direct-construction backend with a client never returns Tier-0
+    text through this wrapper: last_failure is always checked.
+    """
+
+    name = "tier-1-onnx"
+
+    def __init__(self, backend, client):
+        self._backend = backend
+        self.client = client
+
+    @property
+    def model_version(self) -> str:
+        return ONNX_MODEL_SHA256
+
+    @property
+    def dim(self) -> int:
+        return 384
+
+    def encode(self, texts: list[str]) -> list[list[float]]:
+        out = self._backend.encode(list(texts))
+        failure = self._backend.last_failure
+        if failure is not None:
+            raise RuntimeError(f"tier-1 encode fell back: {failure}")
+        if out and len(out[0]) != 384:
+            raise RuntimeError(
+                f"tier-1 encode dim != 384: {len(out[0])}")
+        return out
+
+
+def default_model_dir() -> Path:
+    return REPO_ROOT.parent / (REPO_ROOT.name + ".modeldir")
+
+
+def make_tier1_backend(model_dir: Path | None = None) -> tuple:
+    """Construct the checked Tier-1 backend via the repo worker client.
+
+    Returns (backend, ort_version). Raises on ANY failure (no fabrication).
+    """
+    import onnxruntime as ort  # optional dependency; tier-1 only
+
+    from perception.worker_client import OnnxWorkerClient
+
+    mdir = Path(model_dir) if model_dir else default_model_dir()
+    client = OnnxWorkerClient(
+        model_dir=mdir, interpreter=sys.executable, timeout_s=120.0)
+    backend = OnnxMiniLMBackend(client=client, model_version=ONNX_MODEL_SHA256)
+    ping = client.ping()
+    if not ping.ok:
+        raise RuntimeError(f"tier-1 worker ping failed: {ping.failure}")
+    return _Tier1CheckedBackend(backend, client), str(ort.__version__)
+
+
+def quick_stats(backend) -> dict:
+    """Compact per-backend stats for the Tier-0 vs Tier-1 comparison.
+
+    Reuses the identical probe sets and scoring helpers as the main run.
+    """
+    bank = pat.build_pattern_bank(backend, backend.model_version)
+    enc = lambda texts: backend.encode(list(texts))  # noqa: E731
+    in_rates, in_margins = {}, {}
+    for dim in DIMENSIONS:
+        texts = list(ANCHORS[dim]["positive"]) + list(FRESH_IN_DOMAIN[dim])
+        rows = [score_prompt_only(v, bank) for v in enc(texts)]
+        in_rates[dim] = (
+            sum(1 for r in rows if r["top1"] == dim) / len(rows))
+        in_margins[dim] = mean(
+            [r["margin"] for r in rows if r["margin"] is not None])
+    near_total = near_correct = 0
+    pair_err: Counter[tuple[str, str]] = Counter()
+    for dim in DIMENSIONS:
+        texts = [t for t, _ in NEAR[dim]]
+        for (_text, _pull), vec, in zip(NEAR[dim], enc(texts)):
+            s = score_prompt_only(vec, bank)
+            near_total += 1
+            near_correct += 1 if s["top1"] == dim else 0
+            if s["top1"] != dim:
+                pair_err[(dim, s["top1"])] += 1
+    ood_rows = [score_prompt_only(v, bank) for v in enc(OUT_OF_DOMAIN)]
+    in_aff = mean([score_prompt_only(v, bank)["top1_aff"]
+                   for dim in DIMENSIONS
+                   for v in enc(list(ANCHORS[dim]["positive"])
+                                + list(FRESH_IN_DOMAIN[dim]))])
+    ood_aff = mean([r["top1_aff"] for r in ood_rows])
+    amps = []
+    for dim in DIMENSIONS:
+        entry = next(e for e in pat.PATTERN_BANK if e["name"] == dim)
+        prompt_texts = list(ANCHORS[dim]["positive"]) + list(
+            FRESH_IN_DOMAIN[dim])
+        agent_texts = list(entry["agent_paraphrases"])
+        for pvec in enc(prompt_texts):
+            for avec in enc(agent_texts):
+                res = pat.score_turn(pvec, avec, bank)
+                intended = next(p for p in res["patterns"]
+                                if p["name"] == dim)
+                if intended["amplification"] is not None:
+                    amps.append(intended["amplification"])
+    return {
+        "in_rates": in_rates,
+        "in_margins": in_margins,
+        "near_correct": near_correct,
+        "near_total": near_total,
+        "near_rate": near_correct / near_total if near_total else 0.0,
+        "in_aff": in_aff,
+        "ood_aff": ood_aff,
+        "ood_delta": in_aff - ood_aff,
+        "amplification": mean(amps),
+        "pair_err": pair_err,
+    }
+
+
+# --------------------------------------------------------------------------
 # Probe run
 # --------------------------------------------------------------------------
 
 
-def main() -> None:
-    backend = Tier0SketchBackend()
-    assert backend.model_version == TIER0_MODEL_VERSION
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--tier", choices=["tier0", "tier1"], default="tier0")
+    ap.add_argument("--model-dir", default=None)
+    args = ap.parse_args(argv)
+    tier = args.tier
+    tier1_client = None
+    ort_version: str | None = None
+    if tier == "tier0":
+        backend = Tier0SketchBackend()
+        assert backend.model_version == TIER0_MODEL_VERSION
+    else:
+        try:
+            backend, ort_version = make_tier1_backend(args.model_dir)
+            tier1_client = backend.client
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            lines = ["# L8 tier-1 pattern-quality probe report", "",
+                     f"- backend: tier-1-onnx (FAILED TO LOAD)",
+                     f"- model sha256 (int8 graph): {ONNX_MODEL_SHA256}",
+                     "", "## BLOCKER", "",
+                     "Tier-1 model could not be loaded in any available "
+                     "runtime; no tier-1 numbers were produced (no "
+                     "fabricated vectors).",
+                     "", f"Error: `{err}`", ""]
+            body = "\n".join(lines)
+            report_path = REPO_ROOT / "probe-report-tier1.md"
+            report_path.write_text(body, encoding="utf-8")
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            print(body)
+            print(f"\n[probe] report: {report_path}")
+            print(f"[probe] sha256(report body): {digest}")
+            print(f"[probe] BLOCKED: {err}")
+            return
     bank = pat.build_pattern_bank(backend, backend.model_version)
 
     def enc(texts: list[str]) -> list[list[float]]:
@@ -286,9 +450,15 @@ def main() -> None:
 
     # Per-pattern summary tables
     lines: list[str] = []
-    lines.append("# L6 pattern-quality probe report")
+    lines.append("# L6 pattern-quality probe report" if tier == "tier0"
+                   else "# L8 tier-1 pattern-quality probe report")
     lines.append("")
-    lines.append(f"- backend: tier-0 ({backend.model_version})")
+    if tier == "tier0":
+        lines.append(f"- backend: tier-0 ({backend.model_version})")
+    else:
+        lines.append(f"- backend: tier-1-onnx ({backend.model_version}, "
+                     f"model sha256 {ONNX_MODEL_SHA256}, "
+                     f"onnxruntime {ort_version})")
     lines.append(f"- pattern_bank_version: {pat.PATTERN_BANK_VERSION}")
     lines.append(f"- patterns: {', '.join(DIMENSIONS)}")
     lines.append("- method: real Tier0SketchBackend encode; score_turn "
@@ -482,7 +652,9 @@ def main() -> None:
                      f"{cur_correct}/{cur_total} ({cur_rate:.3f})")
     lines.append(f"- Amplification overall: {overall_amp:.6f}")
     lines.append("")
-    lines.append(f"**Tier-0 sketch discrimination: "
+    verdict_name = ("Tier-0 sketch discrimination" if tier == "tier0"
+                    else "Tier-1 ONNX discrimination")
+    lines.append(f"**{verdict_name}: "
                  f"{'PASS' if passed else 'FAIL'}** "
                  f"(bar: in-domain agreement >= 2/3 per pattern AND "
                  f"out-of-domain separation visible).")
@@ -500,36 +672,159 @@ def main() -> None:
                 lines.append(f"- Pair {exp} vs {picked}: {c} confusion(s); "
                              f"rewrite paraphrases on both sides so "
                              f"{exp} owns its distinctive verbs.")
-        lines.append("- If a pattern fails 2/3 in-domain even without "
-                     "near wording, its bank paraphrases share too much "
-                     "char-3-gram overlap with a neighbour under Tier-0; "
-                     "shorten/distinct-ify them before any Tier-1 work.")
-    else:
+        if tier == "tier0":
+            lines.append("- If a pattern fails 2/3 in-domain even without "
+                         "near wording, its bank paraphrases share too much "
+                         "char-3-gram overlap with a neighbour under Tier-0; "
+                         "shorten/distinct-ify them before any Tier-1 work.")
+        else:
+            lines.append("- If a pattern fails 2/3 in-domain even without "
+                         "near wording, its bank paraphrases share too much "
+                         "semantic overlap with a neighbour; sharpen them.")
+    elif tier == "tier0":
         lines.append("No mandatory curation before Tier-1. Watch the "
                      "attractor patterns above in the near set; Tier-1 "
                      "(semantic) embeddings are expected to widen margins "
                      "on the near pairs listed, since Tier-0 is lexical "
                      "(char-3-gram) and cannot separate paraphrases that "
                      "share vocabulary across patterns.")
+    else:
+        lines.append("No mandatory curation before Tier-1 sign-off. Watch "
+                     "the attractor patterns above in the near set and the "
+                     "Tier-0 vs Tier-1 comparison below: semantic "
+                     "embeddings should widen margins on the near pairs "
+                     "where Tier-0 (lexical, char-3-gram) could not "
+                     "separate paraphrases sharing vocabulary across "
+                     "patterns.")
     lines.append("")
-    lines.append("What Tier-1 is expected to fix regardless of verdict:")
-    lines.append("- Near-probe confusions where wording overlap, not meaning, "
-                 "drives the pick (Tier-0 has no semantics).")
-    lines.append("- Out-of-domain spurious affinity: a semantic encoder "
-                 "should push OOD top-1 affinity down and in-domain up, "
-                 "widening the separation delta measured above.")
-    lines.append("- Amplification noise: with semantic vectors, agent-side "
-                 "first-person phrasing should separate from prompt-side "
-                 "phrasing more cleanly than char-3-gram overlap allows.")
-    lines.append("")
+    if tier == "tier0":
+        lines.append("What Tier-1 is expected to fix regardless of verdict:")
+        lines.append("- Near-probe confusions where wording overlap, not meaning, "
+                     "drives the pick (Tier-0 has no semantics).")
+        lines.append("- Out-of-domain spurious affinity: a semantic encoder "
+                     "should push OOD top-1 affinity down and in-domain up, "
+                     "widening the separation delta measured above.")
+        lines.append("- Amplification noise: with semantic vectors, agent-side "
+                     "first-person phrasing should separate from prompt-side "
+                     "phrasing more cleanly than char-3-gram overlap allows.")
+        lines.append("")
+
+    if tier == "tier1":
+        # ---- Tier-0 vs Tier-1 comparison (identical probe sets) --------
+        t0 = quick_stats(Tier0SketchBackend())
+        # recompute tier-1 stats through the checked backend for the table
+        # (in-process re-encode; identical inputs, deterministic results)
+        t1 = quick_stats(backend)
+        lines.append("## Tier-0 vs Tier-1 comparison")
+        lines.append("")
+        lines.append("| metric | tier-0 | tier-1 |")
+        lines.append("|---|---|---|")
+        lines.append(f"| in-domain agreement (min per pattern) | "
+                     f"{min(t0['in_rates'].values()):.3f} | "
+                     f"{min(t1['in_rates'].values()):.3f} |")
+        for dim in DIMENSIONS:
+            lines.append(f"| in-domain rate: {dim} | {t0['in_rates'][dim]:.3f} | "
+                         f"{t1['in_rates'][dim]:.3f} |")
+        for dim in DIMENSIONS:
+            lines.append(f"| mean in-domain margin: {dim} | "
+                         f"{t0['in_margins'][dim]:.6f} | "
+                         f"{t1['in_margins'][dim]:.6f} |")
+        lines.append(f"| near-probe accuracy (18 probes) | "
+                     f"{t0['near_correct']}/{t0['near_total']} "
+                     f"({t0['near_rate']:.3f}) | "
+                     f"{t1['near_correct']}/{t1['near_total']} "
+                     f"({t1['near_rate']:.3f}) |")
+        lines.append(f"| OOD mean in-affinity | {t0['in_aff']:.6f} | "
+                     f"{t1['in_aff']:.6f} |")
+        lines.append(f"| OOD mean out-affinity (spurious) | "
+                     f"{t0['ood_aff']:.6f} | {t1['ood_aff']:.6f} |")
+        lines.append(f"| OOD separation delta (in - out) | "
+                     f"{t0['ood_delta']:.6f} | {t1['ood_delta']:.6f} | "
+                     f"({'better' if t1['ood_delta'] > t0['ood_delta'] else 'worse'}) |")
+        lines.append(f"| mean amplification (overall) | "
+                     f"{t0['amplification']:.6f} "
+                     f"({'positive' if t0['amplification'] > 0 else 'non-positive'}) | "
+                     f"{t1['amplification']:.6f} "
+                     f"({'positive' if t1['amplification'] > 0 else 'non-positive'}) |")
+        lines.append("")
+
+        # ---- Tier-1 verdict: confusion pairs + curation advice -------
+        def pair_count(stats, a, b):
+            return (stats["pair_err"].get((a, b), 0)
+                    + stats["pair_err"].get((b, a), 0))
+
+        t0_cr_ad = pair_count(t0, "context_richness", "analytical_depth")
+        t1_cr_ad = pair_count(t1, "context_richness", "analytical_depth")
+        t0_sc_di = pair_count(t0, "scope", "directness")
+        t1_sc_di = pair_count(t1, "scope", "directness")
+        lines.append("## VERDICT (Tier-1)")
+        lines.append("")
+        lines.append(f"- Tier-1 discrimination (same bar as Tier-0): "
+                     f"{'PASS' if passed else 'FAIL'} "
+                     f"(min in-domain rate {min_rate:.3f}, OOD delta "
+                     f"{separation:.6f}, near {near_correct}/{near_total}, "
+                     f"amplification {overall_amp:.6f}).")
+        lines.append(f"- Confusion context_richness vs analytical_depth "
+                     f"(near probes both directions): Tier-0 {t0_cr_ad} "
+                     f"confusion(s), Tier-1 {t1_cr_ad} confusion(s) "
+                     f"({'FIXED' if t1_cr_ad == 0 and t0_cr_ad > 0 else 'not fixed (still needs curation)' if t1_cr_ad > 0 else 'clear on both'}).")
+        lines.append(f"- Confusion scope vs directness (near probes both "
+                     f"directions): Tier-0 {t0_sc_di} confusion(s), Tier-1 "
+                     f"{t1_sc_di} confusion(s) "
+                     f"({'FIXED' if t1_sc_di == 0 and t0_sc_di > 0 else 'not fixed (still needs curation)' if t1_sc_di > 0 else 'clear on both'}).")
+        lines.append(f"- Other near-probe confusions still present in "
+                     f"Tier-1 (expected -> picked): "
+                     f"{[(f'{a}->{b}', c) for (a, b), c in sorted(t1['pair_err'].items()) if c] or 'none (18/18 correct)'}.")
+        # curation list: undirected pairs with >=1 remaining Tier-1 confusion
+        undirected: Counter[tuple[str, str]] = Counter()
+        for (a, b), c in t1["pair_err"].items():
+            undirected[tuple(sorted((a, b)))] += c
+        remaining = sorted(undirected.items(), key=lambda kv: -kv[1])
+        if remaining:
+            lines.append("- Pairs still needing curation under Tier-1 "
+                         "(no curation was applied; bank is the shipped preset):")
+            for (a, b), c in remaining:
+                lines.append(f"  - {a} vs {b}: {c} near-probe confusion(s) "
+                             f"(both directions); rewrite paraphrases on both "
+                             f"sides so each owns its distinctive verbs.")
+        else:
+            lines.append("- No pair needs curation on the near set under Tier-1 "
+                         "(all 18 near probes correct).")
+        lines.append(f"- OOD separation: Tier-0 delta {t0['ood_delta']:.6f} vs "
+                     f"Tier-1 delta {t1['ood_delta']:.6f} "
+                     f"({'better' if t1['ood_delta'] > t0['ood_delta'] else 'worse'}).")
+        lines.append("")
 
     body = "\n".join(lines)
-    report_path = REPO_ROOT / "probe-report.md"
+    report_path = (REPO_ROOT / "probe-report.md" if tier == "tier0"
+                   else REPO_ROOT / "probe-report-tier1.md")
     report_path.write_text(body, encoding="utf-8")
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-    print(body)
-    print(f"\n[probe] report: {report_path}")
-    print(f"[probe] sha256(report body): {digest}")
+    if tier == "tier0":
+        body_final = body
+        report_path.write_text(body_final, encoding="utf-8")
+        print(body_final)
+        print(f"\n[probe] report: {report_path}")
+        print(f"[probe] sha256(report body): {digest}")
+    else:
+        # Footer is appended AFTER the digest pass so the digest stays meaningful
+        # and deterministic; the footer records the digest of the body above it.
+        footer = ["", "## Footer (reproducibility)", "",
+                  f"- onnxruntime version used: {ort_version}",
+                  f"- model sha256 (int8 graph): {ONNX_MODEL_SHA256}",
+                  f"- determinism sha256 of report body above: {digest}"]
+        body_final = body + "\n" + "\n".join(footer)
+        report_path.write_text(body_final, encoding="utf-8")
+        digest_final = hashlib.sha256(body_final.encode("utf-8")).hexdigest()
+        print(body_final)
+        print(f"\n[probe] report: {report_path}")
+        print(f"[probe] sha256(report body): {digest}")
+        print(f"[probe] sha256(full report with footer): {digest_final}")
+    if tier1_client is not None:
+        try:
+            tier1_client.shutdown()
+        except Exception:
+            pass
     print(f"[probe] verdict: {'PASS' if passed else 'FAIL'} "
           f"(min in-domain rate {min_rate:.3f}, OOD delta {separation:.6f}, "
           f"near {near_correct}/{near_total}, amplification {overall_amp:.6f})")
