@@ -30,13 +30,13 @@ DIMENSIONS = (
 ANCHORS: dict[str, dict[str, list[str]]] = {
     "directness": {
         "positive": [
-            "Give me the short answer, no preamble.",
-            "Tell me the number, plainly.",
-            "Say it in a single plain sentence.",
-            "No fluff — what is it?",
-            "TL;DR, straight to the point.",
-            "Skip the pleasantries and state the verdict.",
-            "Skip the intro, give the result.",
+            "Only the number, plainly.",
+            "Just the answer, nothing extra.",
+            "Only the verdict, bluntly, no preamble.",
+            "The bottom line only, in plain words.",
+            "Short answer only - skip the pleasantries.",
+            "One plain line, straight to the point.",
+            "Answer briefly, straight up, no fluff.",
         ],
         "negative": [
             "Walk me through your reasoning step by step.",
@@ -50,13 +50,13 @@ ANCHORS: dict[str, dict[str, list[str]]] = {
     },
     "context_richness": {
         "positive": [
-            "Here is the full background and prior attempts.",
-            "Context: we tried X, then Y, both failed.",
-            "Given that we are offline, here is the config to work from.",
-            "The docs say this; here is the exact error message.",
-            "Constraints: offline only, must run on Windows.",
-            "Before you act, here is the environment: version, OS, and setup.",
-            "All the setup details are here: how it is wired and what was decided.",
+            "Here is the context: the background, setup, and history, all supplied.",
+            "Here is the full background and prior attempts, all supplied up front.",
+            "Pasted below: the full trace and the logs we collected.",
+            "Attached: the background, versions, and setup details, all given.",
+            "Given up front: the environment, OS, constraints, and what was decided.",
+            "Supplied material: docs, repro steps, and what was tried before.",
+            "Context included: what we tried, what failed, and the current setup.",
         ],
         "negative": [
             "Fix it.",
@@ -90,13 +90,13 @@ ANCHORS: dict[str, dict[str, list[str]]] = {
     },
     "analytical_depth": {
         "positive": [
-            "Compare the pros and cons of each approach.",
-            "Analyze the trade-offs with numbers.",
-            "What are the root causes here? Go deeper.",
-            "Which hypothesis fits best? Explain the logic, not just the label.",
-            "Break the problem into first principles.",
-            "Stress-test this logic against edge cases.",
-            "Do a proper post-mortem of the failure.",
+            "Why does this happen? Derive the mechanism from first principles.",
+            "Prove which hypothesis fits with evidence and numbers.",
+            "Analyze the trade-offs numerically and compare pros and cons.",
+            "Find the root cause: trace the mechanism and stress-test the logic.",
+            "Break the failure down into first principles and do a post-mortem.",
+            "Analyze the attached material in depth and explain the root cause.",
+            "Weigh the evidence, rank the hypotheses by likelihood, and justify the verdict.",
         ],
         "negative": [
             "Just make it go.",
@@ -130,13 +130,13 @@ ANCHORS: dict[str, dict[str, list[str]]] = {
     },
     "scope": {
         "positive": [
-            "Only the auth module — leave everything else alone.",
+            "Just this module, nothing else.",
+            "Only this part - leave the rest alone.",
             "Just this one file; stop when it is fixed.",
             "Keep the change inside this area, nothing outside.",
-            "Out of scope: the rest of the system stays untouched.",
-            "Bound the fix to this endpoint and call it done.",
-            "One function, one test — that is the boundary.",
-            "Do not touch the surrounding code at all.",
+            "Out of scope: everything else stays untouched.",
+            "Only this endpoint, nothing wider.",
+            "Just this function and its test, nothing else.",
         ],
         "negative": [
             "Rework the whole system around this.",

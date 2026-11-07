@@ -36,20 +36,20 @@ PATTERN_BANK = (
         "name": "directness",
         "prompt_paraphrases": ANCHORS["directness"]["positive"],
         "agent_paraphrases": [
-            "I am saying it plainly with no preamble or pleasantries",
+            "I am answering bluntly with no preamble or pleasantries",
+            "I am giving the short bottom line in plain words",
             "I am skipping the intro and leading with the answer",
-            "I am giving the blunt bottom line in one sentence",
-            "I am not softening it or adding friendly filler",
+            "I am not softening it with friendly filler",
         ],
     },
     {
         "name": "context_richness",
         "prompt_paraphrases": ANCHORS["context_richness"]["positive"],
         "agent_paraphrases": [
-            "I am gathering the background and prior attempts before acting",
-            "I am checking the constraints and setup the user listed",
-            "I am using the environment and prior decisions already given",
-            "I am grounding my answer in the supplied context",
+            "I am taking the supplied logs, trace, and background as given",
+            "I am using the setup, constraints, and prior attempts already provided",
+            "I am grounding myself in the pasted material before acting",
+            "I am treating the attached details as my starting point",
         ],
     },
     {
@@ -66,10 +66,10 @@ PATTERN_BANK = (
         "name": "analytical_depth",
         "prompt_paraphrases": ANCHORS["analytical_depth"]["positive"],
         "agent_paraphrases": [
-            "I am deriving why this happens from first principles",
-            "I am weighing the mechanism and the trade-offs with numbers",
-            "I am decomposing the logic and explaining each step of the reasoning",
-            "I am comparing hypotheses by their underlying mechanism",
+            "I am deriving why this happens and proving the mechanism",
+            "I am analyzing the trade-offs and weighing the hypotheses with numbers",
+            "I am tracing the root cause step by step from first principles",
+            "I am explaining the underlying reason, not just giving a label",
         ],
     },
     {
@@ -86,7 +86,7 @@ PATTERN_BANK = (
         "name": "scope",
         "prompt_paraphrases": ANCHORS["scope"]["positive"],
         "agent_paraphrases": [
-            "I am keeping this to only the part the user named",
+            "I am staying inside this module only, nothing wider",
             "I am stopping when that part is done and leaving the rest out",
             "I am limiting my change to just this one area",
             "I am not touching anything outside the boundary",
