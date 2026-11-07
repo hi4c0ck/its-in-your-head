@@ -26,7 +26,11 @@ NEAR_CURATED = _probe.NEAR_CURATED
 NEAR_CURATED2 = _probe.NEAR_CURATED2
 
 # L9 prompt-side banks (tier-1-aware rewrite: supply vs reasoning, result vs
-# territory).
+# territory). CUR3 disclosure: the context_richness list moved — it was
+# narrowed to user-SUPPLIED material (logs, configs, stack traces,
+# versions, constraints, repro steps, docs); the generic
+# 'here is the context/background' phrasing was dropped (L11 live
+# dominance 74-80%). All other target lists are byte-identical to L9.
 L9_PROMPT = {
     "directness": [
         "Only the number, plainly.",
@@ -38,13 +42,13 @@ L9_PROMPT = {
         "Answer briefly, straight up, no fluff.",
     ],
     "context_richness": [
-        "Here is the context: the background, setup, and history, all supplied.",
-        "Here is the full background and prior attempts, all supplied up front.",
+        "Attached: the failing config, the stack trace, and the versions, all given as-is.",
         "Pasted below: the full trace and the logs we collected.",
-        "Attached: the background, versions, and setup details, all given.",
-        "Given up front: the environment, OS, constraints, and what was decided.",
+        "Here are the error logs and the version numbers, pasted in full.",
         "Supplied material: docs, repro steps, and what was tried before.",
-        "Context included: what we tried, what failed, and the current setup.",
+        "Given up front: the environment, OS, constraints, and what was decided.",
+        "Supplied: the dependency tree, the feature flags, and the failing case.",
+        "Here is the data sample and the current schema, attached as-is.",
     ],
     "analytical_depth": [
         "Why does this happen? Derive the mechanism from first principles.",
@@ -238,18 +242,30 @@ def test_probe_original_and_l7_sets_untouched():
 
 
 def test_probe_curated2_set_pinned():
+    # CUR3 disclosure: the set grew from 4 to 8 — four CR-vs-AD /
+    # CR-vs-SCO discrimination probes were added (strong-runner cases
+    # shaped from the live margin distribution); the original L9 four
+    # are byte-identical.
     assert NEAR_CURATED2 == {
         "context_richness": [
             ("Supplied up front: background and setup; take it as given.",
              "analytical_depth"),
+            ("Pasted: the full error trace, the config, and what we already tried.",
+             "analytical_depth"),
+            ("Here is the failing module's log; stay inside it.",
+             "scope"),
         ],
         "analytical_depth": [
             ("Given the supplied logs, derive the mechanism and prove the cause.",
+             "context_richness"),
+            ("From the pasted stack trace, find the root cause.",
              "context_richness"),
         ],
         "scope": [
             ("Just this module only, bluntly: what is the verdict?",
              "directness"),
+            ("Just this one file — the pasted config below; leave the rest.",
+             "context_richness"),
         ],
         "directness": [
             ("No preamble: only the number, and leave the rest of the system alone.",

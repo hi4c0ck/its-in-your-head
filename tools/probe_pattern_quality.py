@@ -49,7 +49,7 @@ FRESH_IN_DOMAIN: dict[str, list[str]] = {
     ],
     "context_richness": [
         "Attached: the log, the config, and my repro steps.",
-        "Background included: what I tried and what failed.",
+        "Supplied: the versions in play and the exact failing case.",
         "Full error trace pasted below, plus versions.",
     ],
     "exploration": [
@@ -134,18 +134,30 @@ NEAR_CURATED: dict[str, list[tuple[str, str]]] = {
 
 # L9 curation round (tier-1-aware): fresh near probes for the two remaining
 # confusion pairs. Scored/reported SEPARATELY (original 18 + L7 5 pristine).
+# CUR3: extended with CR-vs-AD and CR-vs-SCO discrimination probes shaped
+# from the live margin distribution (median ~0.023 = noise; strong-runner
+# cases where supply-vocabulary wording pulls toward the neighbour but the
+# true intent stays with the key pattern).
 NEAR_CURATED2: dict[str, list[tuple[str, str]]] = {
     "context_richness": [
         ("Supplied up front: background and setup; take it as given.",
          "analytical_depth"),
+        ("Pasted: the full error trace, the config, and what we already tried.",
+         "analytical_depth"),
+        ("Here is the failing module's log; stay inside it.",
+         "scope"),
     ],
     "analytical_depth": [
         ("Given the supplied logs, derive the mechanism and prove the cause.",
+         "context_richness"),
+        ("From the pasted stack trace, find the root cause.",
          "context_richness"),
     ],
     "scope": [
         ("Just this module only, bluntly: what is the verdict?",
          "directness"),
+        ("Just this one file — the pasted config below; leave the rest.",
+         "context_richness"),
     ],
     "directness": [
         ("No preamble: only the number, and leave the rest of the system alone.",

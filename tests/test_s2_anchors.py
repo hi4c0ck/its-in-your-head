@@ -26,7 +26,9 @@ def test_each_dimension_has_5_to_10_pos_and_neg_anchors():
 
 def test_bank_is_deterministic_across_calls():
     assert anchors.default_bank().positive("directness") == anchors.default_bank().positive("directness")
-    assert anchors.ANCHOR_BANK_VERSION == "1.0.0"
+    # CUR3: version bumped 1.0.0 -> 1.1.0 (CR territory narrowed; cache
+    # invalidation via the anchor-bank-version key is intentional).
+    assert anchors.ANCHOR_BANK_VERSION == "1.1.0"
 
 
 def test_build_anchor_vectors_shape_and_order(tmp_path):

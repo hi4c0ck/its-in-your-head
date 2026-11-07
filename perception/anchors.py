@@ -5,6 +5,12 @@ varied, terse English). Reference vectors are pre-encoded via the active
 backend and cached as JSON in the plugin data dir; the cache is invalidated
 when the anchor-bank version OR the backend model_version changes. Build
 order is deterministic: pinned dimension order, anchors in listed order.
+
+CUR3 (v1.1.0): context_richness positives narrowed to user-SUPPLIED
+material to be mined (logs, configs, stack traces, versions, constraints,
+repro steps, docs) — the generic 'here is the context/background'
+phrasing that pulled in reasoning/scope turns is gone. All other
+dimensions' lines are byte-identical to v1.0.0.
 """
 from __future__ import annotations
 
@@ -14,7 +20,7 @@ from pathlib import Path
 
 from . import encoder
 
-ANCHOR_BANK_VERSION = "1.0.0"
+ANCHOR_BANK_VERSION = "1.1.0"
 CACHE_FILE = "anchor_vectors.json"
 
 DIMENSIONS = (
@@ -49,14 +55,19 @@ ANCHORS: dict[str, dict[str, list[str]]] = {
         ],
     },
     "context_richness": {
+        # CUR3: user-SUPPLIED material to be mined — concrete artifacts
+        # (logs, configs, stack traces, versions, constraints, repro
+        # steps, docs). No generic 'here is the context/background'
+        # phrasing: that pull stole reasoning/scope turns live (L11:
+        # CR top dominance 74-80%). Supply vocabulary stays CR-owned.
         "positive": [
-            "Here is the context: the background, setup, and history, all supplied.",
-            "Here is the full background and prior attempts, all supplied up front.",
+            "Attached: the failing config, the stack trace, and the versions, all given as-is.",
             "Pasted below: the full trace and the logs we collected.",
-            "Attached: the background, versions, and setup details, all given.",
-            "Given up front: the environment, OS, constraints, and what was decided.",
+            "Here are the error logs and the version numbers, pasted in full.",
             "Supplied material: docs, repro steps, and what was tried before.",
-            "Context included: what we tried, what failed, and the current setup.",
+            "Given up front: the environment, OS, constraints, and what was decided.",
+            "Supplied: the dependency tree, the feature flags, and the failing case.",
+            "Here is the data sample and the current schema, attached as-is.",
         ],
         "negative": [
             "Fix it.",

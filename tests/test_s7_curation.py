@@ -128,6 +128,9 @@ CURATED_AGENT = {
 }
 
 # Curated prompt-side banks (L7 rewrite; same signal discipline).
+# CUR3 disclosure: the context_richness list moved — narrowed to
+# user-SUPPLIED material (see anchors.py v1.1.0 note). The other three
+# target lists are byte-identical to L7/L9.
 CURATED_PROMPT = {
     "directness": [
         "Only the number, plainly.",
@@ -139,13 +142,13 @@ CURATED_PROMPT = {
         "Answer briefly, straight up, no fluff.",
     ],
     "context_richness": [
-        "Here is the context: the background, setup, and history, all supplied.",
-        "Here is the full background and prior attempts, all supplied up front.",
+        "Attached: the failing config, the stack trace, and the versions, all given as-is.",
         "Pasted below: the full trace and the logs we collected.",
-        "Attached: the background, versions, and setup details, all given.",
-        "Given up front: the environment, OS, constraints, and what was decided.",
+        "Here are the error logs and the version numbers, pasted in full.",
         "Supplied material: docs, repro steps, and what was tried before.",
-        "Context included: what we tried, what failed, and the current setup.",
+        "Given up front: the environment, OS, constraints, and what was decided.",
+        "Supplied: the dependency tree, the feature flags, and the failing case.",
+        "Here is the data sample and the current schema, attached as-is.",
     ],
     "analytical_depth": [
         "Why does this happen? Derive the mechanism from first principles.",
