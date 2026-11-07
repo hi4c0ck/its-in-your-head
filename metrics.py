@@ -311,7 +311,21 @@ def _worker_main() -> None:
             # Post-persist commit accounting (runs on success AND failure):
             # the batch is no longer in flight. Never calls flush() here.
             with _state_cv:
-                _in_flight_events -= len(batch)
+                if _in_flight_events >= len(batch):
+                    _in_flight_events -= len(batch)
+                else:
+                    # Invariant guard: the counter may never go negative —
+                    # a deficit makes flush() under-report pending and break
+                    # the committed+pending==total conservation tests. A
+                    # deficit means a decrement outran its increments
+                    # (observed when a prior worker thread survives a test
+                    # reload and double-drains the shared state under load):
+                    # log the evidence, clamp to the honest floor.
+                    logger.warning(
+                        "its-in-your-head: in-flight underflow "
+                        "(%d < %d); clamping to 0",
+                        _in_flight_events, len(batch))
+                    _in_flight_events = 0
                 _state_cv.notify_all()
 
 

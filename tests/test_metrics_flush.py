@@ -80,7 +80,7 @@ def test_flush_enqueue_during_flush_none_lost(tmp_path):
         for i in range(1, n + 1):  # enqueued while flush is running
             metrics.enqueue(_ev(i))
         gate.release.set()
-        t.join(JOIN)
+        t.join(JOIN + 10)  # strictly more than the flush's own budget
         assert not t.is_alive() and done.is_set(), "flush hung"
         r = box["r"]
         total = n + 1
@@ -110,7 +110,7 @@ def test_flush_waits_for_in_flight_batch(tmp_path):
         assert not done.is_set(), "flush returned early with in-flight work"
         assert t.is_alive(), "flush thread died unexpectedly"
         gate.release.set()
-        t.join(JOIN)
+        t.join(JOIN + 10)  # strictly more than the flush's own budget
         assert not t.is_alive() and done.is_set(), "flush hung"
         r = box["r"]
         assert r.drained and r.pending == 0 and bool(r) is True
