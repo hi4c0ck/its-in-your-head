@@ -17,16 +17,47 @@ the documented empty shapes (zeros, empty cells, []) so the desktop half
 degrades to "no data", it never 500s.
 """
 import importlib
+import importlib.util
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
-try:  # namespaced gateway import vs top-level (tests: dashboard.plugin_api)
+try:  # namespaced gateway import (agent half loads the plugin as a package)
     from ..storage import database as _database
     from ..storage import migration as _migration
 except ImportError:
-    from storage import database as _database
-    from storage import migration as _migration
+    try:  # plugin root on sys.path (tests: dashboard.plugin_api alongside
+        # bare `storage` — single shared instance with the worker)
+        from storage import database as _database
+        from storage import migration as _migration
+    except ImportError:
+        # The plugin-host child loads this file standalone: no parent package
+        # and the plugin root is NOT on its sys.path, so both the relative and
+        # the bare `storage` import fail there (the dashboard 502: "No module
+        # named 'storage'"). Load the storage package under a unique top-level
+        # name from the on-disk layout: no sys.path pollution, no collision
+        # with any other `storage` module in the shared child process. Safe
+        # because `storage` is stdlib-only and its __init__ uses relative
+        # imports; the sys.modules cache keeps one instance per child process.
+        def _load_plugin_storage():
+            name = "hermes_plugin_its_in_your_head_storage"
+            pkg_dir = Path(__file__).resolve().parent.parent / "storage"
+            if name not in sys.modules:
+                spec = importlib.util.spec_from_file_location(
+                    name, pkg_dir / "__init__.py",
+                    submodule_search_locations=[str(pkg_dir)],
+                )
+                if spec is None or spec.loader is None:
+                    raise ImportError(f"cannot load plugin storage package at {pkg_dir}")
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[name] = module
+                spec.loader.exec_module(module)
+            return sys.modules[name]
+
+        _storage = _load_plugin_storage()
+        _database = _storage.database
+        _migration = _storage.migration
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
