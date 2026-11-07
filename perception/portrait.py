@@ -88,6 +88,13 @@ class Portrait:
         self._interpreted = _Track()
         # Feature observations only (float dicts) — bounded, FIFO, no text.
         self._evidence: deque = deque(maxlen=self.window)
+        # Third view (patterns): latest score_turn output + accumulators.
+        self._patterns_latest: dict | None = None
+        self._dim_signals_latest: dict | None = None
+        self._pattern_evidence: dict = {}
+        self._pattern_turns = 0
+        self._top_pattern: str | None = None
+        self._top_streak = 0
 
     # -- internal EMA step shared by both tracks ------------------------- #
     def _step(self, track: _Track, targets: dict, cal_conf: dict | None,
@@ -147,17 +154,97 @@ class Portrait:
         self.update_observed(scores)
 
     def update_interpreted(self, agent_values: dict) -> None:
-        """Apply one agent-interpreted observation: plain {dim: float} in [0, 1].
+        """Apply one agent-interpreted observation.
 
-        Caller-provided only. Values are clipped to [0, 1]; unknown dims are
-        ignored. This track never touches the observed track.
+        Accepts plain ``{dim: float}`` (backward compatible) or
+        ``{dim: (value, confidence)}`` pairs; values are clipped to
+        [0, 1] and confidence is folded into the interpreted track's
+        confidence. Unknown dims are ignored. This track never touches
+        the observed track.
         """
         if not isinstance(agent_values, dict):
             raise TypeError("agent interpretation must be a plain dict {dim: float}")
-        targets = {d: _clip01(agent_values[d]) for d in DIMENSIONS if d in agent_values}
+        targets, cal_conf = {}, {}
+        for dim in DIMENSIONS:
+            if dim not in agent_values:
+                continue
+            entry = agent_values[dim]
+            if isinstance(entry, (tuple, list)):
+                if len(entry) != 2:
+                    raise TypeError(
+                        "agent interpretation entries must be float or (value, confidence)")
+                targets[dim] = _clip01(entry[0])
+                cal_conf[dim] = _clip01(entry[1])
+            else:
+                targets[dim] = _clip01(entry)
         if not targets:
             return
-        self._step(self._interpreted, targets, None, None)
+        self._step(self._interpreted, targets, cal_conf or None, None)
+
+    def update_patterns(self, per_turn_scores: dict) -> None:
+        """Fold one ``score_turn`` output into the patterns (third) view.
+
+        Stores the latest output, accumulates per-pattern evidence counts
+        (1 + the per-turn evidence field per pattern per turn), and tracks
+        the consecutive-turn streak of the top pattern ('repeated' means
+        the same top pattern name for 3+ consecutive turns). No text is
+        accepted or stored; only the derived score dict.
+        """
+        if not isinstance(per_turn_scores, dict):
+            raise TypeError("per-turn pattern scores must be a dict")
+        patterns = per_turn_scores.get("patterns") or []
+        if not patterns:
+            return
+        self._patterns_latest = per_turn_scores
+        self._dim_signals_latest = per_turn_scores.get("dim_signals")
+        self._pattern_turns += 1
+        for entry in patterns:
+            name = entry.get("name")
+            if name is None:
+                continue
+            self._pattern_evidence[name] = (
+                self._pattern_evidence.get(name, 0) + 1
+                + int(entry.get("evidence") or 0))
+        top_name = patterns[0].get("name")  # score_turn sorts agent desc
+        if top_name is not None and top_name == self._top_pattern:
+            self._top_streak += 1
+        else:
+            self._top_pattern = top_name
+            self._top_streak = 1 if top_name is not None else 0
+
+    def _patterns_view(self) -> dict:
+        """Third-view shape; empty state is None/False, never neutral."""
+        if self._patterns_latest is None:
+            return {
+                "patterns": None,
+                "dim_signals": None,
+                "perception_available": False,
+                "repeated": False,
+                "repeated_pattern": None,
+                "pattern_turns": 0,
+            }
+        repeated = self._top_streak >= 3
+        patterns = []
+        for entry in self._patterns_latest.get("patterns") or []:
+            name = entry.get("name")
+            patterns.append({
+                "name": name,
+                "prompt_affinity": entry.get("prompt_affinity"),
+                "agent_affinity": entry.get("agent_affinity"),
+                "margin": entry.get("margin"),
+                "amplification": entry.get("amplification"),
+                "evidence": self._pattern_evidence.get(name, 0),
+                "confidence": entry.get("confidence"),
+                "repeated": bool(repeated and name == self._top_pattern),
+            })
+        return {
+            "patterns": patterns,
+            "dim_signals": self._dim_signals_latest,
+            "perception_available": True,
+            "repeated": repeated,
+            "repeated_pattern": self._top_pattern if repeated else None,
+            "pattern_turns": self._pattern_turns,
+        }
 
     # -- views ------------------------------------------------------------ #
     @property
@@ -175,7 +262,7 @@ class Portrait:
 
     def snapshot(self) -> dict:
         """Renderer-ready view: normalized values + confidences, both tracks."""
-        return {
+        snap = {
             "values": dict(self._observed.values),
             "confidences": dict(self._observed.confidence),
             "resemblance": dict(self._observed.last_resemblance),
@@ -185,6 +272,8 @@ class Portrait:
             "evidence_window": self.window,
             "retain_days": self.retain_days,
         }
+        snap.update(self._patterns_view())  # third view, additive only
+        return snap
 
     def normalized(self) -> dict:
         """Flat {dim: value} + {dim: confidence} for the renderer."""
