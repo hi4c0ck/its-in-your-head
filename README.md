@@ -35,7 +35,9 @@ perception engine, semantic desktop views, smaller optional ONNX install.
 - **Reasoning capture (when enabled)**: with the required profile setting
   `plugins.stream_reasoning_deltas: true`, raw reasoning deltas reach the
   plugin **transiently** — buffered in memory for the duration of the stream
-  and discarded at the boundary. Only the derived sketch/vector is persisted.
+  and discarded at the boundary. Only derived features are persisted: event
+  sketches for turn rows and derived pattern-affinity numbers for turns with
+  scored reasoning — no reasoning sketch BLOB (discard-after-scoring).
   No raw reasoning text ever hits disk.
 - **Tier-1 ONNX is opt-in**: nothing downloads or runs unless you explicitly
   confirm the install; inference is local CPU-only, in an isolated worker

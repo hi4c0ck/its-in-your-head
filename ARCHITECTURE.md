@@ -63,6 +63,11 @@ its-in-your-head/               # unified package = one installable folder = OSS
    `plugins.stream_reasoning_deltas: true` is required in every profile config
    that runs this plugin; raw model thinking then reaches the plugin, so the
    README privacy section MUST disclose it. Enforced by config guard gate 4.
+   Sensitivity is privacy-only: no LLM executes against this data (deterministic
+   cosine/EMA scoring); a model's own reasoning can nudge its interpreted track
+   (self-steering), which is bounded — evidence-gated confidence, interpretation
+   is evidence not proof, and adaptation (the only downstream consumer) is
+   off by default.
 
 ## Functional slots (IMPLEMENTED as of v0.1.0 — ownership map, change notes below)
 
@@ -78,10 +83,11 @@ its-in-your-head/               # unified package = one installable folder = OSS
   shapes — GET /pulse, /portrait, /drift (persisted portrait_history, probe
   available only with data), /context (source rows detected from the actual
   profile at request time: present/absent/unknown, never "present" by
-  default), /settings, POST /settings, POST /reset, plus /metrics, /heatmap,
+  /settings, POST /settings, POST /reset, plus /metrics, /heatmap,
   /recent legacy reads; bootstrap the schema in-route via the idempotent
-  `storage.migration.migrate()` (v3; the dashboard mount can't rely on the
-  worker).
+  `storage.migration.migrate()` (v5; the dashboard mount can't rely on the
+  worker). /portrait carries the additive `perception` key (pattern
+  affinities, empty shape when no evidence — see CONTRACTS.md C1).
 - **Embedding** (`embedder.py`): pick Tier-0 sketch params (n, DIM, norm) or
   Tier-1.
 - **Streaming output hooks (IMPLEMENTED — reasoning capture live)**: `on_stream_start` /
@@ -100,12 +106,20 @@ its-in-your-head/               # unified package = one installable folder = OSS
   privacy section must disclose it. Registering any streaming hook
   requires BOTH: register in `__init__.py` AND add to `provides_hooks` in
   plugin.yaml (drift check). Downstream wiring (v0.1.1): assembled
-  reasoning segments flow through `core.collector` into
-  `engine.update_interpreted` — the interpreted portrait lives in the same
-  six-dimension space as the turn features, evidence-gated, fault-isolated,
-  and NEVER stores raw text; deterministic explicit-feedback phrases
+  reasoning segments flow through `core.collector` into the engine, which
+  embeds them through the CONFIGURED backend (tier-following: same vector
+  space as prompts — Tier-0 sketch stays deterministic/zero-network, Tier-1
+  improves both signals); deterministic explicit-feedback phrases
   (`pulse/feedback.py`) nudge prototypes via `update_prototype` when
-  evidence-backed.
+  evidence-backed. Pattern scoring (`perception/patterns.py`, v0.1.x): a
+  zero-network preset pattern bank (prompt-side anchors reuse the
+  six-dimension positive banks; agent-side anchors are authored first-person
+  agent-voice lists) scores every turn — prompt_affinity vs agent_affinity
+  kept separate, plus competitor margin, amplification, and an
+  evidence-fused confidence; persisted as derived numbers only
+  (`pattern_affinity_history`, schema v5 — no free-text, no raw content);
+  exposed on /portrait via the additive `perception` key and rendered as the
+  Perception section inside the expanded portrait view (no new surface).
 - **Desktop** (`desktop/plugin.js`): 96px strip pane with semantic views —
   PULSE (activity matrix: columns LIVE / GOAL / GOOD / FRICTION, LIVE as the
   visible first column derived from per-row live counts; dynamic tool rows),
