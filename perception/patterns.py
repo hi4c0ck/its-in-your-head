@@ -36,20 +36,20 @@ PATTERN_BANK = (
         "name": "directness",
         "prompt_paraphrases": ANCHORS["directness"]["positive"],
         "agent_paraphrases": [
-            "I am giving the user the shortest direct answer I can",
-            "I am skipping preamble and going straight to the result",
-            "I am keeping my reply to one tight sentence",
-            "I am dropping caveats the user did not ask for",
+            "I am saying it plainly with no preamble or pleasantries",
+            "I am skipping the intro and leading with the answer",
+            "I am giving the blunt bottom line in one sentence",
+            "I am not softening it or adding friendly filler",
         ],
     },
     {
         "name": "context_richness",
         "prompt_paraphrases": ANCHORS["context_richness"]["positive"],
         "agent_paraphrases": [
-            "I am gathering the full background before acting",
-            "I am checking the logs and config the user provided",
-            "I am using every constraint the user listed",
-            "I am grounding my answer in the supplied detail",
+            "I am gathering the background and prior attempts before acting",
+            "I am checking the constraints and setup the user listed",
+            "I am using the environment and prior decisions already given",
+            "I am grounding my answer in the supplied context",
         ],
     },
     {
@@ -66,10 +66,10 @@ PATTERN_BANK = (
         "name": "analytical_depth",
         "prompt_paraphrases": ANCHORS["analytical_depth"]["positive"],
         "agent_paraphrases": [
-            "I am decomposing the user's request into sub-goals",
-            "I am checking invariants before proposing a change",
-            "I am comparing trade-offs with numbers",
-            "I am weighing the evidence before ranking options",
+            "I am deriving why this happens from first principles",
+            "I am weighing the mechanism and the trade-offs with numbers",
+            "I am decomposing the logic and explaining each step of the reasoning",
+            "I am comparing hypotheses by their underlying mechanism",
         ],
     },
     {
@@ -86,10 +86,10 @@ PATTERN_BANK = (
         "name": "scope",
         "prompt_paraphrases": ANCHORS["scope"]["positive"],
         "agent_paraphrases": [
-            "I am keeping the change to the smallest area possible",
-            "I am touching only the module the user named",
-            "I am limiting the blast radius of my fix",
-            "I am staying local and leaving the rest alone",
+            "I am keeping this to only the part the user named",
+            "I am stopping when that part is done and leaving the rest out",
+            "I am limiting my change to just this one area",
+            "I am not touching anything outside the boundary",
         ],
     },
 )
@@ -241,6 +241,13 @@ def _validate_reinforced(reinforced) -> dict:
         except (TypeError, ValueError):
             evidence = 0
         anchors["evidence"] = max(0, evidence)
+        # Persisted updated_at (epoch float) rides along when present so a
+        # later custom override can keep it; absent/invalid -> None.
+        try:
+            upd = entry.get("updated_at")
+            anchors["updated_at"] = float(upd) if upd is not None else None
+        except (TypeError, ValueError):
+            anchors["updated_at"] = None
         valid[name] = anchors
     return valid
 
@@ -260,7 +267,8 @@ def _inputs_digest(custom_valid, reinforced_valid) -> str:
         "reinforced": sorted(
             ({"name": n, "prompt_anchor": v["prompt_anchor"],
               "agent_anchor": v["agent_anchor"],
-              "evidence": v["evidence"]}
+              "evidence": v["evidence"],
+              "updated_at": v.get("updated_at")}
              for n, v in reinforced_valid.items()),
             key=lambda e: e["name"]),
     }
@@ -273,7 +281,11 @@ def _build_uncached(backend, custom_valid=(), reinforced_valid=None) -> dict:
 
     Merge order: preset base, then reinforced overrides (persisted
     vectors replace the preset anchors for that name), then custom
-    entries (same name: custom wins — encoded fresh).
+    entries (same name: custom wins on vectors). A custom entry that
+    overrides a name with a persisted reinforced entry INHERITS the
+    persisted evidence count (max(persisted, 0)) and updated_at — the
+    vectors are the custom ones, the accumulated evidence is not
+    dropped. Custom entries with no reinforced entry get evidence 0.
     """
     if reinforced_valid is None:
         reinforced_valid = {}
@@ -285,20 +297,26 @@ def _build_uncached(backend, custom_valid=(), reinforced_valid=None) -> dict:
             "prompt_anchor": _mean_normalized(prompt_vecs),
             "agent_anchor": _mean_normalized(agent_vecs),
             "evidence": 0,
+            "updated_at": None,
         }
     for name, entry in reinforced_valid.items():
         bank[name] = {
             "prompt_anchor": list(entry["prompt_anchor"]),
             "agent_anchor": list(entry["agent_anchor"]),
             "evidence": int(entry.get("evidence") or 0),
+            "updated_at": entry.get("updated_at"),
         }
     for entry in custom_valid:
         prompt_vecs = backend.encode(list(entry["prompt"]))
         agent_vecs = backend.encode(list(entry["agent"]))
+        # Evidence inheritance: a custom override of a reinforced name
+        # keeps the persisted evidence/updated_at on the fresh vectors.
+        prior = bank.get(entry["name"]) if entry["name"] in reinforced_valid else None
         bank[entry["name"]] = {
             "prompt_anchor": _mean_normalized(prompt_vecs),
             "agent_anchor": _mean_normalized(agent_vecs),
-            "evidence": 0,
+            "evidence": int(prior["evidence"]) if prior else 0,
+            "updated_at": prior["updated_at"] if prior else None,
         }
     return bank
 
@@ -496,19 +514,19 @@ def persist_reinforced(conn, entries) -> None:
 
 def load_reinforced(conn) -> dict:
     """Load persisted reinforced anchors as
-    {name: {prompt_anchor, agent_anchor, evidence}} (float32 tolerance).
-    Empty/absent/unreadable -> {}. Log-and-never-raise.
+    {name: {prompt_anchor, agent_anchor, evidence, updated_at}} (float32
+    tolerance). Empty/absent/unreadable -> {}. Log-and-never-raise.
     """
     try:
         rows = conn.execute(
-            "SELECT pattern_name, prompt_anchor, agent_anchor, evidence "
-            "FROM pattern_bank").fetchall()
+            "SELECT pattern_name, prompt_anchor, agent_anchor, evidence, "
+            "updated_at FROM pattern_bank").fetchall()
     except Exception:
         logger.exception(
             "its-in-your-head: reinforced pattern load failed")
         return {}
     out = {}
-    for name, prompt_blob, agent_blob, evidence in rows:
+    for name, prompt_blob, agent_blob, evidence, updated_at in rows:
         prompt = _unpack_vector(prompt_blob)
         agent = _unpack_vector(agent_blob)
         if prompt is None or agent is None:
@@ -521,6 +539,7 @@ def load_reinforced(conn) -> dict:
             "prompt_anchor": prompt,
             "agent_anchor": agent,
             "evidence": ev,
+            "updated_at": updated_at,
         }
     return out
 

@@ -98,6 +98,28 @@ NEAR: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
+# L7 curation round: fresh near probes for the two target confusion pairs
+# (context_richness <-> analytical_depth, scope <-> directness). Scored and
+# reported SEPARATELY so the original 18 stay apples-to-apples vs L6.
+NEAR_CURATED: dict[str, list[tuple[str, str]]] = {
+    "context_richness": [
+        ("Here is the context, now tell me the underlying reason.",
+         "analytical_depth"),
+        ("Setup, constraints, and history attached; derive what comes next.",
+         "analytical_depth"),
+    ],
+    "analytical_depth": [
+        ("Trace the mechanism from the pasted logs, step by step.",
+         "context_richness"),
+    ],
+    "scope": [
+        ("Only this part, then state the blunt result.", "directness"),
+    ],
+    "directness": [
+        ("No preamble: just the verdict for this module only.", "scope"),
+    ],
+}
+
 OUT_OF_DOMAIN: list[str] = [
     "What time is it in Berlin right now?",
     "Remind me to buy milk on Friday.",
@@ -203,6 +225,16 @@ def main() -> None:
             error_matrix[(dim, s["top1"])] += 1
         near[dim] = rows
 
+    # ---- NEAR (L7 curated): separate set, keeps the original 18 pristine ----
+    near_curated: dict[str, list[dict]] = {}
+    for dim in DIMENSIONS:
+        rows = []
+        for (text, pull) in NEAR_CURATED.get(dim, []):
+            s = score_prompt_only(enc([text])[0], bank)
+            s.update({"text": text, "expected": dim, "pulls_toward": pull})
+            rows.append(s)
+        near_curated[dim] = rows
+
     # ---- OUT-OF-DOMAIN -----------------------------------------------------
     ood_vecs = enc(OUT_OF_DOMAIN)
     ood_rows = []
@@ -286,6 +318,19 @@ def main() -> None:
             lines.append(f"| {dim} | {r['pulls_toward']} | {r['text']} | "
                          f"{r['top1']} | {fmt(r['top1_aff'])} | "
                          f"{r['runner_up']} | {fmt(r['margin'])} | "
+                         f"{'yes' if r['top1'] == dim else 'no'} |")
+    lines.append("")
+    lines.append("### Near probes — L7 curated (separate set)")
+    lines.append("")
+    lines.append("| expected | pulls_toward | text | top1 | top1_aff | "
+                 "runner_up | margin | correct |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+    for dim in DIMENSIONS:
+        for r in near_curated[dim]:
+            lines.append(f"| {dim} | {r['pulls_toward']} | "
+                         f"{r['text']} | {r['top1']} | "
+                         f"{fmt(r['top1_aff'])} | {r['runner_up']} | "
+                         f"{fmt(r['margin'])} | "
                          f"{'yes' if r['top1'] == dim else 'no'} |")
     lines.append("")
     lines.append("### Out-of-domain")
@@ -414,6 +459,11 @@ def main() -> None:
     near_correct = sum(1 for dim in DIMENSIONS for r in near[dim]
                        if r["top1"] == dim)
     near_rate = near_correct / near_total if near_total else 0.0
+    # L7 curated near set (separate; original 18 stay L6-comparable)
+    cur_total = sum(len(v) for v in near_curated.values())
+    cur_correct = sum(1 for dim in DIMENSIONS
+                      for r in near_curated[dim] if r["top1"] == dim)
+    cur_rate = cur_correct / cur_total if cur_total else 0.0
 
     passed = all_two_thirds and sep_visible
     lines.append("## VERDICT")
@@ -427,6 +477,9 @@ def main() -> None:
                  f"({'visible' if sep_visible else 'NOT visible'})")
     lines.append(f"- Near-probe accuracy: {near_correct}/{near_total} "
                  f"({near_rate:.3f}) — stress-case discrimination")
+    if cur_total:
+        lines.append(f"- Near-probe accuracy (L7 curated set): "
+                     f"{cur_correct}/{cur_total} ({cur_rate:.3f})")
     lines.append(f"- Amplification overall: {overall_amp:.6f}")
     lines.append("")
     lines.append(f"**Tier-0 sketch discrimination: "

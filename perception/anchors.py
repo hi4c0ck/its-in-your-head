@@ -31,11 +31,11 @@ ANCHORS: dict[str, dict[str, list[str]]] = {
     "directness": {
         "positive": [
             "Give me the short answer, no preamble.",
-            "Just tell me the number.",
-            "Answer in one sentence.",
+            "Tell me the number, plainly.",
+            "Say it in a single plain sentence.",
             "No fluff — what is it?",
-            "TL;DR please, straight to it.",
-            "Bottom line only.",
+            "TL;DR, straight to the point.",
+            "Skip the pleasantries and state the verdict.",
             "Skip the intro, give the result.",
         ],
         "negative": [
@@ -52,11 +52,11 @@ ANCHORS: dict[str, dict[str, list[str]]] = {
         "positive": [
             "Here is the full background and prior attempts.",
             "Context: we tried X, then Y, both failed.",
-            "I pasted the logs, config, and error output.",
+            "Given that we are offline, here is the config to work from.",
             "The docs say this; here is the exact error message.",
             "Constraints: offline only, must run on Windows.",
-            "Full repo path and stack trace are attached.",
-            "More detail: version, OS, and repro steps included.",
+            "Before you act, here is the environment: version, OS, and setup.",
+            "All the setup details are here: how it is wired and what was decided.",
         ],
         "negative": [
             "Fix it.",
@@ -93,7 +93,7 @@ ANCHORS: dict[str, dict[str, list[str]]] = {
             "Compare the pros and cons of each approach.",
             "Analyze the trade-offs with numbers.",
             "What are the root causes here? Go deeper.",
-            "Weigh the evidence and rank the hypotheses.",
+            "Which hypothesis fits best? Explain the logic, not just the label.",
             "Break the problem into first principles.",
             "Stress-test this logic against edge cases.",
             "Do a proper post-mortem of the failure.",
@@ -130,13 +130,13 @@ ANCHORS: dict[str, dict[str, list[str]]] = {
     },
     "scope": {
         "positive": [
-            "Keep this narrow: only the auth module.",
-            "Just this one file, nothing else.",
-            "Small change only, stay in this area.",
-            "Limit the fix to this endpoint.",
-            "Tiny scope — one function, one test.",
-            "Stay local, do not touch the rest of the system.",
-            "Minimal change, low blast radius.",
+            "Only the auth module — leave everything else alone.",
+            "Just this one file; stop when it is fixed.",
+            "Keep the change inside this area, nothing outside.",
+            "Out of scope: the rest of the system stays untouched.",
+            "Bound the fix to this endpoint and call it done.",
+            "One function, one test — that is the boundary.",
+            "Do not touch the surrounding code at all.",
         ],
         "negative": [
             "Rework the whole system around this.",
