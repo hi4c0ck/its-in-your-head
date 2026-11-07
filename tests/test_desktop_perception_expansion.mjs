@@ -40,12 +40,15 @@ ok(/num\(p && p\.agent_affinity\)/.test(ep), 'interpreted value cell goes throug
 // HIGH-SIGNAL mark; repeated mark only when repeated === true
 ok(/strongP\.repeated\s*===\s*true/.test(ep), 'repeated mark gated on repeated === true')
 ok(/strongP\.amplification\s*>=\s*HIGH_SIGNAL\s*\?\s*' · HIGH SIGNAL'/.test(ep), 'HIGH SIGNAL mark on the strongest card')
-ok(/HIGH_SIGNAL\s*=\s*0\.15/.test(ep), 'HIGH_SIGNAL default 0.15')
 
 // settings-key disclosure: the pane's expanded surface has no settings
 // query (the /settings poll lives in the Strip component, untouched);
 // 0.15 is hardcoded WITH a comment pointing at the key, not read live.
-ok(/perception\.reinforce_min_amplification/.test(ep), 'hardcode comment points at perception.reinforce_min_amplification')
+// E4 hunk (disclosed): HIGH_SIGNAL moved to module scope so the
+// portrait-line notice gate shares the constant — the pins below now
+// match at module scope, not inside ep.
+ok(/perception\.reinforce_min_amplification/.test(src), 'hardcode comment points at perception.reinforce_min_amplification')
+ok(/const HIGH_SIGNAL\s*=\s*0\.15/.test(src), 'HIGH_SIGNAL default 0.15 at module scope')
 ok(!/useQuery/.test(ep), 'ExpandedPortrait stays a pure component (no settings poll added)')
 
 // (d) high-signal mark: amplification 0.2 -> >= 0.15 marks; 0.1 does

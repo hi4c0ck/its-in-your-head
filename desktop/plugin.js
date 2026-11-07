@@ -686,6 +686,69 @@ function buildGlyph(input) {
 }
 // PORTRAIT-GLYPH-END
 
+// E4 — deterministic portrait lines (spec §6 read). Template prose
+// over the /portrait payload: top-pattern confidence (self line) +
+// positive amplification (notice line — the agent's interpretation
+// outruns the user's surface; amplification = agent − prompt,
+// perception/patterns.py). No LLM, no digits in the prose (the
+// numbers live in the grid). Gated on live data (Nov 7): SELF_CONF
+// is met by the top pattern only; the notice gate reuses the
+// reinforce threshold HIGH_SIGNAL (engine._reinforce_allowed
+// semantics: amplification >= 0.15).
+const SELF_CONF = 0.5
+const HIGH_SIGNAL = 0.15 // perception.reinforce_min_amplification default (core/settings.py; engine._reinforce_allowed) — the pane's expanded surface has no settings query, hardcoded per E2/E4 disclosure
+const PATTERN_SELF = {
+  context_richness: 'you supply rich context',
+  analytical_depth: 'you demand reasoning depth',
+  scope: 'you fence your scope explicitly',
+  directness: 'you want plain output, no preamble',
+  exploration: 'you explore before you commit',
+  iteration: 'you iterate in small loops',
+}
+const PATTERN_NOTICE = {
+  context_richness: 'context',
+  analytical_depth: 'reasoning',
+  scope: 'scope',
+  directness: 'bluntness',
+  exploration: 'exploration',
+  iteration: 'iteration',
+}
+function portraitLines(data) {
+  const perc = data && data.perception && typeof data.perception === 'object' ? data.perception : null
+  const pats = perc && Array.isArray(perc.patterns) && perc.perception_available
+    ? perc.patterns.filter((p) => p && typeof p === 'object')
+    : []
+  const confOf = (p) => (p && typeof p.confidence === 'number' && Number.isFinite(p.confidence) ? p.confidence : null)
+  // Deterministic: confidence desc, name-asc tie-break.
+  const ranked = pats
+    .map((p) => ({ p, c: confOf(p) }))
+    .filter((x) => x.c !== null)
+    .sort((a, b) => (b.c - a.c) || (String(a.p.name || '') < String(b.p.name || '') ? -1 : 1))
+  let self = null
+  if (ranked.length > 0 && ranked[0].c >= SELF_CONF && PATTERN_SELF[ranked[0].p.name]) {
+    let s = PATTERN_SELF[ranked[0].p.name]
+    const second = ranked[1]
+    if (second && second.c >= SELF_CONF && PATTERN_SELF[second.p.name] && second.p.name !== ranked[0].p.name) {
+      s += ' and ' + PATTERN_SELF[second.p.name].replace(/^you /, '')
+    }
+    self = s.charAt(0).toUpperCase() + s.slice(1)
+  }
+  // Notice: positive amplification only (agent outran the surface).
+  // Negative amp -> no notice: honest absence, never a rephrased guess.
+  let best = null
+  for (const p of pats) {
+    const amp = p.amplification
+    const c = confOf(p)
+    if (typeof amp !== 'number' || !Number.isFinite(amp) || amp < HIGH_SIGNAL) continue
+    if (c === null || c < SELF_CONF || !PATTERN_NOTICE[p.name]) continue
+    if (best === null || amp > best.amp || (amp === best.amp && String(p.name) < String(best.p.name))) {
+      best = { amp, p }
+    }
+  }
+  const notice = best ? 'The agent reads your ' + PATTERN_NOTICE[best.p.name] + ' stronger than you say it' : null
+  return { self, notice }
+}
+
 function PortraitView({ data, drift, narrow, canExpand }) {
   const dims =
     data && data.dimensions && typeof data.dimensions === 'object'
@@ -782,21 +845,36 @@ function PortraitView({ data, drift, narrow, canExpand }) {
       })
     }),
   })
+  // E4: the awareness line — notice (agent outran the surface) takes
+  // priority over self; gated, so a weak session renders nothing here.
+  const lines = portraitLines(data)
+  const stripLine = lines.notice || lines.self
   const readout = jsxs('div', {
-    className: 'flex items-center',
+    className: 'flex flex-col',
     style: {
-      flex: 1, minWidth: 0, justifyContent: 'flex-end',
+      flex: 1, minWidth: 0, alignItems: 'flex-end', gap: 1,
       fontSize: 8, color: V_QUAT,
       fontFamily: 'var(--ui-font-mono, monospace)',
-      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap', overflow: 'hidden',
       textAlign: 'right',
     },
     title: (canExpand ? 'expand for full inspection · ' : '') + 'confidence ' + (confNum || '—')
       + ' · ' + (evidenceCount > 0 ? evidenceCount + ' evidence snapshots' : 'no evidence snapshots yet'),
     children: [
-      confNum ? confNum + ' conf · ' : '',
-      evidenceCount > 0 ? evidenceCount + ' snap' : 'evidence…',
-      ...(canExpand ? [' · ⛶ full'] : []),
+      jsxs('span', {
+        className: 'flex items-center',
+        style: { gap: 0 },
+        children: [
+          confNum ? confNum + ' conf · ' : '',
+          evidenceCount > 0 ? evidenceCount + ' snap' : 'evidence…',
+          ...(canExpand ? [' · ⛶ full'] : []),
+        ],
+      }),
+      ...(stripLine ? [jsx('span', {
+        style: { color: V_SEC, overflow: 'hidden', textOverflow: 'ellipsis' },
+        title: 'deterministic portrait line — template of top patterns + amplification, no LLM',
+        children: stripLine,
+      })] : []),
     ],
   })
   return jsxs('div', {
@@ -1071,15 +1149,13 @@ function ExpandedPortrait({ data, drift }) {
     }
   }
   const strongP = strongest ? strongest.p : null
+  // E4: the two portrait lines for this surface (self + notice).
+  const pl = portraitLines(data)
   // E2 (spec §6 readout): per-pattern observed/interpreted ticks follow
   // the v0.1.4 flank convention (10x3 ticks, accent observed / secondary
   // interpreted, opacity 0.25+0.75v, absent 0.15 — never fabricated).
-  // HIGH_SIGNAL hardcodes the 0.15 default of
-  // perception.reinforce_min_amplification (core/settings.py;
-  // engine._reinforce_allowed reads it with the same default; this
-  // surface has no settings query — disclosed in
-  // tests/test_desktop_perception_expansion.mjs).
-  const HIGH_SIGNAL = 0.15
+  // HIGH_SIGNAL is module-scope (shared by the E4 portrait-line notice
+  // gate); see its declaration above for the settings-key disclosure.
   const affTick = (v, bg, title) => jsx('span', {
     title: title,
     style: {
@@ -1197,6 +1273,19 @@ function ExpandedPortrait({ data, drift }) {
     className: 'flex-1',
     style: { minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, padding: '8px 0' },
     children: [
+      // E4: the read — who you are (top patterns, confidence-gated) and
+      // what the agent noticed that you didn't say (positive
+      // amplification). Gated: absent lines render nothing, never filler.
+      ...(pl.self || pl.notice ? [jsxs('div', {
+        style: {
+          textAlign: 'center', fontSize: 9, letterSpacing: 0.5,
+          fontFamily: 'var(--ui-font-mono, monospace)',
+        },
+        children: [
+          ...(pl.self ? [jsx('div', { title: 'deterministic template of your top patterns (confidence >= 0.5), no LLM', style: { color: V_SEC }, children: pl.self })] : []),
+          ...(pl.notice ? [jsx('div', { title: 'positive amplification: the agent\'s read outran your surface wording (>= 0.15, the reinforce threshold)', style: { color: V_ACCENT }, children: pl.notice })] : []),
+        ],
+      })] : []),
       hasEvidence
         ? jsx('div', {
             title: 'portrait glyph — the accumulated resemblance; not a measurement',
