@@ -27,6 +27,25 @@ def main() -> None:
     from storage import database
     database.set_override(sys.argv[1])
 
+    # Seed one derived perception row directly via SQL (the agent-side
+    # fixture writes nothing new; the dashboard fallback must surface
+    # this LATEST row). Values are derived numbers only.
+    import sqlite3
+    import time
+    from storage import migration
+    conn = sqlite3.connect(sys.argv[1])
+    try:
+        migration.schema_bootstrap(conn)
+        conn.execute(
+            "INSERT INTO pattern_affinity_history (ts, top_pattern, "
+            "top_prompt_affinity, top_agent_affinity, top_margin, "
+            "top_amplification, evidence, confidence, repeated) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), "focused", 0.42, 0.81, 0.27, 0.39, 3, 0.75, 0))
+        conn.commit()
+    finally:
+        conn.close()
+
     import dashboard.plugin_api as api
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

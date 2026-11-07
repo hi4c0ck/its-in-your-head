@@ -7,7 +7,7 @@ drop every worker batch. :func:`migrate` upgrades such databases in place —
 preserving existing rows — inside a single transaction.
 
 Versioning: ``meta(key TEXT PRIMARY KEY, value TEXT)`` with
-``schema_version`` = ``4`` for current-shape databases (fresh or migrated).
+``schema_version`` = ``5`` for current-shape databases (fresh or migrated).
 A database already at the expected version is a fast-path no-op.
 
 Schema v3 (F2 drift durability): adds the ``portrait_history`` table —
@@ -32,16 +32,26 @@ per-tool capsule vectors). All vector columns are little-endian float32
 BLOBs (the ``events.sketch`` convention); only derived vectors are
 stored. v3 databases gain the tables empty (existing rows preserved).
 
+Schema v5 (PORTRAIT perception, D4 Option B — derived persistence): adds
+``pattern_affinity_history`` — one row per interaction carrying only the
+derived strongest-pattern numbers (affinities, margin, amplification,
+evidence, confidence, repeated flag). It holds NO raw user or reasoning
+content: ``top_pattern`` is a PATTERN NAME from the preset bank, never
+free text. v4 databases gain the table empty (existing rows preserved).
+
 Import rules: this module is importable from both the worker (``metrics``)
 and the dashboard mount without importing either of them, and it performs
 no I/O at import time.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION  # alias
+
+_logger = logging.getLogger(__name__)
 
 _CREATE_EVENTS_TABLE = """CREATE TABLE IF NOT EXISTS events (
     id                INTEGER PRIMARY KEY,
@@ -218,6 +228,57 @@ PULSE_STATE_DDL = (
     PULSE_PROTOTYPES_DDL + PULSE_GOAL_DDL + PULSE_CAPSULES_DDL
 )
 
+# --- PORTRAIT perception derived persistence (v5, D4 Option B) -----------
+# Retention bound mirroring PORTRAIT_HISTORY_MAX (engine DRIFT_MAX deque).
+PATTERN_AFFINITY_HISTORY_MAX = 512
+
+# One row per interaction: the DERIVED strongest-pattern numbers only.
+# INVARIANT (privacy): this table must have NO column that could hold raw
+# user or reasoning content. ``top_pattern`` is a PATTERN NAME drawn from
+# the perception preset bank (e.g. "focused"), never free text, never a
+# prompt fragment. All other columns are ints/floats/flags derived from
+# cosine scoring; raw text is discarded after scoring, never persisted.
+_CREATE_PATTERN_AFFINITY_HISTORY_TABLE = """CREATE TABLE IF NOT EXISTS pattern_affinity_history (
+    id                    INTEGER PRIMARY KEY,
+    ts                    REAL NOT NULL,
+    top_pattern           TEXT,
+    top_prompt_affinity   REAL,
+    top_agent_affinity    REAL,
+    top_margin            REAL,
+    top_amplification     REAL,
+    evidence              INTEGER NOT NULL DEFAULT 0,
+    confidence            REAL,
+    repeated              INTEGER NOT NULL DEFAULT 0
+)"""
+
+_CREATE_PATTERN_AFFINITY_HISTORY_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_pattern_affinity_history_ts "
+    "ON pattern_affinity_history (ts)"
+)
+
+PATTERN_AFFINITY_HISTORY_DDL = (
+    _CREATE_PATTERN_AFFINITY_HISTORY_TABLE + ";\n"
+    + _CREATE_PATTERN_AFFINITY_HISTORY_INDEX + ";\n"
+)
+
+
+def prune_pattern_affinity_history(conn: sqlite3.Connection) -> None:
+    """Prune ``pattern_affinity_history`` to ``PATTERN_AFFINITY_HISTORY_MAX``.
+
+    Keeps the most recent rows by ``id`` — mirroring the engine's
+    portrait_history prune. Log-and-never-raise (same discipline as pulse
+    persistence): a prune failure must never break a write or a route.
+    """
+    try:
+        conn.execute(
+            "DELETE FROM pattern_affinity_history WHERE id NOT IN "
+            "(SELECT id FROM pattern_affinity_history "
+            "ORDER BY id DESC LIMIT ?)",
+            (PATTERN_AFFINITY_HISTORY_MAX,))
+    except Exception:
+        _logger.exception(
+            "its-in-your-head: pattern_affinity_history prune failed")
+
 _META_TABLE_DDL = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
 )
@@ -316,6 +377,16 @@ def _create_portrait_history(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_PORTRAIT_HISTORY_INDEX)
 
 
+def _create_pattern_affinity_history(conn: sqlite3.Connection) -> None:
+    """Create ``pattern_affinity_history`` if absent (v5; IF NOT EXISTS,
+    so a pre-existing table is a no-op and existing rows are preserved).
+    Individual ``execute`` calls — no ``executescript`` — so the calls
+    stay inside the caller's transaction (migrate() owns BEGIN/COMMIT).
+    """
+    conn.execute(_CREATE_PATTERN_AFFINITY_HISTORY_TABLE)
+    conn.execute(_CREATE_PATTERN_AFFINITY_HISTORY_INDEX)
+
+
 def _create_pulse_tables(conn: sqlite3.Connection) -> None:
     """Create the v4 pulse-domain tables if absent (all IF NOT EXISTS,
     so a pre-existing set is a no-op and existing rows are preserved).
@@ -345,7 +416,9 @@ def migrate(conn: sqlite3.Connection,
     ``ALTER TABLE`` (existing rows preserved, new columns NULL) *before* the
     indexes that reference them are created. v2 -> v3 likewise gains the
     ``portrait_history`` table (empty; existing events rows preserved), and
-    v3 -> v4 gains the pulse-domain tables (empty; existing rows preserved).
+    v3 -> v4 gains the pulse-domain tables (empty; existing rows preserved),
+    and v4 -> v5 gains ``pattern_affinity_history`` (empty; existing rows
+    preserved).
     All steps run in a single transaction when the caller has not already
     opened one; any failure rolls the whole migration back (no partial
     column/index/version state). Returns True if work was done.
@@ -371,6 +444,7 @@ def migrate(conn: sqlite3.Connection,
         _create_indexes(conn)
         _create_portrait_history(conn)
         _create_pulse_tables(conn)
+        _create_pattern_affinity_history(conn)
         conn.execute(_META_TABLE_DDL)
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -415,6 +489,9 @@ __all__ = [
     "PULSE_GOAL_DDL",
     "PULSE_CAPSULES_DDL",
     "PULSE_STATE_DDL",
+    "PATTERN_AFFINITY_HISTORY_MAX",
+    "PATTERN_AFFINITY_HISTORY_DDL",
+    "prune_pattern_affinity_history",
     "get_schema_version",
     "migrate",
     "schema_bootstrap",

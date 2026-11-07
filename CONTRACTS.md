@@ -27,6 +27,17 @@ Planned additions (S5/S7 land them; S6 may poll before they exist → 404-tolera
 
 Rule: a lane may ADD routes; it may not rename, re-shape, or remove a pinned one.
 
+### C1 adjudication (2026-11-07, PORTRAIT perception D4 Option B): `/portrait` gains the additive key `perception` (additive-key rule; the four-key shape `dimensions, confidence, user, agent` is unchanged and byte-compatible).
+
+`perception` is an object with keys `patterns`, `dim_signals`, `perception_available`.
+- `patterns` = list of objects, each with keys: `name` (string), `prompt_affinity` (float or None), `agent_affinity` (float or None), `margin` (float or None), `amplification` (float or None), `evidence` (int, 0 allowed), `confidence` (float or None), `repeated` (bool).
+- `dim_signals` = dict keyed by dimension name, each value an object with keys `prompt` (float or None) and `agent` (float or None).
+- `perception_available` (bool).
+
+Empty-shape rule: when there is no evidence, `patterns` is an empty list, `dim_signals` keeps every dimension key with None values, and `perception_available` is False. Never invent values; routes never 500 on empty.
+
+Fallback-latest-row rule: in the isolated-child fallback, `perception` is filled only from the latest `pattern_affinity_history` row (derived numbers only; `repeated` = same `top_pattern` in the last 3 rows). No rows or an empty table = empty perception shape with `perception_available` False. The agent track stays None in fallback and is never invented.
+
 ## C2 — event wire names (`broadcast_plugin_event(plugin_id, event, payload)`)
 
 Bare dotted event basenames only (the gateway prefixes `plugin.its-in-your-head.`):

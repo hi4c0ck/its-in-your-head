@@ -633,20 +633,76 @@ def _pulse_live_view() -> dict | None:
     return view
 
 
+def _empty_perception(dims) -> dict:
+    """Documented empty perception shape: no patterns, per-dim signals
+    present but None (never invented), ``perception_available`` False.
+    Never a 500; used when the engine lacks the key or the DB has no
+    persisted derived row."""
+    return {
+        "patterns": [],
+        "dim_signals": {d: {"prompt": None, "agent": None} for d in dims},
+        "perception_available": False,
+    }
+
+
 def _portrait_db_fallback(shape: dict, dims) -> dict:
     """Profile-DB fallback for the isolated dashboard half: bridges the
     persisted observed track through ``portrait_history`` (v3; the same
-    resolver the /drift fallback uses). Fills ``dimensions`` and
-    ``user`` only — the confidence and interpreted (agent) tracks are
-    not persisted, so they stay None, never invented. Empty table /
-    all-NULL latest row / DB fault -> the documented empty shape,
-    never a 500."""
+    resolver the /drift fallback uses) and the DERIVED perception numbers
+    through ``pattern_affinity_history`` (v5 latest row). Fills
+    ``dimensions`` and ``user`` only — the confidence and interpreted
+    (agent) per-dim tracks are not persisted, so they stay None, never
+    invented; perception per-dim signals likewise stay None (no per-dim
+    columns are persisted) while ``patterns`` carries the latest row's
+    derived numbers. Empty table / all-NULL latest row / DB fault ->
+    the documented empty shape, never a 500."""
+    if "perception" not in shape:
+        shape["perception"] = _empty_perception(dims)
     try:
         conn = _connect()
     except Exception:
         return shape
     try:
         _migration.schema_bootstrap(conn, _DDL)
+        # --- perception: latest derived row + up to 3 prior rows ---
+        try:
+            prow = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='pattern_affinity_history'").fetchone()
+            if prow is not None:
+                rows = conn.execute(
+                    "SELECT top_pattern, top_prompt_affinity, "
+                    "top_agent_affinity, top_margin, top_amplification, "
+                    "evidence, confidence FROM pattern_affinity_history "
+                    "ORDER BY ts DESC, id DESC LIMIT 4").fetchall()
+                if rows:
+                    latest_p = rows[0]
+                    top_pattern = latest_p[0]
+                    prior = rows[1:4]
+                    repeated = bool(
+                        top_pattern is not None and any(
+                            r[0] == top_pattern for r in prior))
+                    patterns = []
+                    if top_pattern is not None:
+                        patterns = [{
+                            "name": top_pattern,
+                            "prompt_affinity": latest_p[1],
+                            "agent_affinity": latest_p[2],
+                            "margin": latest_p[3],
+                            "amplification": latest_p[4],
+                            "evidence": int(latest_p[5]) if latest_p[5] is not None else 0,
+                            "confidence": latest_p[6],
+                            "repeated": repeated,
+                        }]
+                    shape["perception"] = {
+                        "patterns": patterns,
+                        "dim_signals": {
+                            d: {"prompt": None, "agent": None}
+                            for d in dims},
+                        "perception_available": True,
+                    }
+        except Exception:
+            shape["perception"] = _empty_perception(dims)
         row = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' "
             "AND name='portrait_history'").fetchone()
@@ -676,7 +732,8 @@ def _portrait_db_fallback(shape: dict, dims) -> dict:
                 "dimensions": {d: None for d in dims},
                 "confidence": {d: None for d in dims},
                 "user": {d: None for d in dims},
-                "agent": {d: None for d in dims}}
+                "agent": {d: None for d in dims},
+                "perception": _empty_perception(dims)}
     finally:
         conn.close()
     return shape
@@ -704,6 +761,7 @@ def _portrait_shape() -> dict:
         "confidence": {d: None for d in dims},
         "user": {d: None for d in dims},
         "agent": {d: None for d in dims},
+        "perception": _empty_perception(dims),
     }
     _, fn = _engine_first(
         ("perception.portrait", "perception.portrait_store"),
@@ -734,6 +792,11 @@ def _portrait_shape() -> dict:
                         shape["agent"][d] = agent_src[d]
                 shape["available"] = any(
                     v is not None for v in shape["dimensions"].values())
+                # LIVE perception pass-through (additive key): when the
+                # probe carries 'perception', pass it through unchanged;
+                # when absent, keep the documented empty shape.
+                if isinstance(result.get("perception"), dict):
+                    shape["perception"] = result["perception"]
             except Exception:
                 pass  # probe filled nothing: consult the persisted state
     # In-process probe absent or empty -> bridge from the profile DB
@@ -925,11 +988,16 @@ def _portrait_live_view() -> dict | None:
 
 @router.get("/portrait")
 async def portrait():
-    """Portrait: six dimensions + confidence + user/agent split. Live
-    in-process engine data when it holds observed values; otherwise the
-    profile-DB fallback (isolated dashboard child). Never 500s."""
+    """Portrait: six dimensions + confidence + user/agent split +
+    additive ``perception``. Live in-process engine data when it holds
+    observed values; otherwise the profile-DB fallback (isolated
+    dashboard child). Never 500s."""
     view = _portrait_live_view()
     if view is not None:
+        if "perception" not in view:
+            # Older engine code (or engine without the additive key):
+            # documented empty perception, never 500, never invented.
+            view = {**view, "perception": _empty_perception(_dimensions())}
         return view
     return _portrait_shape()
 

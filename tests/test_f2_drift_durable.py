@@ -100,7 +100,7 @@ def test_migration_v2_to_v3_idempotent_and_preserves_events(_tmp_db):
     conn = database.connect()
     try:
         assert migration.migrate(conn) is True
-        assert migration.get_schema_version(conn) == 4
+        assert migration.get_schema_version(conn) == 5
         cols = [r[1] for r in conn.execute("PRAGMA table_info(portrait_history)")]
         assert cols == ["id", "ts", *migration.PORTRAIT_HISTORY_DIMS]
         assert conn.execute("SELECT COUNT(*) FROM portrait_history").fetchone()[0] == 0
@@ -113,7 +113,7 @@ def test_migration_v2_to_v3_idempotent_and_preserves_events(_tmp_db):
         assert migration.migrate(conn) is False  # second run: fast-path no-op
         assert migration.schema_bootstrap(conn) is False
         assert conn.execute("SELECT COUNT(*) FROM portrait_history").fetchone()[0] == 1
-        assert migration.get_schema_version(conn) == 4
+        assert migration.get_schema_version(conn) == 5
     finally:
         conn.close()
 
@@ -124,7 +124,7 @@ def test_migration_v2_to_v3_idempotent_and_preserves_events(_tmp_db):
     try:
         assert migration.migrate(conn) is True
         assert migration.migrate(conn) is False
-        assert migration.get_schema_version(conn) == 4
+        assert migration.get_schema_version(conn) == 5
     finally:
         conn.close()
 

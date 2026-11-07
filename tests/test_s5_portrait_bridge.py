@@ -102,6 +102,9 @@ def test_portrait_fallback_serves_last_observation(agent_env, monkeypatch):
     # Neither track is persisted -> confidence/agent stay None
     assert all(v is None for v in shape["confidence"].values())
     assert all(v is None for v in shape["agent"].values())
+    # No pattern_affinity_history rows -> empty perception shape
+    assert shape["perception"] == _empty_perception_expected(
+        list(shape["dimensions"].keys()))
 
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -142,6 +145,13 @@ def test_portrait_probe_importable_but_empty_serves_db_fallback(
     assert all(v is not None for v in shape["dimensions"].values())
 
 
+def _empty_perception_expected(dims):
+    return {"patterns": [],
+            "dim_signals": {d: {"prompt": None, "agent": None}
+                            for d in dims},
+            "perception_available": False}
+
+
 def test_portrait_fallback_empty_db_returns_documented_shape(tmp_path):
     api = _api(tmp_path / "empty.db")
     # The probe is importable in the test process; force the fallback
@@ -152,13 +162,13 @@ def test_portrait_fallback_empty_db_returns_documented_shape(tmp_path):
         shape = api._portrait_shape()
     finally:
         api._engine_first = orig
+    dims = list(shape["dimensions"].keys())
     assert shape == {"available": False,
-                     "dimensions": {d: None for d in
-                                    shape["dimensions"].keys()},
-                     "confidence": {d: None for d in
-                                    shape["confidence"].keys()},
-                     "user": {d: None for d in shape["user"].keys()},
-                     "agent": {d: None for d in shape["agent"].keys()}}
+                     "dimensions": {d: None for d in dims},
+                     "confidence": {d: None for d in dims},
+                     "user": {d: None for d in dims},
+                     "agent": {d: None for d in dims},
+                     "perception": _empty_perception_expected(dims)}
 
 
 def test_portrait_live_view_wins_over_fallback(agent_env, monkeypatch):
@@ -209,3 +219,126 @@ def test_separate_processes_portrait_bridge(tmp_path):
     # unpersisted tracks stay None, never invented
     assert all(v is None for v in body["confidence"].values())
     assert all(v is None for v in body["agent"].values())
+    # perception filled from the dashboard fixture's seeded latest row
+    perc = body["perception"]
+    assert perc["perception_available"] is True
+    assert len(perc["patterns"]) == 1
+    pat = perc["patterns"][0]
+    assert pat == {"name": "focused", "prompt_affinity": 0.42,
+                   "agent_affinity": 0.81, "margin": 0.27,
+                   "amplification": 0.39, "evidence": 3,
+                   "confidence": 0.75, "repeated": False}, pat
+    # per-dim signals are not persisted -> all None, never invented
+    assert set(perc["dim_signals"].keys()) == set(dims.keys())
+    assert all(s == {"prompt": None, "agent": None}
+               for s in perc["dim_signals"].values())
+
+
+def _seed_affinity_rows(db, rows):
+    """Insert derived pattern_affinity_history rows directly via SQL."""
+    from storage import migration
+    conn = sqlite3.connect(str(db))
+    try:
+        migration.schema_bootstrap(conn)
+        for r in rows:
+            conn.execute(
+                "INSERT INTO pattern_affinity_history (ts, top_pattern, "
+                "top_prompt_affinity, top_agent_affinity, top_margin, "
+                "top_amplification, evidence, confidence, repeated) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", r)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _fallback_shape(agent_env, monkeypatch):
+    _eng, db = agent_env
+    api = _api(db)
+    monkeypatch.setattr(api, "_portrait_live_view", lambda: None)
+    monkeypatch.setattr(api, "_engine_first", lambda *a, **k: (None, None))
+    return api, api._portrait_shape()
+
+
+def test_portrait_fallback_perception_from_latest_row(agent_env, monkeypatch):
+    eng, db = agent_env
+    now = time.time()
+    eng.on_events([{"type": "turn", "ts": now, "user_message": _PROMPT_A}])
+    _seed_affinity_rows(db, [
+        (now - 3, "exploratory", 0.10, 0.20, 0.05, 0.10, 1, 0.5, 0),
+        (now - 2, "focused", 0.30, 0.70, 0.20, 0.40, 2, 0.6, 0),
+        (now - 1, "focused", 0.42, 0.81, 0.27, 0.39, 3, 0.75, 0),
+    ])
+    _api_obj, shape = _fallback_shape(agent_env, monkeypatch)
+    # agent track STILL None in fallback (extended, not broken)
+    assert all(v is None for v in shape["agent"].values())
+    perc = shape["perception"]
+    assert perc["perception_available"] is True
+    assert perc["patterns"] == [{
+        "name": "focused", "prompt_affinity": 0.42,
+        "agent_affinity": 0.81, "margin": 0.27, "amplification": 0.39,
+        "evidence": 3, "confidence": 0.75, "repeated": True}]
+    assert all(s == {"prompt": None, "agent": None}
+               for s in perc["dim_signals"].values())
+
+
+def test_portrait_fallback_perception_not_repeated(agent_env, monkeypatch):
+    eng, db = agent_env
+    now = time.time()
+    eng.on_events([{"type": "turn", "ts": now, "user_message": _PROMPT_A}])
+    _seed_affinity_rows(db, [
+        (now - 2, "exploratory", 0.10, 0.20, 0.05, 0.10, 1, 0.5, 0),
+        (now - 1, "focused", 0.42, 0.81, 0.27, 0.39, 3, 0.75, 0),
+    ])
+    _api_obj, shape = _fallback_shape(agent_env, monkeypatch)
+    assert shape["perception"]["patterns"][0]["repeated"] is False
+    assert shape["perception"]["perception_available"] is True
+
+
+def test_portrait_fallback_perception_empty_table(agent_env, monkeypatch):
+    eng, db = agent_env
+    now = time.time()
+    eng.on_events([{"type": "turn", "ts": now, "user_message": _PROMPT_A}])
+    _api_obj, shape = _fallback_shape(agent_env, monkeypatch)
+    assert shape["perception"] == _empty_perception_expected(
+        list(shape["dimensions"].keys()))
+
+
+def test_portrait_live_perception_passthrough(agent_env, monkeypatch):
+    eng, db = agent_env
+    now = time.time()
+    eng.on_events([{"type": "turn", "ts": now, "user_message": _PROMPT_A}])
+    api = _api(db)
+    perc = {"patterns": [{"name": "focused", "prompt_affinity": 0.1,
+                          "agent_affinity": 0.9, "margin": 0.3,
+                          "amplification": 0.8, "evidence": 5,
+                          "confidence": 0.9, "repeated": False}],
+            "dim_signals": {d: {"prompt": 0.1, "agent": 0.2}
+                            for d in api._dimensions()},
+            "perception_available": True}
+    monkeypatch.setattr(api, "_portrait_live_view", lambda: {
+        "available": True,
+        "dimensions": {d: 0.5 for d in api._dimensions()},
+        "confidence": {d: None for d in api._dimensions()},
+        "user": {d: 0.5 for d in api._dimensions()},
+        "agent": {d: None for d in api._dimensions()},
+        "perception": perc})
+    import asyncio
+    body = asyncio.run(api.portrait())
+    assert body["perception"] == perc  # passed through unchanged
+
+
+def test_portrait_live_missing_perception_gets_empty(agent_env, monkeypatch):
+    eng, db = agent_env
+    now = time.time()
+    eng.on_events([{"type": "turn", "ts": now, "user_message": _PROMPT_A}])
+    api = _api(db)
+    monkeypatch.setattr(api, "_portrait_live_view", lambda: {
+        "available": True,
+        "dimensions": {d: 0.5 for d in api._dimensions()},
+        "confidence": {d: None for d in api._dimensions()},
+        "user": {d: 0.5 for d in api._dimensions()},
+        "agent": {d: None for d in api._dimensions()}})
+    import asyncio
+    body = asyncio.run(api.portrait())
+    assert body["perception"] == _empty_perception_expected(
+        list(api._dimensions()))
