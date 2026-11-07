@@ -128,6 +128,49 @@ function fmtClock(ts) {
   return p(d.getHours()) + ':' + p(d.getMinutes())
 }
 
+// Backend-read diagnostic: surface the ACTUAL /metrics failure instead of
+// collapsing every ctx.rest rejection into "backend offline". The rejection
+// shape isn't contract-pinned (it may be an Error carrying .status /
+// .statusCode, a string, or a plain object), so we extract an HTTP status from
+// every plausible location and classify it — this immediately distinguishes
+// auth failure (401/403), a route that was never mounted into the gateway
+// (404), a backend fault (5xx), and a connectivity loss (no status at all).
+function backendErrorLabel(err) {
+  const src =
+    err == null
+      ? ''
+      : String(
+          err &&
+          (err.message || err.detail || err.reason || err.status || err.statusCode) != null
+            ? err.message || err.detail || err.reason || err.status || err.statusCode
+            : err,
+        )
+  let code = null
+  if (err && typeof err === 'object') {
+    for (const k of ['status', 'statusCode', 'code']) {
+      if (typeof err[k] === 'number' && err[k] >= 400 && err[k] < 600) {
+        code = err[k]
+        break
+      }
+    }
+  }
+  if (code === null) {
+    const m = src.match(/\b([45]\d\d)\b/)
+    if (m) code = Number(m[1])
+  }
+  let label
+  if (code === 401) label = 'unauthorized (401)'
+  else if (code === 403) label = 'forbidden (403)'
+  else if (code === 404) label = 'route not mounted (404)'
+  else if (code !== null && code >= 500) label = 'backend error (' + code + ')'
+  else if (code !== null) label = 'HTTP ' + code
+  else if (/ECONN|fetch failed|network|unreachable|timed? ?out|socket/i.test(src))
+    label = 'unreachable (connection)'
+  else if (src.trim()) label = 'read failed'
+  else label = 'backend offline'
+  return label
+}
+
 // PULSE-START
 // Pure PULSE matrix helpers (no DOM/canvas): column mapping + cell values.
 // Column mapping (F1): the visible order is LIVE / GOAL / GOOD / FRICTION
@@ -576,7 +619,10 @@ function Strip({ source, rest }) {
   const metrics = metricsQ.data
   let status
   if (metricsQ.isError && !metrics) {
-    status = 'backend offline — polling continues'
+    // Surface the real cause (404 = route never mounted into the gateway,
+    // 401/403 = auth, 5xx = backend fault, no-status = connectivity) instead
+    // of a catch-all "backend offline".
+    status = backendErrorLabel(metricsQ.error) + ' · polling continues'
   } else if (!metrics) {
     status = 'waiting for first read…'
   } else {
@@ -731,6 +777,7 @@ function Strip({ source, rest }) {
             })),
           }),
           jsx('span', {
+            title: status,
             style: {
               flex: 1, textAlign: 'right', fontSize: 10,
               color: 'var(--ui-text-quaternary)',
