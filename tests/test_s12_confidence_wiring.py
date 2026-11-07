@@ -86,11 +86,17 @@ def _latest_history_row(eng_db_path):
     import sqlite3
     conn = sqlite3.connect(eng_db_path)
     try:
+        # E3/v7 disclosure: the engine now persists up to THREE rows per
+        # turn (rank 1 winner + runner-ups), so the "latest row" the test
+        # reasons about is the winner row = the latest RANK-1 row
+        # (pre-v7 tables default to rank 1, so this is the old row for
+        # legacy data).
         return conn.execute(
             "SELECT ts, top_pattern, top_prompt_affinity, "
             "top_agent_affinity, top_margin, top_amplification, "
             "evidence, confidence, repeated "
-            "FROM pattern_affinity_history ORDER BY rowid DESC LIMIT 1"
+            "FROM pattern_affinity_history WHERE rank = 1 "
+            "ORDER BY rowid DESC LIMIT 1"
         ).fetchone()
     finally:
         conn.close()

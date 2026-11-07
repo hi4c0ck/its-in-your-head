@@ -421,66 +421,99 @@ class Engine:
                     self._pattern_last_evidence[name] = now
             top = patterns[0]
             snap = self.portrait.snapshot()
-            evidence_n = 0
-            repeated = False
+            evidence_by_name = {}
             for entry in snap.get("patterns") or []:
-                if entry.get("name") == top_name:
-                    evidence_n = int(entry.get("evidence") or 0)
-                    repeated = bool(entry.get("repeated"))
-                    break
-            confidence = self._pattern_confidence(
-                top_name, evidence_n, now, margin=(top or {}).get("margin"))
+                nm = entry.get("name")
+                if nm is not None:
+                    evidence_by_name[nm] = int(entry.get("evidence") or 0)
+            repeated_top = any(
+                e.get("name") == top_name and e.get("repeated")
+                for e in snap.get("patterns") or [])
             # Persist only paired rows (reaction present): prompt-only
             # scoring still updates the in-memory third view, but a
             # prompt-only row must never displace the durable paired
             # history read by the dashboard fallback (bridge contract:
             # an empty table means "no paired evidence yet").
             if reaction_vector is not None:
-                self._persist_pattern_row(
-                    top, now, evidence_n, confidence, repeated, set(bank),
-                    _patterns)
+                self._persist_pattern_rows(
+                    patterns, now, evidence_by_name, repeated_top,
+                    set(bank), _patterns)
                 self._maybe_reinforce_and_persist(
                     bank, top, reaction_vector, _patterns)
         except Exception:
             logger.exception(
                 "its-in-your-head: engine pattern scoring failed")
 
-    def _persist_pattern_row(self, top_entry, ts, evidence_n, confidence,
-                             repeated, bank_names, _patterns=None) -> None:
-        """Persist ONE derived pattern_affinity_history row (D4 Option B).
+    def _persist_pattern_rows(self, entries, ts, evidence_by_name,
+                              repeated_top, bank_names,
+                              _patterns=None) -> None:
+        """Persist up to THREE derived pattern_affinity_history rows for
+        one turn (E3, schema v7; D4 Option B, top-3 extension).
 
-        ``top_pattern`` is a preset-bank name taken from the sorted
-        patterns list — never free text, never a prompt fragment. All
-        other columns are derived floats/ints. ``None`` columns when the
-        agent side is absent (prompt-only turn). Fault-isolated,
+        Rank 1 is the turn's winner — byte-identical values to the
+        pre-v7 single row (same name/prompt/agent/margin/amp, the
+        winner's evidence, the L12-wired confidence, the repeated
+        flag). Ranks 2/3 (when the scored list is longer) carry that
+        pattern's OWN derived values: its name/affinities/margin/
+        amplification, its own accumulated evidence, its own
+        confidence, repeated=0 (the flag is winner-defined — a
+        runner-up never WON). ``None`` fields write NULL columns.
+        ``turn_key`` is the turn's ts as a deterministic string,
+        shared by all of a turn's rows and distinct across turns.
+        ``top_pattern`` accepts preset-bank names only — never free
+        text, never a prompt fragment; an invalid winner row persists
+        nothing (pre-v7 behavior, unchanged). Fault-isolated,
         log-and-never-raise, mirroring ``_persist_history_entry``.
+        Reinforce (route A) remains top-only — see
+        :meth:`_maybe_reinforce_and_persist`.
         """
         try:
-            name = top_entry.get("name")
-            if name is None or name not in bank_names:
+            if not entries or entries[0] is None:
+                return
+            top_name = entries[0].get("name")
+            if top_name is None or top_name not in bank_names:
                 return  # top_pattern accepts preset-bank names only
 
             def _num(v):
                 return None if v is None else float(v)
 
+            turn_key = repr(float(ts))
+            rows = []
+            for rank, entry in enumerate((entries or [])[:3], start=1):
+                name = entry.get("name") if isinstance(entry, dict) else None
+                if name is None or name not in bank_names:
+                    continue
+                evidence_n = int(evidence_by_name.get(name, 0) or 0)
+                confidence = self._pattern_confidence(
+                    name, evidence_n, float(ts),
+                    margin=(entry or {}).get("margin"))
+                rows.append((
+                    float(ts), name,
+                    _num(entry.get("prompt_affinity")),
+                    _num(entry.get("agent_affinity")),
+                    _num(entry.get("margin")),
+                    _num(entry.get("amplification")),
+                    evidence_n,
+                    None if confidence is None else float(confidence),
+                    1 if (rank == 1 and repeated_top) else 0,
+                    rank,
+                    turn_key))
+            if not rows:
+                return
+
             _db, _mig = self._storage()
             conn = _db.connect()
             try:
                 _mig.schema_bootstrap(conn)
-                conn.execute(
-                    "INSERT INTO pattern_affinity_history "
-                    "(ts, top_pattern, top_prompt_affinity, "
-                    "top_agent_affinity, top_margin, top_amplification, "
-                    "evidence, confidence, repeated) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (float(ts), name,
-                     _num(top_entry.get("prompt_affinity")),
-                     _num(top_entry.get("agent_affinity")),
-                     _num(top_entry.get("margin")),
-                     _num(top_entry.get("amplification")),
-                     int(evidence_n or 0),
-                     None if confidence is None else float(confidence),
-                     1 if repeated else 0))
+                for row in rows:
+                    conn.execute(
+                        "INSERT INTO pattern_affinity_history "
+                        "(ts, top_pattern, top_prompt_affinity, "
+                        "top_agent_affinity, top_margin, "
+                        "top_amplification, evidence, confidence, "
+                        "repeated, rank, turn_key) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        row)
                 _mig.prune_pattern_affinity_history(conn)
                 conn.commit()
             finally:

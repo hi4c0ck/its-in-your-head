@@ -56,7 +56,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION  # alias
 
 _logger = logging.getLogger(__name__)
@@ -240,7 +240,9 @@ PULSE_STATE_DDL = (
 # Retention bound mirroring PORTRAIT_HISTORY_MAX (engine DRIFT_MAX deque).
 PATTERN_AFFINITY_HISTORY_MAX = 512
 
-# One row per interaction: the DERIVED strongest-pattern numbers only.
+# One row per persisted interaction entry (v7: up to THREE derived rows
+# per turn — the winner at rank 1 plus the runner-up ranks 2/3 carrying
+# that pattern's own derived values; ``turn_key`` groups a turn's rows).
 # INVARIANT (privacy): this table must have NO column that could hold raw
 # user or reasoning content. ``top_pattern`` is a PATTERN NAME drawn from
 # the perception preset bank (e.g. "focused"), never free text, never a
@@ -256,7 +258,9 @@ _CREATE_PATTERN_AFFINITY_HISTORY_TABLE = """CREATE TABLE IF NOT EXISTS pattern_a
     top_amplification     REAL,
     evidence              INTEGER NOT NULL DEFAULT 0,
     confidence            REAL,
-    repeated              INTEGER NOT NULL DEFAULT 0
+    repeated              INTEGER NOT NULL DEFAULT 0,
+    rank                  INTEGER NOT NULL DEFAULT 1,
+    turn_key              TEXT
 )"""
 
 _CREATE_PATTERN_AFFINITY_HISTORY_INDEX = (
@@ -290,6 +294,13 @@ def prune_pattern_affinity_history(conn: sqlite3.Connection) -> None:
     Keeps the most recent rows by ``id`` — mirroring the engine's
     portrait_history prune. Log-and-never-raise (same discipline as pulse
     persistence): a prune failure must never break a write or a route.
+
+    v7 note: with top-3 persistence (up to 3 rows per turn) the 512-row
+    bound now covers ~170 turns rather than 512 turns. The bound stays
+    row-based (deterministic id ordering) — the reader side selects
+    per-name latest rows, so a shorter turn-window never loses a
+    pattern's most recent evidence as long as that turn is within the
+    bound.
     """
     try:
         conn.execute(
@@ -400,12 +411,24 @@ def _create_portrait_history(conn: sqlite3.Connection) -> None:
 
 
 def _create_pattern_affinity_history(conn: sqlite3.Connection) -> None:
-    """Create ``pattern_affinity_history`` if absent (v5; IF NOT EXISTS,
-    so a pre-existing table is a no-op and existing rows are preserved).
+    """Create ``pattern_affinity_history`` if absent; add any missing
+    v7 columns to a pre-v7 table (portrait_history upgrade pattern:
+    ``CREATE TABLE IF NOT EXISTS`` covers fresh/v5-upgrade, an existing
+    table missing ``rank``/``turn_key`` gets them via ``ALTER TABLE`` —
+    existing rows keep rank 1 by column default, turn_key NULL).
     Individual ``execute`` calls — no ``executescript`` — so the calls
     stay inside the caller's transaction (migrate() owns BEGIN/COMMIT).
     """
     conn.execute(_CREATE_PATTERN_AFFINITY_HISTORY_TABLE)
+    existing = _table_columns(conn, "pattern_affinity_history")
+    if "rank" not in existing:
+        conn.execute(
+            "ALTER TABLE pattern_affinity_history "
+            "ADD COLUMN rank INTEGER NOT NULL DEFAULT 1")
+    if "turn_key" not in existing:
+        conn.execute(
+            "ALTER TABLE pattern_affinity_history "
+            "ADD COLUMN turn_key TEXT")
     conn.execute(_CREATE_PATTERN_AFFINITY_HISTORY_INDEX)
 
 
@@ -450,7 +473,9 @@ def migrate(conn: sqlite3.Connection,
     v3 -> v4 gains the pulse-domain tables (empty; existing rows preserved),
     and v4 -> v5 gains ``pattern_affinity_history`` (empty; existing rows
     preserved), and v5 -> v6 gains ``pattern_bank`` (empty; existing rows
-    preserved).
+    preserved), and v6 -> v7 adds ``rank``/``turn_key`` to
+    ``pattern_affinity_history`` (existing rows keep rank 1 by column
+    default, turn_key NULL).
     All steps run in a single transaction when the caller has not already
     opened one; any failure rolls the whole migration back (no partial
     column/index/version state). Returns True if work was done.

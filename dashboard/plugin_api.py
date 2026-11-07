@@ -656,9 +656,13 @@ def _portrait_db_fallback(shape: dict, dims) -> dict:
     columns are persisted) while ``patterns`` carries the LATEST ROW PER
     top_pattern (E1 reader-side completeness: after a restart every
     pattern that ever won a turn surfaces from its own most recent row,
-    deterministic per-name ts desc with id desc tie-break; the
-    overall-latest entry keeps the legacy card's repeated-window
-    semantics). Empty table / no table / DB fault ->
+    deterministic per-name ts desc with id desc tie-break; E3/v7: the
+    engine now persists up to three rows per turn — rank 1 winner plus
+    runner-ups — so per-name entries take that name's latest row at any
+    rank, the strongest-card entry is the latest RANK-1 row, and the
+    repeated-window counts rank-1 rows only; pre-v7 rows default to
+    rank 1, so all-rank-1 data behaves exactly as before). Empty table /
+    no table / DB fault ->
     the documented empty shape, never a 500."""
     if "perception" not in shape:
         shape["perception"] = _empty_perception(dims)
@@ -669,41 +673,68 @@ def _portrait_db_fallback(shape: dict, dims) -> dict:
     try:
         _migration.schema_bootstrap(conn, _DDL)
         # --- perception: LATEST ROW PER top_pattern (E1 reader-side
-        # completeness; the table is top-pattern-only by design — D4).
+        # completeness; the table is derived-persistence only — D4).
+        # E3 (v7): the engine persists up to THREE rows per turn (rank
+        # 1 = the winner, ranks 2/3 = runner-ups carrying that
+        # pattern's own derived values). Two selection refinements
+        # follow from the shared-ts triples:
+        #   * CARD = the latest RANK-1 row (id-desc alone would
+        #     surface a runner-up as "overall latest");
+        #   * REPEATED-WINDOW counts rank-1 rows only (repeated =
+        #     WON the top).
+        # Per-name entries still take that name's latest row at ANY
+        # rank, so runner-up evidence now surfaces for its name.
+        # Pre-v7 rows default to rank 1: all-rank-1 data behaves
+        # byte-identically to the pre-v7 (E1) semantics.
         try:
             prow = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name='pattern_affinity_history'").fetchone()
             if prow is not None:
                 rows = conn.execute(
-                    "SELECT top_pattern, top_prompt_affinity, "
+                    "SELECT top_pattern, rank, top_prompt_affinity, "
                     "top_agent_affinity, top_margin, top_amplification, "
                     "evidence, confidence FROM pattern_affinity_history "
                     "WHERE top_pattern IS NOT NULL "
                     "ORDER BY ts DESC, id DESC").fetchall()
                 if rows:
                     # Latest row PER name (first occurrence in ts-desc
-                    # order). Per-name 'repeated' = that name also won
-                    # within the up-to-3 rows immediately before its
-                    # own latest row — the card's window applied per
-                    # name; for the overall-latest row this is
-                    # byte-identical to the legacy card semantics.
+                    # order, any rank). Column layout:
+                    # (name, rank, prompt_aff, agent_aff, margin, amp,
+                    #  evidence, confidence).
+                    rank_of = lambda r: (r[1] or 1)
                     latest_idx: dict = {}
                     for i, r in enumerate(rows):
                         latest_idx.setdefault(r[0], i)
+                    # CARD: the latest rank-1 row (row index). Hand-
+                    # crafted or exotic data with no rank-1 row falls
+                    # back to the E1 ordering (ts-desc), never a 500.
+                    card_i = next((i for i, r in enumerate(rows)
+                                   if rank_of(r) == 1), None)
+                    if card_i is None:
+                        card_i = 0
+                    order = [rows[card_i][0]]
+                    order += [n for n in sorted(latest_idx,
+                                                 key=lambda n: latest_idx[n])
+                              if n != rows[card_i][0]]
                     patterns = []
-                    for name in sorted(latest_idx, key=lambda n: latest_idx[n]):
-                        i = latest_idx[name]
+                    for name in order:
+                        i = card_i if name == rows[card_i][0] \
+                            else latest_idx[name]
                         r = rows[i]
-                        prior = rows[i + 1:i + 4]
+                        # Repeated window: up to 3 rank-1 rows
+                        # immediately before this row's position;
+                        # repeated = that name also WON within it.
+                        prior = [p for p in rows[i + 1:i + 4]
+                                 if rank_of(p) == 1]
                         patterns.append({
                             "name": name,
-                            "prompt_affinity": r[1],
-                            "agent_affinity": r[2],
-                            "margin": r[3],
-                            "amplification": r[4],
-                            "evidence": int(r[5]) if r[5] is not None else 0,
-                            "confidence": r[6],
+                            "prompt_affinity": r[2],
+                            "agent_affinity": r[3],
+                            "margin": r[4],
+                            "amplification": r[5],
+                            "evidence": int(r[6]) if r[6] is not None else 0,
+                            "confidence": r[7],
                             "repeated": any(p[0] == name for p in prior),
                         })
                     shape["perception"] = {

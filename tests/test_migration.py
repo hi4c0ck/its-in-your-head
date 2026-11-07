@@ -100,7 +100,7 @@ def test_legacy_migrates_via_worker_persist_path(tmp_path):
     try:
         assert "tool_name" in _columns(conn)
         assert "idx_events_tool" in _indexes(conn)
-        assert migration.get_schema_version(conn) == 6
+        assert migration.get_schema_version(conn) == 7
         rows = conn.execute(
             "SELECT type, tool_name, user_message FROM events ORDER BY id"
         ).fetchall()
@@ -124,7 +124,7 @@ def test_legacy_dashboard_route_migrates(tmp_path):
     try:
         assert "tool_name" in _columns(conn)
         assert "idx_events_tool" in _indexes(conn)
-        assert migration.get_schema_version(conn) == 6
+        assert migration.get_schema_version(conn) == 7
     finally:
         conn.close()
 
@@ -135,7 +135,7 @@ def test_fresh_bootstrap_and_second_call_is_noop(tmp_path, monkeypatch):
     conn = database.connect()
     try:
         assert migration.schema_bootstrap(conn) is True
-        assert migration.get_schema_version(conn) == 6
+        assert migration.get_schema_version(conn) == 7
         assert "tool_name" in _columns(conn)
         assert {"idx_events_ts", "idx_events_type", "idx_events_tool"} \
             <= _indexes(conn)
@@ -183,7 +183,7 @@ def test_override_unified_api_and_worker_same_file(tmp_path):
     assert database.resolve_path() == db_path
     conn = database.connect()
     try:
-        assert migration.get_schema_version(conn) == 6
+        assert migration.get_schema_version(conn) == 7
         assert "tool_name" in _columns(conn)
     finally:
         conn.close()
@@ -221,7 +221,7 @@ def test_failed_migration_rolls_back_completely(tmp_path, monkeypatch):
     try:
         assert migration.migrate(conn) is True
         assert "tool_name" in _columns(conn)
-        assert migration.get_schema_version(conn) == 6
+        assert migration.get_schema_version(conn) == 7
     finally:
         conn.close()
 
@@ -238,11 +238,15 @@ def test_schema_v5_pattern_affinity_history_ddl(tmp_path):
     conn = database.connect()
     try:
         assert migration.schema_bootstrap(conn) is True
-        assert migration.get_schema_version(conn) == 6
-        assert migration.CURRENT_SCHEMA_VERSION == 6
+        assert migration.get_schema_version(conn) == 7
+        assert migration.CURRENT_SCHEMA_VERSION == 7
         assert migration.PATTERN_AFFINITY_HISTORY_MAX == 512
         assert migration.PATTERN_AFFINITY_HISTORY_MAX == \
             migration.PORTRAIT_HISTORY_MAX
+        # E3/v7: the top-3 persistence columns exist on a fresh DB.
+        pah_cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(pattern_affinity_history)")}
+        assert {"rank", "turn_key"} <= pah_cols
         # DDL presence
         row = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' "
@@ -255,7 +259,7 @@ def test_schema_v5_pattern_affinity_history_ddl(tmp_path):
         assert names == ["id", "ts", "top_pattern", "top_prompt_affinity",
                          "top_agent_affinity", "top_margin",
                          "top_amplification", "evidence", "confidence",
-                         "repeated"], names
+                         "repeated", "rank", "turn_key"], names
         assert types["ts"] == "REAL"
         assert types["top_pattern"] == "TEXT"
         assert types["top_prompt_affinity"] == "REAL"
@@ -265,14 +269,18 @@ def test_schema_v5_pattern_affinity_history_ddl(tmp_path):
         assert types["evidence"] == "INTEGER"
         assert types["confidence"] == "REAL"
         assert types["repeated"] == "INTEGER"
-        # No free-text columns: only top_pattern may be TEXT (a preset
-        # bank pattern name, never user/reasoning content).
+        assert types["rank"] == "INTEGER"
+        assert types["turn_key"] == "TEXT"
+        # No free-text user/reasoning columns: only top_pattern (a preset
+        # bank pattern name, never user content) and turn_key (a
+        # deterministic turn-ts string, never user content) may be TEXT.
         text_cols = [n for n, t in types.items() if t == "TEXT"]
-        assert text_cols == ["top_pattern"], text_cols
+        assert text_cols == ["top_pattern", "turn_key"], text_cols
         # defaults
         defaults = {r[1]: r[4] for r in cols}
         assert defaults["evidence"] == "0"
         assert defaults["repeated"] == "0"
+        assert defaults["rank"] == "1"
     finally:
         conn.close()
 

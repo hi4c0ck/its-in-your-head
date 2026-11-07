@@ -36,7 +36,7 @@ Rule: a lane may ADD routes; it may not rename, re-shape, or remove a pinned one
 
 Empty-shape rule: when there is no evidence, `patterns` is an empty list, `dim_signals` keeps every dimension key with None values, and `perception_available` is False. Never invent values; routes never 500 on empty.
 
-Fallback-latest-row rule: in the isolated-child fallback, `perception` is filled only from the latest `pattern_affinity_history` row (derived numbers only; `repeated` = same `top_pattern` in the last 3 rows). No rows or an empty table = empty perception shape with `perception_available` False. The agent track stays None in fallback and is never invented.
+Fallback selection rule (E1 + E3/v7): in the isolated-child fallback, `perception` is filled from `pattern_affinity_history` as the LATEST ROW PER `top_pattern` (deterministic per-name ts desc, id desc tie-break; `repeated` = that name also WON — i.e. appears in a rank-1 row — within the up-to-3 rows immediately before its own latest row). E3/v7: the engine persists up to THREE rows per turn (rank 1 = winner, ranks 2/3 = runner-ups carrying that pattern's own derived values; `turn_key` groups a turn's rows; pre-v7 rows default to rank 1), so per-name entries take that name's latest row at ANY rank while the strongest-card entry (first in the list) is the latest RANK-1 row and the repeated-window counts rank-1 rows only. No rows or an empty table = empty perception shape with `perception_available` False. The agent track stays None in fallback and is never invented.
 
 ## C2 — event wire names (`broadcast_plugin_event(plugin_id, event, payload)`)
 
