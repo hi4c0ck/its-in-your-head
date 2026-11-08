@@ -804,7 +804,7 @@ class Engine:
                 "columns": ["goal", "good", "friction", "unlabeled"],
                 "available": bool(rows)}
 
-    def _perception_view(self, dims, full) -> dict:
+    def _perception_view(self, dims, full, values, agent) -> dict:
         """Additive ``perception`` key (C1 adjudication).
 
         Exact shape: ``patterns`` (list of objects with name,
@@ -839,12 +839,18 @@ class Engine:
                     margin=entry.get("margin")),
                 "repeated": bool(entry.get("repeated")),
             })
-        raw_signals = full.get("dim_signals") or {}
-        dim_signals = {}
-        for d in dims:
-            sig = raw_signals.get(d) or {}
-            dim_signals[d] = {"prompt": sig.get("prompt"),
-                              "agent": sig.get("agent")}
+        # Per-dimension prompt/agent signals, keyed by dimension (the shape
+        # the pane and the tests expect). Sourced from the GATED observed
+        # (prompt/user) and interpreted (agent) values passed in from
+        # portrait_view — None when a track has no evidence, never
+        # fabricated. The third view's pattern-KEYED dim_signals must NOT
+        # be re-keyed here: that mismatch is what used to yield all-None
+        # even when the tracks had data.
+        dim_signals = {
+            d: {"prompt": values.get(d),
+                "agent": agent.get(d)}
+            for d in dims
+        }
         return {"patterns": patterns,
                 "dim_signals": dim_signals,
                 "perception_available": True}
@@ -858,16 +864,6 @@ class Engine:
         has_interpreted = bool(
             self._interpreted_evidence_count
             or (interp_track.get("evidence_count") or 0))
-        perception = self._perception_view(dims, full)
-        if not has_observed and not has_interpreted:
-            # Empty-shape contract (S5): no evidence -> available False and
-            # None values (structural defaults are NOT data).
-            return {"available": False,
-                    "dimensions": {d: None for d in dims},
-                    "confidence": {d: None for d in dims},
-                    "user": {d: None for d in dims},
-                    "agent": {d: None for d in dims},
-                    "perception": perception}
         interp = interp_track.get("values") or {}
         values = ({d: snap.get("values", {}).get(d) for d in dims}
                   if has_observed else {d: None for d in dims})
@@ -877,6 +873,16 @@ class Engine:
         # evidence exists; otherwise None, never the neutral defaults.
         agent = ({d: interp.get(d) for d in dims} if has_interpreted
                  else {d: None for d in dims})
+        perception = self._perception_view(dims, full, values, agent)
+        if not has_observed and not has_interpreted:
+            # Empty-shape contract (S5): no evidence -> available False and
+            # None values (structural defaults are NOT data).
+            return {"available": False,
+                    "dimensions": {d: None for d in dims},
+                    "confidence": {d: None for d in dims},
+                    "user": {d: None for d in dims},
+                    "agent": {d: None for d in dims},
+                    "perception": perception}
         return {"available": True,
                 "dimensions": values, "confidence": conf,
                 "user": dict(values), "agent": agent,

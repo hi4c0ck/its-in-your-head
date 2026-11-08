@@ -158,6 +158,38 @@ def test_portrait_view_perception_none_agent_without_reasoning():
                for s in perc["dim_signals"].values())
 
 
+def test_portrait_view_perception_dim_signals_populated_from_tracks():
+    # Regression (perception dim_signals key-mismatch): the live path must
+    # key dim_signals by DIMENSION and populate prompt/agent from the
+    # portrait's observed/interpreted tracks — NOT re-key the third view's
+    # pattern-keyed dict. Before the fix, dim_signals was all-None even when
+    # the tracks carried data, so the pane's per-dim block read as an empty
+    # duplicate of the inspection table.
+    eng = _eng()
+    eng.on_events([{"type": "user_turn", "ts": time.time(),
+                    "session_id": "s1", "turn_id": "tD",
+                    "user_message": "Give the short answer, no preamble",
+                    "user_chars": 30}])
+    eng.on_events([{"type": "reasoning_seg", "ts": time.time(),
+                    "session_id": "s1", "turn_id": "tD",
+                    "reasoning_text": "I am giving the shortest direct "
+                                       "answer I can",
+                    "reasoning_chars": 40}])
+    perc = eng.portrait_view()["perception"]
+    assert perc["perception_available"] is True
+    assert set(perc["dim_signals"]) == {
+        "directness", "context_richness", "exploration",
+        "analytical_depth", "iteration", "scope"}
+    # The tracks have data here -> at least one dim carries a real value,
+    # proving the keying is fixed (previously every value was None).
+    assert any(s["prompt"] is not None
+               for s in perc["dim_signals"].values()), \
+        "dim_signals.prompt is all-None despite observed track data"
+    assert any(s["agent"] is not None
+               for s in perc["dim_signals"].values()), \
+        "dim_signals.agent is all-None despite interpreted track data"
+
+
 def test_pattern_affinity_history_row_and_prune(tmp_db_conn=None):
     import storage.migration as mig
     preset = {e["name"] for e in patterns_mod.PATTERN_BANK}
