@@ -121,8 +121,24 @@ its-in-your-head/               # unified package = one installable folder = OSS
   exposed on /portrait via the additive `perception` key and rendered as the
   Perception section inside the expanded portrait view (no new surface).
 - **Desktop** (`desktop/plugin.js`): 96px strip pane with semantic views —
-  PULSE (activity matrix: columns LIVE / GOAL / GOOD / FRICTION, LIVE as the
-  visible first column derived from per-row live counts; dynamic tool rows),
+  PULSE (activity matrix: columns LIVE / GOAL / GOOD / FRICTION, dynamic tool
+  rows; the pane is constrained + informative by design). Semantic cells
+  render DISCRETE, not as a continuous heatmap: goal/good/friction map to the
+  server's `cell.level` via `pulseBand` (empty / weak / strong — the ramp was
+  retired because a continuous fill blurred "weak" into "empty" and let a
+  count read like a strong similarity). `buildPulseVerdict` adds a word-only
+  verdict (no digits; a single top-row token in compact, up to 3 clauses when
+  expanded). LIVE is kept honest as ACTIVITY, not a 5th similarity cell: its
+  count-squash alpha is capped (0.55, below the 0.85 strong-band ceiling), a
+  hairline separator splits the LIVE column from the similarity group, and the
+  expanded view shows the RAW call count under a LIVE·CALLS header. Recency
+  (`pulseRecency`, pure — takes `nowSec` in, never reads the clock) reads the
+  freshness of the NOW snapshot from `last_seen` (a word: now / recent / today
+  / stale; honest "no activity yet" when unseen) — visible in the expanded
+  view, hover-tooltip only in the compact lane so the 48px lane stays
+  constrained. The PULSE/DRIFT split is explicit: PULSE owns the NOW snapshot
+  (activity + similarity + freshness); DRIFT owns multi-point history/trend
+  (portrait-tab sparklines) and PULSE gains no sparkline/delta.
   PORTRAIT (six dimensions + trend), DRIFT (history; honestly "no drift data
   yet" when empty). Theme vars resolved once via getComputedStyle, canvas
   ResizeObserver, `host.onEvent` live path + mandatory polling fallback.
