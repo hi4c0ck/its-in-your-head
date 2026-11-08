@@ -1437,7 +1437,10 @@ function PulseMatrix({ pulse }) {
       let emptyBand = false
       if (col === 'live') {
         const v = liveV
-        a = v === null || v <= 0 ? 0 : (0.12 + 0.88 * v) * (isLive ? 1 : 0.45)
+        // LIVE is ACTIVITY, not similarity: the count-squash alpha is capped
+        // below the strong-band ceiling (0.85) so the live column reads as a
+        // count of work, not as a 5th cell of the similarity grid.
+        a = v === null || v <= 0 ? 0 : Math.min(0.55, (0.12 + 0.88 * v) * (isLive ? 1 : 0.45))
       } else {
         // DISCRETE 3-band fill on goal/good/friction, keyed to the server's
         // cell.level (pulseBand): weak no longer blurs into empty, and only a
@@ -1454,7 +1457,7 @@ function PulseMatrix({ pulse }) {
         key: gk + (g ? ':' + g : ''),
         className: g ? 'iyh-glow' + (col === 'friction' ? ' iyh-glow-warn' : '') : undefined,
         title: col,
-        style: {
+        style: Object.assign({
           background: col === 'friction' ? V_DANGER : V_ACCENT,
           opacity: a,
           // empty semantic cell: opacity 0, but a hairline keeps it visibly
@@ -1463,6 +1466,11 @@ function PulseMatrix({ pulse }) {
           borderRadius: 2,
           minHeight: 4,
         },
+        // Group separator: the first similarity cell (goal, the column right
+        // after LIVE) carries a hairline left edge, splitting the LIVE
+        // activity column from the goal/good/friction similarity group
+        // (theme vars only; no new colors).
+        col === 'goal' ? { borderLeft: '1px solid ' + V_STROKE } : null),
       }))
     })
   })
@@ -1985,7 +1993,9 @@ function ExpandedPulse({ pulse }) {
           columns.map((c) => jsx('span', {
             key: c,
             style: Object.assign({ flex: 1 }, cellBase, { color: c === 'friction' ? V_DANGER : V_SEC, fontWeight: 600 }),
-            children: c.toUpperCase(),
+            // LIVE reads as ACTIVITY (a raw call count), not as a
+            // similarity column.
+            children: c === 'live' ? 'LIVE·CALLS' : c.toUpperCase(),
           })),
         ],
       }),
@@ -1993,6 +2003,12 @@ function ExpandedPulse({ pulse }) {
         const tool = String((row && row.tool_name) || (row && row.tool) || '—')
         const liveV = pulseLiveValue(row)
         const isLive = liveV !== null
+        // Honest scale: the expanded LIVE cell shows the RAW CALL COUNT
+        // (calls_started + calls_completed + errors) — a count read as a
+        // count, not the squashed 0..1 similarity-style value.
+        const totalCalls = row && row.live
+          ? [row.live.calls_started, row.live.calls_completed, row.live.errors].reduce((s, x) => s + (typeof x === 'number' ? x : 0), 0)
+          : 0
         return jsxs('div', {
           key: ri,
           className: 'flex items-center',
@@ -2018,7 +2034,7 @@ function ExpandedPulse({ pulse }) {
                     style: { height: 5, borderRadius: 1, background: c === 'friction' ? V_DANGER : V_ACCENT, opacity: a },
                   }),
                   c === 'live'
-                    ? jsx('span', { style: Object.assign({}, cellBase, { color: isLive ? V_SEC : V_QUAT }), children: isLive ? String(Math.round(liveV * 100) / 100) : '—' })
+                    ? jsx('span', { style: Object.assign({}, cellBase, { color: isLive ? V_SEC : V_QUAT }), children: isLive ? String(totalCalls) : '—' })
                     : jsx('span', { style: Object.assign({}, cellBase, { color: cell && cell.state === 'ready' ? V_SEC : V_QUAT }), children: cellText(cell) }),
                 ],
               })

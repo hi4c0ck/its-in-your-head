@@ -81,6 +81,9 @@ assert.ok(src.includes("col === 'friction' ? V_DANGER : V_ACCENT"),
 assert.ok(src.includes('(0.12 + 0.88 * v)'),
   'LIVE column keeps the count-squash alpha (semantic cols use pulseBand discrete bands)')
 assert.ok(src.includes('isLive ? 1 : 0.45'), 'non-live rows muted on their cells')
+assert.ok(src.includes('Math.min(0.55'), 'LIVE activity capped below the strong-similarity ceiling')
+assert.ok(src.includes("borderLeft: '1px solid ' + V_STROKE"), 'activity/similarity group separator present')
+assert.ok(src.includes('LIVE\u00b7CALLS'), 'expanded LIVE header reads as activity (calls), not similarity')
 assert.ok(src.includes('pulseBand'), 'semantic cells use the discrete 3-band encoding (pulseBand)')
 assert.ok(src.includes('strong: 0.85'), 'discrete band opacity steps pinned (empty/weak/strong)')
 assert.ok(src.includes('buildPulseVerdict'), 'worded verdict helper is wired into the pane')
