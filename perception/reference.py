@@ -196,3 +196,35 @@ class RollingReference:
     def to_state(self) -> dict:
         """Derived-only persisted state (per-dim window); reversible/rollback."""
         return {d: self.windows[d].to_state() for d in self.dims}
+
+
+# -- derived-state persistence (storage-layer helpers, conn-passed) -------- #
+_REFERENCE_STATE_KEY = "reference_state"
+
+
+def save_state(conn, state: dict) -> None:
+    """Persist the reference state as a JSON blob in the ``meta`` table
+    (derived L2 vectors + live counts only, R5 — no raw text). Fully
+    reversible: deleting the row rolls the reference back to the seed bank.
+    Does NOT commit; the caller owns the connection lifecycle."""
+    import json
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (_REFERENCE_STATE_KEY, json.dumps(state)))
+
+
+def load_state(conn) -> dict | None:
+    """Load the persisted reference state (meta table); None if the row is
+    absent or unreadable (fault-isolated, never raises)."""
+    import json
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = ?",
+        (_REFERENCE_STATE_KEY,)).fetchone()
+    if not row:
+        return None
+    try:
+        loaded = json.loads(row[0])
+    except (ValueError, TypeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None

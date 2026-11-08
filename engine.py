@@ -107,6 +107,7 @@ class Engine:
         # the last turn's drift from the reference (0 = in-territory).
         self.reference = None
         self._ood_drift = 0.0
+        self._reference_loaded = False
         # Pattern-perception state (third portrait view):
         # prompt vectors cached per turn for (prompt, reaction) pairing,
         # top-pattern tallies + last-evidence timestamps for confidence.
@@ -248,20 +249,76 @@ class Engine:
         return vectors
 
     def _ensure_reference(self, backend, anchor_vectors):
-        """Lazily create + seed the rolling reference from the bank's per-dim
-        positive vectors (R4), then reuse it. Seeding needs a backend + the
-        anchor vectors, so it happens on the first available turn — never at
-        register time. ``backend`` is retained for a future encoder switch."""
-        if self.reference is None:
-            try:
-                from .perception.reference import RollingReference
-            except ImportError:
-                from perception.reference import RollingReference
-            seed = {dim: list(
-                (anchor_vectors.get(dim) or {}).get("positive") or [])
-                for dim in _dims()}
-            self.reference = RollingReference(seed_bank=seed)
+        """Lazily materialize the rolling reference.
+
+        L-MIGRATE: on the first call of a process, restore a PERSISTED rolling
+        reference from the DB (so the reassembled window survives a restart)
+        before falling back to the seed bank (R4 cold start). Seeding/restoring
+        needs a backend + the anchor vectors, so it happens on the first
+        available turn — never at register time. ``backend`` is retained for a
+        future encoder switch."""
+        if self.reference is not None:
+            return self.reference
+        try:
+            from .perception.reference import RollingReference
+        except ImportError:
+            from perception.reference import RollingReference
+        if not self._reference_loaded:
+            self._reference_loaded = True
+            persisted = self._load_reference_state()
+            if persisted:
+                self.reference = RollingReference(state=persisted)
+                return self.reference
+        # Cold start: seed the window from the bank's per-dim positives.
+        seed = {dim: list(
+            (anchor_vectors.get(dim) or {}).get("positive") or [])
+            for dim in _dims()}
+        self.reference = RollingReference(seed_bank=seed)
         return self.reference
+
+    def _load_reference_state(self) -> dict | None:
+        """Restore the persisted rolling-reference state from the DB
+        (L-MIGRATE, fault-isolated: None on any failure -> seed-bank cold
+        start). Worker-side; the meta row is tiny."""
+        try:
+            _db, _mig = self._storage()
+            conn = _db.connect()
+            try:
+                _mig.schema_bootstrap(conn)
+                try:
+                    from .perception import reference as _ref
+                except ImportError:
+                    from perception import reference as _ref
+                return _ref.load_state(conn)
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception(
+                "its-in-your-head: reference state load failed")
+            return None
+
+    def _persist_reference_state(self) -> None:
+        """Persist the rolling-reference state to the DB so the reassembled
+        window survives a restart (L-MIGRATE). Fault-isolated: a failure must
+        never break the live turn (the reference stays in-memory)."""
+        if self.reference is None:
+            return
+        try:
+            _db, _mig = self._storage()
+            conn = _db.connect()
+            try:
+                _mig.schema_bootstrap(conn)
+                try:
+                    from .perception import reference as _ref
+                except ImportError:
+                    from perception import reference as _ref
+                _ref.save_state(conn, self.reference.to_state())
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception(
+                "its-in-your-head: reference state persist failed")
 
     # -- pattern perception (third view, worker side only) ------------------ #
     def _cache_prompt_vector(self, turn_id, vector) -> None:
@@ -688,6 +745,9 @@ class Engine:
                     for dim, s in scores.items():
                         if (s.get("S") or 0.0) >= 0.3:
                             ref.reassemble(dim, prompt_vector, ts_re)
+                    # L-MIGRATE: persist the reassembled window (fault-
+                    # isolated) so it survives a process restart.
+                    self._persist_reference_state()
                 except Exception:
                     self.portrait.update_observed_from_text(text, backend)
             else:
