@@ -1666,6 +1666,10 @@ function PortraitView({ data, drift, narrow, canExpand, preferences }) {
     children: (dims.length > 0 ? dims : PORTRAIT_DIMS).map((d) => {
       const ov = clamp01(data.user && data.user[d])
       const iv = clamp01(data.agent && data.agent[d])
+      const dd = drift && drift.series && Array.isArray(drift.series[d]) ? driftDelta(drift.series[d]) : null
+      const neg = dd !== null && dd < 0
+      const flankGlyph = dd === null || dd === 0 ? '·' : (neg ? '▼' : '▲')
+      const flankColor = dd === null || dd === 0 ? V_QUAT : (neg ? V_SEC : V_ACCENT)
       return jsxs('div', {
         key: d,
         className: 'flex items-center',
@@ -1693,6 +1697,11 @@ function PortraitView({ data, drift, narrow, canExpand, preferences }) {
               width: 10, height: 3, borderRadius: 1, background: V_SEC,
               opacity: iv === null ? 0.15 : 0.25 + 0.75 * iv,
             },
+          }),
+          jsx('span', {
+            title: d + ' · recent drift ' + (dd === null ? 'no data yet' : (neg ? '−' : '+') + Math.abs(dd).toFixed(3)),
+            style: { width: 8, textAlign: 'center', fontSize: 7, color: flankColor, lineHeight: 1, fontFamily: 'var(--ui-font-mono, monospace)' },
+            children: flankGlyph,
           }),
         ],
       })
@@ -1968,6 +1977,35 @@ function ExpandedPortrait({ data, drift, preferences }) {
   }
   const num = (v) => (v === null || typeof v !== 'number' || !Number.isFinite(v) ? '—' : String(Math.round(v * 100) / 100))
   const axes = dims.length > 0 ? dims : PORTRAIT_DIMS
+  // Per-dimension live drift (the six dims' recent movement): the delta + a
+  // mini sparkline, so the portrait's inspection shows each dim MOVING, not
+  // just a static level. Same data as the DRIFT tab, surfaced per-dim here.
+  // Absent/flat renders a quiet marker, never fabricated.
+  const dimDrift = (d) => {
+    const series = drift && drift.series && Array.isArray(drift.series[d]) ? drift.series[d] : null
+    const delta = series ? driftDelta(series) : null
+    const spark = series ? driftSparkline(series) : null
+    const neg = delta !== null && delta < 0
+    const color = delta === null || delta === 0 ? V_QUAT : (neg ? V_SEC : V_ACCENT)
+    return jsxs('span', {
+      style: { flex: '0 0 90px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4, textAlign: 'right' },
+      title: d + ' recent drift: ' + (delta === null ? 'no data yet' : (neg ? '−' : '+') + Math.abs(delta).toFixed(3)),
+      children: [
+        spark ? jsx('svg', {
+          viewBox: '0 0 ' + SPARK_W + ' ' + SPARK_H,
+          preserveAspectRatio: 'none',
+          style: { width: 44, height: 12, flexShrink: 0, opacity: 0.85 },
+          children: [
+            jsx('polyline', { points: spark.points, fill: 'none', stroke: color, 'stroke-width': 1, 'stroke-linejoin': 'round' }),
+          ],
+        }) : null,
+        jsx('span', {
+          style: { fontSize: 8, color, fontFamily: 'var(--ui-font-mono, monospace)' },
+          children: delta === null ? '—' : (neg ? '−' : '+') + Math.abs(delta).toFixed(3),
+        }),
+      ],
+    })
+  }
   // Perception (D5): pure render of the additive 'perception' payload key.
   // Affinity and confidence are separate channels; prompt and agent are
   // never blended; absence renders neutral/faint, never negative.
@@ -2162,6 +2200,7 @@ function ExpandedPortrait({ data, drift, preferences }) {
               jsx('span', { style: { flex: 1, textAlign: 'right' }, children: 'OBSERVED' }),
               jsx('span', { style: { flex: 1, textAlign: 'right' }, children: 'INTERPRETED' }),
               jsx('span', { style: { flex: 1, textAlign: 'right' }, children: 'CONF' }),
+              jsx('span', { style: { flex: '0 0 90px', textAlign: 'right', title: 'recent drift (the dim is moving)' }, children: 'DRIFT' }),
             ],
           }),
           axes.map((d) => jsxs('div', {
@@ -2173,6 +2212,7 @@ function ExpandedPortrait({ data, drift, preferences }) {
               jsx('span', { style: { flex: 1, textAlign: 'right', color: V_SEC }, children: num(data && data.user && data.user[d]) }),
               jsx('span', { style: { flex: 1, textAlign: 'right', color: V_SEC }, children: num(data && data.agent && data.agent[d]) }),
               jsx('span', { style: { flex: 1, textAlign: 'right' }, children: num(data && data.confidence && data.confidence[d]) }),
+              dimDrift(d),
             ],
           })),
           jsx('div', {
