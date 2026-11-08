@@ -9,7 +9,7 @@ mirror (_pulse_momentum) stays byte-equivalent to pulse/momentum.py.
 import pytest
 
 from pulse.momentum import (
-    MOMENTUM_GAIN, MOMENTUM_BAND, surge_values, empty_momentum,
+    MOMENTUM_BAND, surge_values, empty_momentum,
 )
 from pulse.matrix import build_matrix
 
@@ -18,16 +18,17 @@ from pulse.matrix import build_matrix
 
 def test_terminal_dominant_then_compute_use_surges():
     """The user's exact case: terminal owned the long run, compute_use is
-    now surging -> compute_use reads 1.0/surging, terminal cools to 0.0."""
+    now surging -> compute_use is hotter than baseline (value > 0.5),
+    terminal cools below it (value < 0.5). Raw share-delta mapping."""
     recent = {"terminal": 2, "compute_use": 8}
     cum = {"terminal": 10, "compute_use": 2}
     res = surge_values(recent, cum)
     assert res["compute_use"]["state"] == "surging"
-    assert res["compute_use"]["value"] == 1.0
-    assert res["compute_use"]["momentum"] == 1.0
+    assert res["compute_use"]["value"] == 0.8167
+    assert res["compute_use"]["momentum"] == 0.6333
     assert res["terminal"]["state"] == "cooling"
-    assert res["terminal"]["value"] == 0.0
-    assert res["terminal"]["momentum"] == -1.0
+    assert res["terminal"]["value"] == 0.1833
+    assert res["terminal"]["momentum"] == -0.6333
 
 
 def test_steady_when_recent_matches_long_run():
@@ -60,20 +61,21 @@ def test_deterministic_under_key_shuffle():
         assert got == base, f"seed {seed} drifted"
 
 
-def test_mild_surge_stays_visible_expanding_gain():
-    """GAIN < 1 is expanding: a mid-rank surger stays visibly above 0.5
-    (not hugging steady) and not collapsed to the top 1.0. Uniform
-    cumulative share + a rising recent ladder gives two posgers."""
-    assert MOMENTUM_GAIN < 1.0
+def test_mild_surge_stays_near_steady_raw_mapping():
+    """No expanding curve: a mild surger (small share-delta) reads just
+    above 0.5 instead of being inflated toward 1.0. Simultaneous surgers
+    spread by their real magnitude."""
     res = surge_values({"a": 2, "b": 4, "c": 6, "d": 8},
                        {"a": 6, "b": 6, "c": 6, "d": 6})
-    # c is the mild surger: strictly between steady (0.5) and the top (1.0).
-    assert res["c"]["state"] == "surging"
-    assert 0.5 < res["c"]["value"] < 1.0
-    # The expanding gain lifts c above a linear (GAIN=1) mapping would.
-    assert res["c"]["value"] > 0.5 + 0.5 * (0.05 / 0.15)
-    # d owns the top (value 1.0); a is the top cooler (value 0.0).
-    assert res["d"]["value"] == 1.0 and res["a"]["value"] == 0.0
+    # recent total 20 -> a .10 b .20 c .30 d .40; cum total 24 -> all .25.
+    # surge: a -.15 b -.05 c +.05 d +.15 -> value = 0.5 + 0.5*surge.
+    assert res["c"]["state"] == "surging" and res["a"]["state"] == "cooling"
+    assert res["a"]["value"] == 0.425
+    assert res["b"]["value"] == 0.475
+    assert res["c"]["value"] == 0.525
+    assert res["d"]["value"] == 0.575
+    # nothing saturates at 1.0 unless the share-delta truly reaches 1.0.
+    assert all(0.0 <= v["value"] < 0.9 for v in res.values())
 
 
 # --- build_matrix attaches a momentum cell --------------------------------

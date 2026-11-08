@@ -481,11 +481,13 @@ def _pulse_level(value, threshold, state) -> str:
 
 
 # Momentum knobs — MIRROR of pulse/momentum.py (the child has the plugin
-# root off its sys.path, so it cannot import that module). Keep these three
+# root off its sys.path, so it cannot import that module). Keep these
 # constants + the formula byte-equivalent to pulse/momentum.py.
-_PULSE_MOMENTUM_GAIN = 0.6
 _PULSE_MOMENTUM_BAND = 0.02
 _PULSE_MOMENTUM_DECIMALS = 4
+# NOTE: value maps the RAW share-delta straight (0.5 + 0.5*surge) with no
+# expanding-curve gain — mirrors pulse/momentum.py, so simultaneous surgers
+# spread by real magnitude instead of all saturating at 1.0.
 
 
 def _pulse_momentum(recent_counts: dict, cumulative_counts: dict) -> dict:
@@ -505,22 +507,15 @@ def _pulse_momentum(recent_counts: dict, cumulative_counts: dict) -> dict:
     cum_total = sum(max(0, v) for v in cumulative_counts.values())
     recent_share = _shares(recent_counts, recent_total)
     cum_share = _shares(cumulative_counts, cum_total)
-    surge = {t: recent_share.get(t, 0.0) - cum_share.get(t, 0.0)
-             for t in tools}
-    peak = max((abs(surge[t]) for t in tools), default=0.0) or 1.0
-
     out: dict[str, dict] = {}
     for t in tools:
-        s = surge[t]
-        frac = abs(s) / peak
-        momentum = (1.0 if s > 0.0 else -1.0) * (frac ** _PULSE_MOMENTUM_GAIN) \
-            if s else 0.0
-        value = min(1.0, max(0.0, 0.5 + 0.5 * momentum))
+        s = recent_share.get(t, 0.0) - cum_share.get(t, 0.0)
+        value = 0.5 + 0.5 * s
         state = "surging" if s >= _PULSE_MOMENTUM_BAND else \
             "cooling" if s <= -_PULSE_MOMENTUM_BAND else "steady"
         d = _PULSE_MOMENTUM_DECIMALS
-        out[t] = {"momentum": round(momentum, d), "surge": round(s, d),
-                  "value": round(value, d), "state": state}
+        out[t] = {"momentum": round(s, d), "surge": round(s, d),
+                  "value": round(min(1.0, max(0.0, value)), d), "state": state}
     return out
 
 
