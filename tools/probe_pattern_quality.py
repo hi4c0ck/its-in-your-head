@@ -696,16 +696,21 @@ def main(argv=None) -> None:
                        for r in near_curated2[dim] if r["top1"] == dim)
     cur2_rate = cur2_correct / cur2_total if cur2_total else 0.0
 
-    passed = all_two_thirds and sep_visible
+    # L-QA: the OOD-Δ separation floor is RETIRED as a gate — the rolling
+    # reference's drift-recall monitor (tools/probe_dynamic_monitors.py) is the
+    # new out-of-territory signal. The OOD separation below is kept
+    # informational only; in-domain agreement is the discrimination gate.
+    passed = all_two_thirds
     lines.append("## VERDICT")
     lines.append("")
     lines.append(f"- In-domain agreement (min per pattern): {min_rate:.3f} "
                  f"({'PASS' if all_two_thirds else 'FAIL'} vs 0.667 bar)")
     for dim in DIMENSIONS:
         lines.append(f"  - {dim}: {in_rates[dim]:.3f}")
-    lines.append(f"- Out-of-domain separation: in {in_aff:.6f} vs out "
-                 f"{ood_aff:.6f}, delta {separation:.6f} "
-                 f"({'visible' if sep_visible else 'NOT visible'})")
+    lines.append(f"- Out-of-domain separation (INFORMATIONAL — OOD-Δ gate "
+                 f"retired, replaced by the drift-recall monitor): in "
+                 f"{in_aff:.6f} vs out {ood_aff:.6f}, delta "
+                 f"{separation:.6f} ({'visible' if sep_visible else 'NOT visible'})")
     lines.append(f"- Near-probe accuracy: {near_correct}/{near_total} "
                  f"({near_rate:.3f}) — stress-case discrimination")
     if cur_total:
@@ -720,8 +725,9 @@ def main(argv=None) -> None:
                     else "Tier-1 ONNX discrimination")
     lines.append(f"**{verdict_name}: "
                  f"{'PASS' if passed else 'FAIL'}** "
-                 f"(bar: in-domain agreement >= 2/3 per pattern AND "
-                 f"out-of-domain separation visible).")
+                 f"(bar: in-domain agreement >= 2/3 per pattern; OOD-Δ "
+                 f"separation is informational — the gate was retired in "
+                 f"favour of the drift-recall monitor).")
     lines.append("")
     if not passed:
         lines.append("Curation actions (concrete, evidence-first):")
