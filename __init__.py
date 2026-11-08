@@ -14,6 +14,37 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+def _import_engine():
+    """Import the engine module (hermes namespace vs top-level), guarding the
+    isolated-child case where it is unavailable (doctor / no agent half)."""
+    try:
+        from . import engine
+    except ImportError:
+        import engine
+    return engine
+
+
+def _live_encoder_provider(ctx):
+    """Return a live-settings callable the Engine re-reads on each encode.
+
+    Reads ONLY the persisted ``perception.encoder`` value from the ctx config
+    API (``get_config``). Never raises: a missing config API or a read fault
+    returns ``{}``, so the Engine degrades to its startup backend name instead
+    of crashing the hot encode path. The write side is the dashboard
+    ``POST /settings`` -> ``ctx.set_config`` (the shared profile config store),
+    so a flip persists and the agent half sees it on its next read."""
+    def provider():
+        try:
+            get = getattr(ctx, "get_config", None)
+            if not callable(get):
+                return {}
+            return {"perception.encoder": get("perception.encoder", "tier-0")}
+        except Exception:
+            return {}
+    return provider
+
+
 # Re-exported hook bodies (kept at module level for tests/inspection).
 _on_pre_llm_call = collector._on_pre_llm_call
 _on_post_api_request = collector._on_post_api_request
@@ -52,6 +83,13 @@ def register(ctx):
     except ImportError:
         from dashboard import plugin_api as _api
     _api.set_ctx(ctx)
+    # Live encoder-switch seam: re-read the PERSISTED perception.encoder on every
+    # encode so a dashboard flip (POST /settings) re-resolves the backend with
+    # no restart and no state wipe. Lazy — no Engine is built here (the lazy-DB
+    # rule: register() runs under a temp HERMES_HOME and must stay I/O-free);
+    # get_engine() applies the provider to the engine on first use.
+    _engine_mod = _import_engine()
+    _engine_mod.set_live_settings_provider(_live_encoder_provider(ctx))
     # Start the background worker. Lazy-DB rule: the DB connection opens on
     # the first event, NEVER at register() time — doctor runs register() under
     # a temp HERMES_HOME and deletes it (WinError 145 cleanup on Windows).

@@ -125,13 +125,33 @@ class Engine:
         self._backend_name = str(
             s.get("perception.encoder") or _encoder.DEFAULT_BACKEND)
         self._settings = dict(s)
+        # Live-settings provider (wired by the register hook): a callable
+        # -> {key: value} that re-reads the PERSISTED settings, so a live
+        # encoder switch (perception.encoder) re-resolves the backend with
+        # no restart and no state wipe.
+        self._settings_provider = None
 
     # -- backend (lazy) --------------------------------------------------- #
+    def set_settings_provider(self, provider) -> None:
+        """Store a live-settings callable (``-> {key: value}``). When set,
+        ``_get_backend`` re-reads ``perception.encoder`` on each call and
+        re-resolves the backend on a live switch — no state wipe, no
+        restart. ``None`` / a failing provider degrades to the startup
+        backend name (never crashes the encode path)."""
+        self._settings_provider = provider
+
     def _get_backend(self):
         with self._lock:
-            if self._backend is None:
-                self._backend = _encoder.create_backend(
-                    None, self._backend_name)
+            name = self._backend_name
+            if self._settings_provider is not None:
+                try:
+                    live = self._settings_provider() or {}
+                    name = str(live.get("perception.encoder") or name)
+                except Exception:
+                    name = self._backend_name
+            if name != self._backend_name or self._backend is None:
+                self._backend_name = name
+                self._backend = _encoder.create_backend(None, name)
             return self._backend
 
     # -- hot path (pre_tool_call, sync, no inference) --------------------- #
@@ -953,6 +973,21 @@ class Engine:
 # -- process singleton ------------------------------------------------------
 _engine: Engine | None = None
 _engine_lock = threading.Lock()
+# Live-settings provider, registered by the register hook (set_live_settings_
+# provider). When set, get_engine() applies it to the Engine so a persisted
+# perception.encoder flip re-resolves the backend with no restart and no state
+# wipe. Kept at module level (never built into Engine.__init__) so register()
+# stays I/O-free: applying it here is deferred to first use.
+_live_settings_provider = None
+
+
+def set_live_settings_provider(provider) -> None:
+    """Register a live-settings callable (``-> {key: value}``) applied to every
+    Engine by ``get_engine``. No Engine is built here (lazy-DB rule); the hook
+    only stores the callable. ``None`` clears it (Engine degrades to its
+    startup backend name)."""
+    global _live_settings_provider
+    _live_settings_provider = provider
 
 
 def get_engine() -> Engine:
@@ -960,6 +995,8 @@ def get_engine() -> Engine:
     with _engine_lock:
         if _engine is None:
             _engine = Engine()
+        if _live_settings_provider is not None:
+            _engine.set_settings_provider(_live_settings_provider)
         return _engine
 
 

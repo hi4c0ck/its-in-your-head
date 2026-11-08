@@ -362,7 +362,10 @@ def _settings_defaults():
     except Exception:
         # LAST RESORT (isolated child, core.settings unimportable): keep
         # these aligned with core.settings.DEFAULTS — the pulse fallback
-        # derives row state from them.
+        # derives row state from them. Mirror the FULL key set; a stale
+        # subset here makes /settings POST 400 on any key added to
+        # DEFAULTS after this dict was written (that was the encoder
+        # switcher's "unknown settings keys" bug).
         return {
             "perception.enabled": True,
             "observation.reasoning": True,
@@ -374,6 +377,10 @@ def _settings_defaults():
             "pulse.thresholds.friction": 0.4,
             "adaptation.enabled": False,
             "adaptation.rules": [],
+            "perception.encoder": "tier-0",
+            "perception.custom_patterns": [],
+            "perception.reinforce": True,
+            "perception.reinforce_min_amplification": 0.15,
         }
 
 
@@ -473,6 +480,50 @@ def _pulse_level(value, threshold, state) -> str:
     return "strong" if value >= threshold else "weak"
 
 
+# Momentum knobs — MIRROR of pulse/momentum.py (the child has the plugin
+# root off its sys.path, so it cannot import that module). Keep these three
+# constants + the formula byte-equivalent to pulse/momentum.py.
+_PULSE_MOMENTUM_GAIN = 0.6
+_PULSE_MOMENTUM_BAND = 0.02
+_PULSE_MOMENTUM_DECIMALS = 4
+
+
+def _pulse_momentum(recent_counts: dict, cumulative_counts: dict) -> dict:
+    """pulse.momentum.surge_values (mirror): per-tool rich-get-richer surge
+    from recent vs cumulative activity shares. Pure + deterministic.
+
+    A tool hotter than its long-run baseline is 'surging' (value > 0.5,
+    ranked to the front); cooler is 'cooling' (value < 0.5)."""
+    tools = sorted(set(recent_counts) | set(cumulative_counts))
+
+    def _shares(counts, total):
+        if not total:
+            return {k: 0.0 for k in counts}
+        return {k: counts.get(k, 0) / total for k in counts}
+
+    recent_total = sum(max(0, v) for v in recent_counts.values())
+    cum_total = sum(max(0, v) for v in cumulative_counts.values())
+    recent_share = _shares(recent_counts, recent_total)
+    cum_share = _shares(cumulative_counts, cum_total)
+    surge = {t: recent_share.get(t, 0.0) - cum_share.get(t, 0.0)
+             for t in tools}
+    peak = max((abs(surge[t]) for t in tools), default=0.0) or 1.0
+
+    out: dict[str, dict] = {}
+    for t in tools:
+        s = surge[t]
+        frac = abs(s) / peak
+        momentum = (1.0 if s > 0.0 else -1.0) * (frac ** _PULSE_MOMENTUM_GAIN) \
+            if s else 0.0
+        value = min(1.0, max(0.0, 0.5 + 0.5 * momentum))
+        state = "surging" if s >= _PULSE_MOMENTUM_BAND else \
+            "cooling" if s <= -_PULSE_MOMENTUM_BAND else "steady"
+        d = _PULSE_MOMENTUM_DECIMALS
+        out[t] = {"momentum": round(momentum, d), "surge": round(s, d),
+                  "value": round(value, d), "state": state}
+    return out
+
+
 def _unpack_pulse_vector(blob) -> list[float] | None:
     """float32 LE BLOB -> list[float] (the sketch convention shared with
     events.sketch and the pulse writer's pack_vector); malformed -> None."""
@@ -548,6 +599,15 @@ def _pulse_shape() -> dict:
         else _PULSE_DEFAULT_MIN_LABELED
 
     rows = []
+    # Momentum (Tier-0 positive feedback), mirrored inline: recent capsule
+    # feed vs cumulative call count per tool. See _pulse_momentum.
+    tool_names = [tr[1] for tr in tool_rows]
+    recent_counts = {
+        t: sum(1 for c in (capsules.get(t) or []) if c.get("vector") is not None)
+        for t in tool_names
+    }
+    cum_counts = {tr[1]: int(tr[5]) for tr in tool_rows}
+    momentum_map = _pulse_momentum(recent_counts, cum_counts)
     for (tool_id, tool, first_seen, last_seen, started, completed,
          errors) in tool_rows:
         bank = banks.get(tool, {"good": [], "friction": [],
@@ -609,6 +669,9 @@ def _pulse_shape() -> dict:
             "goal": goal_cell,
             "good": good_cell,
             "friction": friction_cell,
+            "momentum": momentum_map.get(tool, {
+                "momentum": 0.0, "surge": 0.0, "value": 0.5,
+                "state": "steady"}),
         })
     shape["rows"] = rows
     shape["available"] = True
@@ -1119,6 +1182,35 @@ async def update_settings(request: Request):
         "persisted": persisted,
         "ephemeral": not persisted,
     }
+
+
+@router.get("/engine-status")
+async def engine_status():
+    """Read-only Tier-1 readiness for the dashboard encoder switcher.
+
+    Reports the persisted ``perception.encoder`` and whether the Tier-1 ONNX
+    model artifacts are installed locally (a hash-gated ``check_model`` probe,
+    no worker spawn). Never a 500: any import/probe fault degrades to
+    ``onnx_model: 'unavailable'`` with a one-line detail, so a missing optional
+    path can't take the whole dashboard down."""
+    cur = _settings_current()
+    out = {
+        "encoder": str(cur.get("perception.encoder", "tier-0")),
+        "onnx_model": "unknown",
+        "onnx_detail": None,
+    }
+    try:
+        try:
+            from ..perception import worker_client as _wc
+        except Exception:  # isolated child / top-level repo
+            from perception import worker_client as _wc  # type: ignore
+        status, errors = _wc.check_model()
+        out["onnx_model"] = status
+        out["onnx_detail"] = "; ".join(errors) if errors else None
+    except Exception as exc:
+        out["onnx_model"] = "unavailable"
+        out["onnx_detail"] = str(exc)
+    return out
 
 
 @router.post("/reset")

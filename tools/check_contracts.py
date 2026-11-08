@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 PINNED_ROUTES = {"/metrics", "/heatmap", "/recent"}          # C1 live
 PLANNED_ROUTES = {"/pulse", "/portrait", "/drift", "/context",
-                  "/settings", "/reset"}                     # C1 planned (OK to be absent)
+                  "/settings", "/reset", "/engine-status"}   # C1 planned (OK to be absent)
 PINNED_EVENTS = {"tick", "pulse", "settings"}                # C2
 OWNERSHIP = {                                                 # C7
     "lane-a": {"core/", "storage/", "__init__.py", "metrics.py",

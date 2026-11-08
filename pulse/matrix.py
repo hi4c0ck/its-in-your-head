@@ -18,6 +18,7 @@ Unlabeled tools report ``state='learning'`` until min_labeled examples.
 from __future__ import annotations
 
 from .prototypes import cosine, strongest_similarity
+from .momentum import surge_values, empty_momentum
 
 # C4 thresholds (pulse.thresholds.*); S1 settings defaults.
 DEFAULT_THRESHOLDS = {"goal": 0.8, "good": 0.6, "friction": 0.4}
@@ -117,6 +118,21 @@ def build_matrix(registry, prototypes, session_state=None,
             "good": good_cell,
             "friction": friction_cell,
         })
+
+    # Momentum (Tier-0 positive feedback): a rich-get-richer surge signal
+    # from recent vs cumulative activity, so a tool that is hotter than its
+    # long-run baseline pops to the front. Pure + deterministic (no clock).
+    recent_counts = {
+        tool: sum(1 for c in (capsules_by_tool.get(tool) or [])
+                  if isinstance(c, dict) and c.get("vector") is not None)
+        for tool in [r["tool_name"] for r in rows]
+    }
+    cum_counts = {r["tool_name"]: int(r["live"]["calls_completed"])
+                  for r in rows}
+    momentum = surge_values(recent_counts, cum_counts)
+    for row in rows:
+        row["momentum"] = momentum.get(row["tool_name"], empty_momentum())
+
     return rows
 
 

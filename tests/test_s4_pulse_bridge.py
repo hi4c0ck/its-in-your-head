@@ -201,7 +201,12 @@ def test_separate_processes_pulse_bridge(tmp_path):
     assert set(rows) == {"terminal", "read_file"}
     for row in body["rows"]:
         assert {"tool_name", "tool_id", "state", "labeled", "live",
-                "goal", "good", "friction"} == set(row)
+                "goal", "good", "friction", "momentum"} == set(row)
+        # Momentum (Tier-0 positive feedback) crossed the process bridge as
+        # a well-formed cell: a known state + a value floored into [0, 1].
+        m = row["momentum"]
+        assert m["state"] in ("surging", "steady", "cooling")
+        assert 0.0 <= m["value"] <= 1.0
     # LIVE counters crossed the process boundary.
     assert rows["terminal"]["live"]["errors"] == 1
     assert rows["read_file"]["live"]["calls_completed"] == 1

@@ -11,7 +11,7 @@
 // - layout budget 96px: 22 header/tabs, 48 main, 18 ticker, 8 separators.
 //   Overflow goes to the settings popover, never in-pane scrolling.
 import { useState, useRef, useEffect } from 'react'
-import { host, useQuery, queryClient } from '@hermes/plugin-sdk'
+import { host, useQuery, queryClient, Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const POLL_MS = 5000
@@ -311,12 +311,32 @@ function pulseLiveValue(row) {
   if (total <= 0) return null
   return 1 - 1 / (1 + total)
 }
+// Momentum (Tier-0 positive feedback): the per-tool surge value the server
+// attaches to each row (0.5 = steady, >0.5 surging, <0.5 cooling). Read
+// defensively so a legacy /pulse payload without momentum degrades to the
+// neutral 0.5 instead of breaking the sort.
+function pulseMomentumValue(row) {
+  const m = row && row.momentum && typeof row.momentum.value === 'number'
+    ? row.momentum.value : null
+  return m === null ? 0.5 : m
+}
+// A one-glyph surge marker for the LIVE cell / row label: text-only, no
+// color (the theme carries no dedicated token; the accent cell already
+// glows). Surging / cooling get a glyph; steady or a legacy payload (no
+// momentum) yields '' so idle rows stay visually quiet.
+function pulseMomentumGlyph(row) {
+  const s = row && row.momentum ? row.momentum.state : null
+  if (s === 'surging') return '\u25B2'   // ▲ surging
+  if (s === 'cooling') return '\u25BC'    // ▼ cooling
+  return ''
+}
 // Row selection is deterministic and view-side only: the server returns
 // rows in first_seen order; the pane shows the most relevant `cap` of them.
-// Ranking: (1) live activity total descending — rows the response records
-// activity for rank ahead of rows with none; (2) strongest semantic cell
-// (goal/good/friction max 0..1) descending; (3) original server order
-// (stable). No hardcoded tool list, no randomness.
+// Ranking: (1) momentum descending — a tool hotter than its long-run
+// baseline (a surge) pops to the front, which is the point; (2) live
+// activity total descending; (3) strongest semantic cell (goal/good/
+// friction max 0..1) descending; (4) original server order (stable). No
+// hardcoded tool list, no randomness.
 function selectPulseRows(rows, cap) {
   if (!Array.isArray(rows) || cap <= 0) return []
   const ranked = rows.map((row, i) => {
@@ -327,9 +347,9 @@ function selectPulseRows(rows, cap) {
       const v = pulseCellValue(row ? row[c] : null)
       if (v !== null && v > sem) sem = v
     })
-    return { row: row, i: i, liveT: liveT, sem: sem }
+    return { row: row, i: i, liveT: liveT, sem: sem, mom: pulseMomentumValue(row) }
   })
-  ranked.sort((a, b) => (b.liveT - a.liveT) || (b.sem - a.sem) || (a.i - b.i))
+  ranked.sort((a, b) => (b.mom - a.mom) || (b.liveT - a.liveT) || (b.sem - a.sem) || (a.i - b.i))
   return ranked.slice(0, cap).map((r) => r.row)
 }
 // PULSE-END
@@ -406,16 +426,17 @@ function PulseMatrix({ pulse }) {
     // muted — no new colors.
     const liveV = pulseLiveValue(row)
     const isLive = liveV !== null
+    const momGlyph = pulseMomentumGlyph(row)
     cells.push(jsx('div', {
       key: 'lbl-' + ri,
-      title: tool,
+      title: (momGlyph ? momGlyph + ' ' : '') + tool,
       className: 'flex items-center overflow-hidden',
       style: {
         fontSize: 9, lineHeight: '14px', minWidth: 0,
         fontFamily: 'var(--ui-font-mono, monospace)',
         color: isLive ? V_SEC : V_QUAT,
       },
-      children: tool.slice(0, 16),
+      children: (momGlyph ? momGlyph + ' ' : '') + tool.slice(0, momGlyph ? 14 : 16),
     }))
     columns.forEach((col, ci) => {
       const v = col === 'live' ? liveV : pulseCellValue(row ? row[col] : null)
@@ -489,7 +510,9 @@ function IoLine({ ev }) {
   })
 }
 
-// C4 settings keys, listed read-only until the /settings POST route lands.
+// C4 settings keys shown read-only in the settings popover (they drive the
+// model, not the view). The one exception — the embedding encoder — is the
+// writable EncoderSwitcher above the list (POST /settings).
 const SETTING_KEYS = [
   'perception.enabled',
   'observation.reasoning',
@@ -510,6 +533,23 @@ const V_SEC = 'var(--ui-text-secondary)'
 const V_QUAT = 'var(--ui-text-quaternary)'
 const V_STROKE = 'var(--ui-stroke-secondary)'
 const V_DANGER = 'var(--dt-destructive, var(--ui-accent))'
+
+// Encoder switcher (the one writable C4 key the user drives live). Mirrors the
+// backend's BACKENDS set (perception.encoder: tier-0 | tier-1-onnx). Names are
+// user-facing ("Sketch" / "MiniLM"), never the raw tier ids. Pure + marker-safe
+// (no react) so the mjs source-shape suites can pin the labels and wiring.
+const ENCODER_OPTIONS = [
+  { id: 'tier-0', label: 'Sketch', hint: 'fast · offline · no model' },
+  { id: 'tier-1-onnx', label: 'MiniLM', hint: 'semantic ONNX model' },
+]
+function encoderDisplayName(id) {
+  const o = ENCODER_OPTIONS.find((x) => x.id === id)
+  return o ? o.label : (id || '—')
+}
+function encoderHint(id) {
+  const o = ENCODER_OPTIONS.find((x) => x.id === id)
+  return o ? o.hint : ''
+}
 
 function clamp01(v) {
   return typeof v === 'number' && Number.isFinite(v)
@@ -1507,6 +1547,71 @@ function IconButton({ title, label, onClick, disabled }) {
   })
 }
 
+// The one writable C4 key the user drives from the dashboard: the embedding
+// encoder (perception.encoder). A drop-down of the two named backends that
+// persists via POST /settings (ctx config API) and re-resolves the backend
+// live (no restart) through the engine's live-settings provider. Tier-1
+// readiness is surfaced read-only from /engine-status so a flip to MiniLM
+// without the model can't silently run Tier-0.
+function EncoderSwitcher({ settings, rest, onApplied }) {
+  const raw = settingValue(settings, 'perception.encoder')
+  const current = ENCODER_OPTIONS.some((o) => o.id === raw) ? raw : 'tier-0'
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState('')
+  const [st, setSt] = useState(null)
+  useEffect(() => {
+    let alive = true
+    rest('/engine-status')
+      .then((r) => { if (alive) setSt(r) })
+      .catch(() => { if (alive) setSt(null) })
+    return () => { alive = false }
+  }, [rest])
+  const apply = (id) => {
+    if (busy || id === current) return
+    setBusy(true)
+    setNote('applying ' + encoderDisplayName(id) + '…')
+    rest('/settings', { method: 'POST', body: { settings: { 'perception.encoder': id } }, timeoutMs: 20000 })
+      .then((res) => {
+        setNote(res && res.persisted === false
+          ? encoderDisplayName(id) + ' — session only (not persisted)'
+          : encoderDisplayName(id) + ' applied')
+        if (onApplied) onApplied()
+      })
+      .catch((e) => { setNote('apply failed' + (e && e.message ? ': ' + e.message : '')) })
+      .finally(() => setBusy(false))
+  }
+  const tier1 = st && st.onnx_model
+  let status = encoderHint(current)
+  if (st) {
+    status += ' · Tier 1 ' + (tier1 === 'verified' ? 'model ready' : tier1 === 'unavailable' ? 'status n/a' : tier1)
+  }
+  return jsxs('div', {
+    style: { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 200 },
+    children: [
+      jsx('span', {
+        style: { fontSize: 10, letterSpacing: 0.4, textTransform: 'uppercase', color: V_QUAT },
+        children: busy ? 'Embedding encoder · applying…' : 'Embedding encoder',
+      }),
+      jsx(Select, {
+        value: current,
+        onValueChange: apply,
+        disabled: busy,
+        children: [
+          jsx(SelectTrigger, { style: { minWidth: 180 }, children: jsx(SelectValue, { placeholder: 'Encoder' }) }),
+          jsx(SelectContent, {
+            children: ENCODER_OPTIONS.map((o) => jsx(SelectItem, { value: o.id, children: o.label }, o.id)),
+          }),
+        ],
+      }),
+      jsx('span', { style: { fontSize: 9, color: V_QUAT }, children: status }),
+      note ? jsx('span', {
+        style: { fontSize: 9, color: note.indexOf('failed') >= 0 ? V_DANGER : V_QUAT },
+        children: note,
+      }) : null,
+    ],
+  })
+}
+
 function Strip({ source, rest }) {
   const [tab, setTab] = useState('pulse')
   const [panel, setPanel] = useState(null) // null | 'settings' | 'help'
@@ -1671,7 +1776,7 @@ function Strip({ source, rest }) {
         children: [
           jsx('span', {
             style: { fontWeight: 500, letterSpacing: 1 },
-            children: panel === 'settings' ? 'SETTINGS · READ-ONLY' : 'ABOUT THIS STRIP',
+            children: panel === 'settings' ? 'SETTINGS' : 'ABOUT THIS STRIP',
           }),
           jsx('button', {
             type: 'button', title: 'Close', onClick: () => setPanel(null),
@@ -1687,17 +1792,32 @@ function Strip({ source, rest }) {
       panel === 'settings'
         ? jsxs('div', {
             style: {
-              display: 'flex', flexWrap: 'wrap', gap: '2px 12px',
-              fontFamily: 'var(--ui-font-mono, monospace)',
-              color: 'var(--ui-text-quaternary)',
+              display: 'flex', flexDirection: 'column', gap: 8,
             },
-            children: SETTING_KEYS.map((k) => jsxs('span', {
-              key: k,
-              children: [
-                jsx('span', { style: { color: 'var(--ui-text-secondary)' }, children: k }),
-                ' = ' + settingValue(settingsQ.data, k),
-              ],
-            })),
+            children: [
+              // The one writable key: switch the embedding encoder (Sketch ↔ MiniLM).
+              // Persisted via POST /settings and re-resolved live (no restart).
+              jsx(EncoderSwitcher, {
+                settings: settingsQ.data,
+                rest: rest,
+                onApplied: () => { if (settingsQ) settingsQ.refetch() },
+              }),
+              // Remaining C4 keys stay read-only (they drive the model, not the view).
+              jsxs('div', {
+                style: {
+                  display: 'flex', flexWrap: 'wrap', gap: '2px 12px',
+                  fontFamily: 'var(--ui-font-mono, monospace)',
+                  color: 'var(--ui-text-quaternary)',
+                },
+                children: SETTING_KEYS.map((k) => jsxs('span', {
+                  key: k,
+                  children: [
+                    jsx('span', { style: { color: 'var(--ui-text-secondary)' }, children: k }),
+                    ' = ' + settingValue(settingsQ.data, k),
+                  ],
+                })),
+              }),
+            ],
           })
         : jsx('div', {
             style: { color: 'var(--ui-text-quaternary)' },
@@ -1769,7 +1889,7 @@ function Strip({ source, rest }) {
             onClick: () => setPanel(panel === 'help' ? null : 'help'),
           }),
           jsx(IconButton, {
-            title: 'Settings (read-only until /settings POST lands)',
+            title: 'Settings — switch the embedding encoder (Sketch / MiniLM)',
             label: jsx(IyhIcon, { prefix: IYH_IC, name: 'gear', size: 13 }),
             onClick: () => setPanel(panel === 'settings' ? null : 'settings'),
           }),

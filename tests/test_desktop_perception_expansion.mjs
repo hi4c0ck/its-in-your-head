@@ -72,13 +72,16 @@ ok(/'PERCEPTION · no data yet'/.test(ep), 'neutral no-data text kept')
 ok(/opacity:\s*percOn \? 1 : 0\.55/.test(ep), 'absent section rendered faint (opacity 0.55), unchanged')
 ok(/percOn\s*&&\s*patterns\.length\s*>\s*0/.test(ep), 'per-pattern grid only when available AND entries exist')
 
-// (h) 96px strip output byte-identical to b248426 (pre-change): the
-// Strip region's sha256 must equal the snapshot taken before E2.
+// (h) 96px strip output byte-identity snapshot. Re-baselined at the
+// encoder-switcher change: the Strip region now intentionally carries the
+// settings-popover EncoderSwitcher (Sketch <-> MiniLM). The guard still pins
+// the EXACT Strip source so any unintended strip edit is caught — update this
+// hash ONLY when the strip source is intentionally changed.
 const strip = src.slice(src.indexOf('function Strip'), src.indexOf('export default {'))
 assert.ok(strip.length > 0, 'Strip region found')
-const STRIP_SHA_B248426 = 'c492d5e66d706e67b40c54d00587d1bb671f1ce9a6c937c179b8636e7beb95af'
-assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_B248426,
-  '96px strip source byte-identical to b248426 (snapshot)')
+const STRIP_SHA_ENCODER_SWITCHER = '953a63b61b047b2490e8c64c78b19fd5c22a8ac0c1144e703f5567732f36d942'
+assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_ENCODER_SWITCHER,
+  '96px strip source byte-identical to the encoder-switcher baseline')
 ok(true, 'strip byte-identity snapshot pinned')
 
 // locked invariants (P3 subset, re-asserted where E2 touches the block)

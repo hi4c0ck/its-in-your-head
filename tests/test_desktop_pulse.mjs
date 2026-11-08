@@ -12,8 +12,10 @@ const dir = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(dir, '..', 'desktop', 'plugin.js'), 'utf8')
 const block = src.slice(src.indexOf('// PULSE-START'), src.indexOf('// PULSE-END'))
 assert.ok(block.length > 0, 'PULSE markers found in plugin.js')
-const { pulseCellValue, pulseColumns, pulseLiveValue, selectPulseRows } =
-  new Function(block + '\n;return { pulseCellValue, pulseColumns, pulseLiveValue, selectPulseRows };')()
+const { pulseCellValue, pulseColumns, pulseLiveValue, pulseMomentumValue,
+        pulseMomentumGlyph, selectPulseRows } =
+  new Function(block +
+    '\n;return { pulseCellValue, pulseColumns, pulseLiveValue, pulseMomentumValue, pulseMomentumGlyph, selectPulseRows };')()
 
 let n = 0
 const eq = (actual, expected, label) => {
@@ -73,7 +75,7 @@ assert.ok(src.includes("gridTemplateColumns: 'minmax(56px, 34%) repeat("),
 assert.ok(src.includes("gridTemplateRows: 'repeat(' + PULSE_MAX_ROWS + ', 1fr)'"),
   'row count is a fixed track structure (no pitch arithmetic)')
 assert.ok(src.includes('selectPulseRows(rows, PULSE_MAX_ROWS)'),
-  'row selection is deterministic (live activity, then semantic, then server order)')
+  'row selection is deterministic (momentum surge, then live activity, then semantic, then server order)')
 assert.ok(src.includes("col === 'friction' ? V_DANGER : V_ACCENT"),
   'friction cells take the danger token, others the accent (theme vars only)')
 assert.ok(src.includes('(0.12 + 0.88 * v)'), 'heat alpha encoding preserved')
@@ -85,8 +87,8 @@ assert.ok(!src.includes('drawPulse'), 'drawPulse removed')
 assert.ok(!src.includes('resolveColors'), 'resolveColors removed')
 assert.equal((src.match(/new ResizeObserver/g) || []).length, 1,
   'exactly ONE ResizeObserver: frame-orientation read on the root div (narrow dock); drawing surfaces stay fixed-size')
-assert.equal((src.match(/useEffect\(/g) || []).length, 1,
-  'single useEffect CALL: root orientation detection — no canvas re-draw effects')
+assert.equal((src.match(/useEffect\(/g) || []).length, 2,
+  'exactly two mount-once effects: the Strip root orientation observer + the EncoderSwitcher engine-status poll — no per-frame / no-interval redraw loops')
 assert.ok(src.includes('pulse.columns'), 'server columns still consumed (via pulseColumns)')
 assert.ok(src.includes('tool_name'), 'pulse rows stay dynamic (tool_name)')
 assert.ok(src.includes('NARROW_W'), 'narrow-dock threshold defined (sidebar frame)')
@@ -139,4 +141,28 @@ const again = selectPulseRows(stable, 2)
 eq(again.map((r) => r.tool_name),
   selectPulseRows(stable, 2).map((r) => r.tool_name),
   'repeated calls are identical (deterministic)')
+
+// 5b. Momentum (Tier-0 positive feedback): surge is the PRIMARY rank key.
+eq(pulseMomentumValue({}), 0.5, 'no momentum cell -> neutral 0.5')
+eq(pulseMomentumValue(null), 0.5, 'null row -> neutral 0.5')
+eq(pulseMomentumValue({ momentum: { value: 0.8 } }), 0.8, 'reads momentum.value')
+eq(pulseMomentumGlyph({ momentum: { state: 'surging' } }), '\u25B2', 'surging -> ▲')
+eq(pulseMomentumGlyph({ momentum: { state: 'cooling' } }), '\u25BC', 'cooling -> ▼')
+eq(pulseMomentumGlyph({ momentum: { state: 'steady' } }), '', 'steady -> empty')
+eq(pulseMomentumGlyph({}), '', 'legacy row (no momentum) -> empty')
+const surgeJump = [
+  { tool_name: 'idle_heavy', live: { calls_started: 10, calls_completed: 20 } },
+  { tool_name: 'hot_new', momentum: { value: 1.0, state: 'surging' } },
+]
+eq(selectPulseRows(surgeJump, 2).map((r) => r.tool_name),
+  ['hot_new', 'idle_heavy'],
+  'a surging tool (momentum 1.0) pops ahead of a higher-live idle tool')
+const momOrder = [
+  { tool_name: 'cooling', momentum: { value: 0.2, state: 'cooling' } },
+  { tool_name: 'steady', momentum: { value: 0.5, state: 'steady' } },
+  { tool_name: 'surging', momentum: { value: 0.9, state: 'surging' } },
+]
+eq(selectPulseRows(momOrder, 3).map((r) => r.tool_name),
+  ['surging', 'steady', 'cooling'],
+  'momentum descending: surging > steady > cooling')
 console.log('PASS pulse: ' + n + ' assertions')
