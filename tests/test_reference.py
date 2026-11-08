@@ -115,3 +115,34 @@ def test_seeded_only_reference_has_zero_live_count():
     ref = RollingReference(seed_bank={"scope": [_n(0, 0, 1)]})
     assert ref.windows["scope"].live_count == 0
     assert ref.windows["scope"].seeded is True
+
+
+# --- L-SCORE: rolling reference actually drives the observed track -------- #
+
+def test_score_anchors_rolls_positives_keeps_seed_negatives():
+    seed = {"directness": {"positive": [_n(1, 0, 0)], "negative": [_n(0, 1, 0)]}}
+    ref = RollingReference(seed_bank={"directness": [_n(1, 0, 0)]})
+    ref.reassemble("directness", _n(0.9, 0.1, 0), ts=1.0)
+    anchors = ref.score_anchors(seed)
+    # positive = the rolling window (seed + the live reassembly); negative = seed bank
+    assert anchors["directness"]["positive"] == ref.windows["directness"].vectors()
+    assert anchors["directness"]["negative"] == seed["directness"]["negative"]
+
+
+def test_update_observed_from_text_scores_against_rolling_reference():
+    from perception.portrait import Portrait
+
+    class Backend:
+        model_version = "sketch"
+
+        def encode(self, texts):
+            return [[0.8, 0.2, 0.0]] * len(texts)
+
+    seed = {"directness": {"positive": [_n(1, 0, 0)], "negative": [_n(0, 1, 0)]}}
+    ref = RollingReference(seed_bank={"directness": [_n(1, 0, 0)]})
+    ref.reassemble("directness", _n(0.9, 0.1, 0), ts=1.0)
+    p = Portrait()
+    p.update_observed_from_text("x", Backend(), anchor_vectors=seed, reference=ref)
+    # The prompt vector aligns with the (rolled) directness reference -> the
+    # observed track moves off the neutral 0.5 prior on that dim.
+    assert p.normalized()["values"]["directness"] != 0.5

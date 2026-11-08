@@ -147,10 +147,19 @@ class Portrait:
         self._evidence.append({d: float(targets[d]) for d in DIMENSIONS if d in targets})
 
     def update_observed_from_text(self, text: str, backend, anchor_vectors=None,
-                                  calibration=None) -> None:
-        """Encode one prompt via S2 and fold its resemblance in. Text is not stored."""
-        from .resemblance import resemblance_for_text
-        scores = resemblance_for_text(text, backend, anchor_vectors=anchor_vectors)
+                                  reference=None, calibration=None) -> None:
+        """Encode one prompt via S2 and fold its resemblance in. Text is not stored.
+
+        With ``reference`` (a ``RollingReference``) the prompt is scored against
+        the rolling per-dimension reference (seed bank + live reassembled window)
+        instead of the frozen bank; without it the frozen-bank path is unchanged."""
+        if reference is not None:
+            from .resemblance import resemblance_all
+            (vec,) = backend.encode([text])
+            scores = resemblance_all(vec, reference.score_anchors(anchor_vectors))
+        else:
+            from .resemblance import resemblance_for_text
+            scores = resemblance_for_text(text, backend, anchor_vectors=anchor_vectors)
         self.update_observed(scores)
 
     def update_interpreted(self, agent_values: dict) -> None:

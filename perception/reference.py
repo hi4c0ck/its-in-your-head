@@ -130,6 +130,21 @@ class RollingReference:
         window.add(vec, ts)
 
     # -- scoring reference ------------------------------------------------ #
+    def score_anchors(self, seed_anchor_vectors: dict | None = None) -> dict:
+        """Build the ``{dim: {"positive": [...], "negative": [...]}}`` dict to
+        feed ``resemblance_all``. The POSITIVE set is the rolling window (seeded
+        from the bank on cold start, so it is never empty, and it reassembles
+        with live usage); the NEGATIVE set stays the seed bank's fixed
+        "what this dim is not" anchors. ``seed_anchor_vectors`` is the bank
+        shape from ``get_anchor_vectors`` (only its negatives are used)."""
+        seed = seed_anchor_vectors or {}
+        out: dict = {}
+        for dim in self.dims:
+            positives = self.windows[dim].vectors()
+            negative = list((seed.get(dim) or {}).get("negative") or [])
+            out[dim] = {"positive": positives, "negative": negative}
+        return out
+
     def reference_for(self, dim: str, min_count: int | None = None) -> tuple:
         """(vectors, warmed): the window's vectors + whether it has reassembled
         past the warm-up floor. Under the floor, a scorer blends its seed
