@@ -117,6 +117,7 @@ def test_portrait_view_perception_empty_shape():
         "patterns": [],
         "dim_signals": {d: {"prompt": None, "agent": None}
                         for d in dims},
+        "ood_drift": 0.0, "reference_freshness": None,
         "perception_available": False}
 
 
@@ -131,7 +132,8 @@ def test_portrait_view_perception_filled_shape():
                     "reasoning_text": "I am giving the shortest direct "
                     "answer I can", "reasoning_chars": 40}])
     perc = eng.portrait_view()["perception"]
-    assert set(perc) == {"patterns", "dim_signals", "perception_available"}
+    assert set(perc) == {"patterns", "dim_signals", "perception_available",
+                         "ood_drift", "reference_freshness"}
     assert perc["perception_available"] is True
     for p in perc["patterns"]:
         assert set(p) == {"name", "prompt_affinity", "agent_affinity",

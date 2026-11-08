@@ -101,6 +101,12 @@ class Engine:
         self._interpreted_last_confidence = None
         self._anchor_vectors = None
         self._anchor_backend = None
+        # Rolling reference (dynamic reassembly): lazily created + seeded from
+        # the bank on the first backend-available turn, then reassembled by
+        # live observed turns. Never created at register time. ood_drift is
+        # the last turn's drift from the reference (0 = in-territory).
+        self.reference = None
+        self._ood_drift = 0.0
         # Pattern-perception state (third portrait view):
         # prompt vectors cached per turn for (prompt, reaction) pairing,
         # top-pattern tallies + last-evidence timestamps for confidence.
@@ -240,6 +246,22 @@ class Engine:
         self._anchor_vectors = vectors
         self._anchor_backend = backend
         return vectors
+
+    def _ensure_reference(self, backend, anchor_vectors):
+        """Lazily create + seed the rolling reference from the bank's per-dim
+        positive vectors (R4), then reuse it. Seeding needs a backend + the
+        anchor vectors, so it happens on the first available turn — never at
+        register time. ``backend`` is retained for a future encoder switch."""
+        if self.reference is None:
+            try:
+                from .perception.reference import RollingReference
+            except ImportError:
+                from perception.reference import RollingReference
+            seed = {dim: list(
+                (anchor_vectors.get(dim) or {}).get("positive") or [])
+                for dim in _dims()}
+            self.reference = RollingReference(seed_bank=seed)
+        return self.reference
 
     # -- pattern perception (third view, worker side only) ------------------ #
     def _cache_prompt_vector(self, turn_id, vector) -> None:
@@ -654,8 +676,18 @@ class Engine:
                     # Single encode, shared with patterns below (no
                     # double-encoding of the same prompt).
                     anchor_vectors = self._anchor_vectors_for(backend)
-                    self.portrait.update_observed(
-                        resemblance_all(prompt_vector, anchor_vectors))
+                    scores = resemblance_all(prompt_vector, anchor_vectors)
+                    self.portrait.update_observed(scores)
+                    # Dynamic reassembly: measure this turn's OOD drift from
+                    # the rolling reference, then fold its prompt vector into
+                    # the dims it aligns with (S_d >= 0.3 = a positive
+                    # instance) so the reference reassembles with usage.
+                    ref = self._ensure_reference(backend, anchor_vectors)
+                    self._ood_drift = ref.ood_drift_for(prompt_vector)
+                    ts_re = float(ev.get("ts") or time.time())
+                    for dim, s in scores.items():
+                        if (s.get("S") or 0.0) >= 0.3:
+                            ref.reassemble(dim, prompt_vector, ts_re)
                 except Exception:
                     self.portrait.update_observed_from_text(text, backend)
             else:
@@ -838,12 +870,15 @@ class Engine:
         never invented.
         """
         third = full.get("patterns")
+        now = time.time()
+        ood = self._ood_drift
+        ref_fresh = self.reference.freshness(now) if self.reference else None
         if third is None or not full.get("perception_available"):
             return {"patterns": [],
                     "dim_signals": {d: {"prompt": None, "agent": None}
                                     for d in dims},
+                    "ood_drift": ood, "reference_freshness": ref_fresh,
                     "perception_available": False}
-        now = time.time()
         patterns = []
         for entry in third:
             name = entry.get("name")
@@ -873,6 +908,7 @@ class Engine:
         }
         return {"patterns": patterns,
                 "dim_signals": dim_signals,
+                "ood_drift": ood, "reference_freshness": ref_fresh,
                 "perception_available": True}
 
     def portrait_view(self) -> dict:

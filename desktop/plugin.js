@@ -1176,6 +1176,17 @@ function ExpandedPortrait({ data, drift }) {
   const percOn = !!(perception && perception.perception_available)
   const patterns = percOn && Array.isArray(perception.patterns) ? perception.patterns : []
   const dimSignals = percOn && perception.dim_signals && typeof perception.dim_signals === 'object' ? perception.dim_signals : {}
+  // L-DISPLAY: the rolling-reference signal (OOD drift + freshness) surfaces
+  // in its own row. ood_drift: 0 = in territory, 1 = out of scope; freshness
+  // shows how many dims the reference has reassembled from live use + the
+  // newest reassembly age. Absent values render '—', never fabricated.
+  const ood = perception && typeof perception.ood_drift === 'number' ? perception.ood_drift : null
+  const refFresh = perception && perception.reference_freshness && typeof perception.reference_freshness === 'object' ? perception.reference_freshness : null
+  const refList = refFresh ? Object.keys(refFresh).map((d) => refFresh[d]).filter(Boolean) : []
+  const refLive = refList.reduce((n, f) => n + ((f && typeof f.live_count === 'number') ? f.live_count : 0), 0)
+  const refLiveDims = refList.filter((f) => f && typeof f.live_count === 'number' && f.live_count > 0).length
+  const refAges = refList.filter((f) => f && f.live_count > 0 && typeof f.age === 'number').map((f) => f.age)
+  const refNewest = refAges.length ? Math.min.apply(null, refAges) : null
   let strongest = null
   for (const p of patterns) {
     if (!p || typeof p !== 'object') continue
@@ -1307,6 +1318,18 @@ function ExpandedPortrait({ data, drift }) {
           ],
         })
       }) : []),
+      // L-DISPLAY: the rolling-reference signal row (OOD drift + freshness).
+      // Shown whenever the engine has computed ood_drift or seeded the
+      // reference; absent values render '—' (never fabricated).
+      ...(ood !== null || refFresh ? [jsxs('div', {
+        className: 'flex',
+        style: { gap: 8, padding: '2px 0', color: V_ACCENT, letterSpacing: 1 },
+        children: [
+          jsx('span', { style: { flex: '0 0 140px', color: V_SEC }, title: 'out-of-territory drift + rolling-reference freshness', children: 'OOD · REFERENCE' }),
+          jsx('span', { style: { flex: 1, textAlign: 'right' }, title: 'drift from the rolling reference (0 = in territory, 1 = out of scope)', children: 'OOD ' + num(ood) }),
+          jsx('span', { style: { flex: 1, textAlign: 'right' }, title: 'rolling reference: dims reassembled from live use + newest reassembly age', children: refFresh ? refLiveDims + 'd · ' + refLive + ' live' + (refNewest !== null ? ' · ' + Math.round(refNewest) + 's' : '') : '—' }),
+        ],
+      })] : []),
     ],
   })
   return jsxs('div', {

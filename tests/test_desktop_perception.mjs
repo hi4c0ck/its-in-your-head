@@ -66,4 +66,13 @@ ok(count(src, /buildGlyphAt\(\{/g) === 1, 'fixed 160px expanded glyph call intac
 ok(!/Math\.random/.test(ep), 'Perception render is deterministic (no Math.random in ExpandedPortrait)')
 ok(!/#[0-9a-fA-F]{3,8}\b/.test(ep.replace(/var\(--[^)]+\)/g, '')), 'Perception section has no hardcoded hex colors')
 
+// 5) L-DISPLAY: the rolling-reference signal row (OOD drift + freshness)
+ok(/perception\.ood_drift/.test(ep), 'OOD · REFERENCE row reads perception.ood_drift')
+ok(/perception\.reference_freshness/.test(ep), 'OOD · REFERENCE row reads perception.reference_freshness')
+ok(/'OOD · REFERENCE'/.test(ep), 'OOD · REFERENCE row header rendered')
+ok(/num\(ood\)/.test(ep), 'OOD row renders the ood_drift value')
+ok(/refLiveDims/.test(ep) && /refLive/.test(ep), 'freshness row shows live dims + live count')
+ok(/refNewest/.test(ep), 'freshness row shows newest reassembly age')
+ok(/children: refFresh \?/.test(ep), 'freshness row gates on refFresh (dash fallback when absent)')
+
 console.log('PASS desktop_perception: ' + n + ' assertions')

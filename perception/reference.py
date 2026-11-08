@@ -177,6 +177,21 @@ class RollingReference:
                 best = max(best, _clip01(aff))
         return round(1.0 - best, 4)
 
+    def ood_drift_for(self, vector) -> float:
+        """OOD drift computed directly from a prompt vector: 1 - the best
+        cosine of ``vector`` to ANY of the rolling reference's per-dim window
+        vectors. 0.0 = it sits inside at least one dim's recent territory;
+        near 1.0 = it is out of scope of everything recently observed.
+        Deterministic (no clock)."""
+        from .resemblance import cosine
+        best = 0.0
+        for dim in self.dims:
+            for ref_vec in self.windows[dim].vectors():
+                c = cosine(vector, ref_vec)
+                if c > best:
+                    best = c
+        return round(1.0 - _clip01(best), 4)
+
     # -- derived-state ----------------------------------------------------- #
     def to_state(self) -> dict:
         """Derived-only persisted state (per-dim window); reversible/rollback."""
