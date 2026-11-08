@@ -13,9 +13,9 @@ const src = readFileSync(join(dir, '..', 'desktop', 'plugin.js'), 'utf8')
 const block = src.slice(src.indexOf('// PULSE-START'), src.indexOf('// PULSE-END'))
 assert.ok(block.length > 0, 'PULSE markers found in plugin.js')
 const { pulseCellValue, pulseColumns, pulseLiveValue, pulseMomentumValue,
-        pulseMomentumGlyph, selectPulseRows, pulseBand, buildPulseVerdict } =
+        pulseMomentumGlyph, selectPulseRows, pulseBand, buildPulseVerdict, pulseRecency } =
   new Function(block +
-    '\n;return { pulseCellValue, pulseColumns, pulseLiveValue, pulseMomentumValue, pulseMomentumGlyph, selectPulseRows, pulseBand, buildPulseVerdict };')()
+    '\n;return { pulseCellValue, pulseColumns, pulseLiveValue, pulseMomentumValue, pulseMomentumGlyph, selectPulseRows, pulseBand, buildPulseVerdict, pulseRecency };')()
 
 let n = 0
 const eq = (actual, expected, label) => {
@@ -205,4 +205,23 @@ const skeleton = buildPulseVerdict([
   { tool_name: 'zz', momentum: { state: 'steady' }, good: { level: 'strong' } },
 ])
 assert.ok(!/[0-9]/.test(skeleton.full), 'verdict template is word-only (no digits in the skeleton)')
+
+// 8. pulseRecency (move 4): PULSE = NOW recency read; DRIFT owns the trend.
+// Pure + deterministic: takes nowSec as an argument, never reads the clock.
+const NOW = 1000000
+eq(pulseRecency(null, NOW).word, '', 'null last_seen -> no word (honest absence)')
+eq(pulseRecency(null, NOW).label, 'no activity yet', 'absence label')
+eq(pulseRecency(0, NOW).word, '', 's <= 0 -> absent (never a fabricated recency)')
+eq(pulseRecency(NOW - 30, NOW).word, 'now', '< 60s age -> now')
+eq(pulseRecency(NOW - 300, NOW).word, 'recent', '< 3600s age -> recent')
+eq(pulseRecency(NOW - 7200, NOW).word, 'today', '< 86400s age -> today')
+eq(pulseRecency(NOW - 90000, NOW).word, 'stale', '>= 86400s age -> stale')
+eq(pulseRecency(NOW + 100, NOW).word, 'now', 'future / clock-skew clamps to now')
+eq(JSON.stringify(pulseRecency(NOW - 300, NOW)), JSON.stringify(pulseRecency(NOW - 300, NOW)),
+  'pulseRecency is deterministic (same input -> same output)')
+// Source pins: the recency read is wired into the pane (no canvas, no trend axis).
+assert.ok(src.includes('pulseRecency'), 'recency helper wired')
+assert.ok(src.includes("+ ' \u00b7 '"), 'expanded LIVE cell joins count + recency word')
+assert.ok(src.includes('no activity yet'), 'honest absence for unseen tools')
+console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
 console.log('PASS pulse: ' + n + ' assertions')

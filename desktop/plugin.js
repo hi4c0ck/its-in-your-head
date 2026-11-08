@@ -1346,6 +1346,23 @@ function buildPulseVerdict(shownRows) {
   const clauses = rows.slice(0, 3).map(clauseFor).filter((s) => s !== '')
   return { compact: clauseFor(rows[0]) || '', full: clauses.join('; ') }
 }
+// Recency read (move 4): PULSE is the NOW snapshot; this is the FRESHNESS
+// of that snapshot — how old the row's `last_seen` is at render time. The
+// multi-point history (trend) stays owned by DRIFT (its sparklines in the
+// portrait tab), so PULSE gains NO sparkline / delta here, only this
+// freshness read. Pure + deterministic: `nowSec` is supplied by the caller
+// (the pane passes Date.now()/1000) — this helper never reads the clock.
+// Honest absence: no usable last_seen -> never show a fabricated recency.
+function pulseRecency(lastSeen, nowSec) {
+  const s = Number(lastSeen)
+  if (!Number.isFinite(s) || s <= 0) return { word: '', label: 'no activity yet' }
+  const n = Number(nowSec)
+  const age = Number.isFinite(n) ? Math.max(0, n - s) : 0
+  if (age < 60) return { word: 'now', label: 'just now' }
+  if (age < 3600) return { word: 'recent', label: Math.max(1, Math.round(age / 60)) + 'm ago' }
+  if (age < 86400) return { word: 'today', label: Math.round(age / 3600) + 'h ago' }
+  return { word: 'stale', label: Math.round(age / 86400) + 'd ago' }
+}
 // PULSE-END
 
 // PULSE matrix structure: a real grid of row × column cells (a DOM table,
@@ -1370,6 +1387,10 @@ function PulseMatrix({ pulse }) {
   const columns = pulseColumns(pulse)
   const rows = pulse && Array.isArray(pulse.rows) ? pulse.rows : []
   const shown = selectPulseRows(rows, PULSE_MAX_ROWS)
+  // Recency read (move 4): the freshness timestamp of THIS render — PULSE
+  // is the NOW snapshot; the trend axis stays owned by DRIFT (no new
+  // visible token here, only a hover tooltip on the tool-name label).
+  const nowSec = Date.now() / 1000
   // Live-glow on value change: remember each cell's value from the last
   // poll; a changed value (or null->value on a row that existed) bumps a
   // per-cell counter baked into the key -> the CSS animation re-starts.
@@ -1421,9 +1442,12 @@ function PulseMatrix({ pulse }) {
     const liveV = pulseLiveValue(row)
     const isLive = liveV !== null
     const momGlyph = pulseMomentumGlyph(row)
+    // Recency read (move 4): freshness of this snapshot — tooltip-only on
+    // the tool-name label; the lane stays 100% constrained at rest.
+    const rec = pulseRecency(row && row.live ? row.live.last_seen : null, nowSec)
     cells.push(jsx('div', {
       key: 'lbl-' + ri,
-      title: (momGlyph ? momGlyph + ' ' : '') + tool,
+      title: (momGlyph ? momGlyph + ' ' : '') + tool + ((isLive && rec.word) ? ' · ' + rec.label : ''),
       className: 'flex items-center overflow-hidden',
       style: {
         fontSize: 9, lineHeight: '14px', minWidth: 0,
@@ -1953,6 +1977,11 @@ const WS_WORKSPACE_ID = 'its-in-your-head-workspace'
 function ExpandedPulse({ pulse }) {
   const columns = pulseColumns(pulse)
   const rows = pulse && Array.isArray(pulse.rows) ? pulse.rows : []
+  // Recency read (move 4): the freshness timestamp of THIS render — how old
+  // each row's `last_seen` is. PULSE owns the freshness of the NOW snapshot;
+  // the multi-point trend axis stays owned by DRIFT (the portrait tab's
+  // sparklines) — no trend axis is added to PULSE.
+  const nowSec = Date.now() / 1000
   const cellText = (cell) => {
     if (!cell || typeof cell !== 'object') return '—'
     const state = String(cell.state || 'neutral')
@@ -2009,6 +2038,10 @@ function ExpandedPulse({ pulse }) {
         const totalCalls = row && row.live
           ? [row.live.calls_started, row.live.calls_completed, row.live.errors].reduce((s, x) => s + (typeof x === 'number' ? x : 0), 0)
           : 0
+        // Recency read (move 4): freshness of this snapshot. The LIVE·CALLS
+        // cell joins the count with the recency WORD (visible surface stays
+        // word-only); the precise 'Xm/Xh/Xd ago' label lives in the tooltip.
+        const rec = pulseRecency(row && row.live ? row.live.last_seen : null, nowSec)
         return jsxs('div', {
           key: ri,
           className: 'flex items-center',
@@ -2034,7 +2067,11 @@ function ExpandedPulse({ pulse }) {
                     style: { height: 5, borderRadius: 1, background: c === 'friction' ? V_DANGER : V_ACCENT, opacity: a },
                   }),
                   c === 'live'
-                    ? jsx('span', { style: Object.assign({}, cellBase, { color: isLive ? V_SEC : V_QUAT }), children: isLive ? String(totalCalls) : '—' })
+                    ? jsx('span', {
+                        style: Object.assign({}, cellBase, { color: isLive ? V_SEC : V_QUAT }),
+                        title: isLive ? rec.label : undefined,
+                        children: isLive ? ((rec.word ? totalCalls + ' · ' + rec.word : String(totalCalls))) : '—',
+                      })
                     : jsx('span', { style: Object.assign({}, cellBase, { color: cell && cell.state === 'ready' ? V_SEC : V_QUAT }), children: cellText(cell) }),
                 ],
               })
