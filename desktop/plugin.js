@@ -1314,6 +1314,38 @@ function selectPulseRows(rows, cap) {
   ranked.sort((a, b) => (b.mom - a.mom) || (b.liveT - a.liveT) || (b.sem - a.sem) || (a.i - b.i))
   return ranked.slice(0, cap).map((r) => r.row)
 }
+// Discrete 3-band encoding of a semantic cell from the server's cell.level:
+// 'empty' (neutral / learning / no cell / no level), 'weak', 'strong'. This
+// replaces the continuous alpha ramp on goal/good/friction so a weak fill no
+// longer blurs into an empty one. Theme carries no dedicated token, so the
+// band is expressed as a fixed opacity step on the accent/danger fill.
+function pulseBand(cell) {
+  const lvl = cell && typeof cell === 'object' ? cell.level : null
+  if (lvl === 'strong') return 'strong'
+  if (lvl === 'weak') return 'weak'
+  return 'empty'
+}
+// Deterministic word-only verdict (confidence-gated, no digits, no clock):
+// compact = the top-ranked row's single clause (the one token the 48px lane
+// shows); full = up to 3 clauses for the expanded view. A weak/empty row
+// yields no clause (honest absence, never filler). The template skeleton is
+// digit-free; tool names are labels, not metrics.
+function buildPulseVerdict(shownRows) {
+  const cols = ['goal', 'good', 'friction']
+  const clauseFor = (row) => {
+    const tool = String((row && (row.tool_name || row.tool)) || '').trim()
+    const st = row && row.momentum ? row.momentum.state : null
+    if (st === 'surging') return tool ? tool + ' surging ahead of baseline' : ''
+    if (st === 'cooling') return tool ? tool + ' cooling off baseline' : ''
+    for (const c of cols) {
+      if (pulseBand(row && row[c]) === 'strong') return tool ? tool + ' reads strong on ' + c : ''
+    }
+    return ''
+  }
+  const rows = Array.isArray(shownRows) ? shownRows : []
+  const clauses = rows.slice(0, 3).map(clauseFor).filter((s) => s !== '')
+  return { compact: clauseFor(rows[0]) || '', full: clauses.join('; ') }
+}
 // PULSE-END
 
 // PULSE matrix structure: a real grid of row × column cells (a DOM table,
@@ -1350,7 +1382,7 @@ function PulseMatrix({ pulse }) {
     const now = {}
     shown.forEach((row, ri) => {
       columns.forEach((col) => {
-        const v = col === 'live' ? pulseLiveValue(row) : pulseCellValue(row ? row[col] : null)
+        const v = col === 'live' ? pulseLiveValue(row) : pulseBand(row ? row[col] : null)
         const k = cellKey(ri, col)
         now[k] = v
         if (prevValsRef.current[k] !== undefined && prevValsRef.current[k] !== v) {
@@ -1365,7 +1397,7 @@ function PulseMatrix({ pulse }) {
     shown.forEach((row, ri) => {
       columns.forEach((col) => {
         seed[cellKey(ri, col)] =
-          col === 'live' ? pulseLiveValue(row) : pulseCellValue(row ? row[col] : null)
+          col === 'live' ? pulseLiveValue(row) : pulseBand(row ? row[col] : null)
       })
     })
     prevValsRef.current = seed
@@ -1401,10 +1433,19 @@ function PulseMatrix({ pulse }) {
       children: (momGlyph ? momGlyph + ' ' : '') + tool.slice(0, momGlyph ? 14 : 16),
     }))
     columns.forEach((col, ci) => {
-      const v = col === 'live' ? liveV : pulseCellValue(row ? row[col] : null)
-      const a = v === null || v <= 0
-        ? 0
-        : (0.12 + 0.88 * v) * (isLive ? 1 : 0.45)
+      let a
+      let emptyBand = false
+      if (col === 'live') {
+        const v = liveV
+        a = v === null || v <= 0 ? 0 : (0.12 + 0.88 * v) * (isLive ? 1 : 0.45)
+      } else {
+        // DISCRETE 3-band fill on goal/good/friction, keyed to the server's
+        // cell.level (pulseBand): weak no longer blurs into empty, and only a
+        // BAND transition (not a value nudge) drives the glow below.
+        const band = pulseBand(row ? row[col] : null)
+        emptyBand = band === 'empty'
+        a = ({ empty: 0, weak: 0.3, strong: 0.85 })[band] * (isLive ? 1 : 0.45)
+      }
       // A changed value since the last poll carries the glow counter in
       // the key: the remount re-starts the one-shot keyframe flash.
       const gk = cellKey(ri, col)
@@ -1416,24 +1457,45 @@ function PulseMatrix({ pulse }) {
         style: {
           background: col === 'friction' ? V_DANGER : V_ACCENT,
           opacity: a,
+          // empty semantic cell: opacity 0, but a hairline keeps it visibly
+          // not-a-void and distinct from a weak fill (no new color).
+          border: emptyBand ? '1px solid ' + V_STROKE : 'none',
           borderRadius: 2,
           minHeight: 4,
         },
       }))
     })
   })
-  return jsx('div', {
-    role: 'grid',
-    'aria-label': 'pulse matrix',
-    className: 'flex-1',
-    style: {
-      display: 'grid',
-      minWidth: 0,
-      gridTemplateColumns: 'minmax(56px, 34%) repeat(' + (columns.length - 1) + ', 1fr)',
-      gridTemplateRows: 'repeat(' + PULSE_MAX_ROWS + ', 1fr)',
-      gap: '2px 3px',
-    },
-    children: cells,
+  // Compact verdict token: the top-ranked row's single clause (buildPulseVerdict).
+  // Absent when nothing strong is happening, so the quiet lane keeps its 48px
+  // footprint; the line appears only when there is a surger / cooler / strong read.
+  const verdict = buildPulseVerdict(shown).compact
+  return jsxs('div', {
+    className: 'flex flex-col flex-1',
+    style: { minWidth: 0 },
+    children: [
+      jsx('div', {
+        role: 'grid',
+        'aria-label': 'pulse matrix',
+        className: 'flex-1',
+        style: {
+          display: 'grid',
+          minWidth: 0,
+          gridTemplateColumns: 'minmax(56px, 34%) repeat(' + (columns.length - 1) + ', 1fr)',
+          gridTemplateRows: 'repeat(' + PULSE_MAX_ROWS + ', 1fr)',
+          gap: '2px 3px',
+        },
+        children: cells,
+      }),
+      verdict ? jsx('div', {
+        style: {
+          fontSize: 10, color: V_SEC, height: 10, lineHeight: '10px',
+          fontFamily: 'var(--ui-font-mono, monospace)',
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        },
+        children: verdict,
+      }) : null,
+    ],
   })
 }
 
@@ -1909,6 +1971,8 @@ function ExpandedPulse({ pulse }) {
     fontSize: 8, fontFamily: 'var(--ui-font-mono, monospace)',
     color: V_QUAT, textAlign: 'center', letterSpacing: 0.5,
   }
+  // Verdict row (the full read): deterministic word-only, absent when quiet.
+  const verdict = buildPulseVerdict(selectPulseRows(rows, PULSE_MAX_ROWS)).full
   return jsxs('div', {
     className: 'flex-1',
     style: { minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column' },
@@ -1962,6 +2026,13 @@ function ExpandedPulse({ pulse }) {
           ],
         })
       }),
+      verdict ? jsx('div', {
+        style: {
+          fontSize: 9, fontFamily: 'var(--ui-font-mono, monospace)', color: V_SEC,
+          padding: '4px 0', lineHeight: '12px', whiteSpace: 'pre-wrap',
+        },
+        children: verdict,
+      }) : null,
     ],
   })
 }

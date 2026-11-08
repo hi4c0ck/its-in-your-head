@@ -13,9 +13,9 @@ const src = readFileSync(join(dir, '..', 'desktop', 'plugin.js'), 'utf8')
 const block = src.slice(src.indexOf('// PULSE-START'), src.indexOf('// PULSE-END'))
 assert.ok(block.length > 0, 'PULSE markers found in plugin.js')
 const { pulseCellValue, pulseColumns, pulseLiveValue, pulseMomentumValue,
-        pulseMomentumGlyph, selectPulseRows } =
+        pulseMomentumGlyph, selectPulseRows, pulseBand, buildPulseVerdict } =
   new Function(block +
-    '\n;return { pulseCellValue, pulseColumns, pulseLiveValue, pulseMomentumValue, pulseMomentumGlyph, selectPulseRows };')()
+    '\n;return { pulseCellValue, pulseColumns, pulseLiveValue, pulseMomentumValue, pulseMomentumGlyph, selectPulseRows, pulseBand, buildPulseVerdict };')()
 
 let n = 0
 const eq = (actual, expected, label) => {
@@ -78,8 +78,12 @@ assert.ok(src.includes('selectPulseRows(rows, PULSE_MAX_ROWS)'),
   'row selection is deterministic (momentum surge, then live activity, then semantic, then server order)')
 assert.ok(src.includes("col === 'friction' ? V_DANGER : V_ACCENT"),
   'friction cells take the danger token, others the accent (theme vars only)')
-assert.ok(src.includes('(0.12 + 0.88 * v)'), 'heat alpha encoding preserved')
+assert.ok(src.includes('(0.12 + 0.88 * v)'),
+  'LIVE column keeps the count-squash alpha (semantic cols use pulseBand discrete bands)')
 assert.ok(src.includes('isLive ? 1 : 0.45'), 'non-live rows muted on their cells')
+assert.ok(src.includes('pulseBand'), 'semantic cells use the discrete 3-band encoding (pulseBand)')
+assert.ok(src.includes('strong: 0.85'), 'discrete band opacity steps pinned (empty/weak/strong)')
+assert.ok(src.includes('buildPulseVerdict'), 'worded verdict helper is wired into the pane')
 assert.ok(src.includes('color: isLive ? V_SEC : V_QUAT'),
   'live rows highlighted vs muted tool labels (no new colors)')
 assert.ok(!src.includes("getContext('2d')"), 'canvas painting retired')
@@ -165,4 +169,37 @@ const momOrder = [
 eq(selectPulseRows(momOrder, 3).map((r) => r.tool_name),
   ['surging', 'steady', 'cooling'],
   'momentum descending: surging > steady > cooling')
+
+// 6. pulseBand: discrete 3-band encoding of the server cell.level.
+eq(pulseBand({ level: 'strong' }), 'strong', 'strong level -> strong band')
+eq(pulseBand({ level: 'weak' }), 'weak', 'weak level -> weak band')
+eq(pulseBand({ level: 'neutral' }), 'empty', 'neutral -> empty band')
+eq(pulseBand({ state: 'learning' }), 'empty', 'learning (no level) -> empty')
+eq(pulseBand({ value: 0.9, state: 'ready' }), 'empty', 'value without level -> empty (level is the signal)')
+eq(pulseBand(null), 'empty', 'null cell -> empty')
+eq(pulseBand({}), 'empty', 'empty object -> empty')
+assert.notStrictEqual(pulseBand({ level: 'neutral' }), pulseBand({ level: 'weak' }),
+  'empty and weak are structurally different')
+
+// 7. buildPulseVerdict: deterministic, digit-free, confidence-gated.
+const vdRows = [
+  { tool_name: 'alpha', momentum: { value: 0.9, state: 'surging' } },
+  { tool_name: 'beta', momentum: { value: 0.5, state: 'steady' }, goal: { level: 'strong' } },
+  { tool_name: 'gamma', momentum: { value: 0.5, state: 'steady' } },
+]
+const vd = buildPulseVerdict(vdRows)
+eq(vd.compact, 'alpha surging ahead of baseline', 'compact = single top-row token')
+assert.ok(vd.full.indexOf('alpha surging ahead of baseline') !== -1, 'full carries the surger clause')
+assert.ok(vd.full.indexOf('beta reads strong on goal') !== -1, 'full carries the strong-read clause')
+assert.ok(vd.full.indexOf('gamma') === -1, 'weak/empty row contributes no clause (gated)')
+eq(buildPulseVerdict(vdRows).full, vd.full, 'verdict is deterministic')
+eq(buildPulseVerdict([{ tool_name: 'q', momentum: { state: 'steady' } }]),
+  { compact: '', full: '' }, 'all-quiet payload -> empty strings, no filler')
+eq(buildPulseVerdict([]), { compact: '', full: '' }, 'empty rows -> empty strings')
+const skeleton = buildPulseVerdict([
+  { tool_name: 'zz', momentum: { state: 'surging' } },
+  { tool_name: 'zz', momentum: { state: 'cooling' } },
+  { tool_name: 'zz', momentum: { state: 'steady' }, good: { level: 'strong' } },
+])
+assert.ok(!/[0-9]/.test(skeleton.full), 'verdict template is word-only (no digits in the skeleton)')
 console.log('PASS pulse: ' + n + ' assertions')
