@@ -14,9 +14,10 @@ const src = readFileSync(join(dir, '..', 'desktop', 'plugin.js'), 'utf8')
 const wsBlock = src.slice(src.indexOf('// WORKSPACE-START'), src.indexOf('// WORKSPACE-END'))
 assert.ok(wsBlock.length > 0, 'WORKSPACE markers found in plugin.js')
 const { driftSparkline } = new Function(wsBlock + '\n;return { driftSparkline };')()
-const glyphBlock = src.slice(src.indexOf('// PORTRAIT-GLYPH-START'), src.indexOf('// PORTRAIT-GLYPH-END'))
-assert.ok(glyphBlock.length > 0, 'PORTRAIT-GLYPH markers found in plugin.js')
-const { buildGlyph, buildGlyphAt } = new Function(glyphBlock + '\n;return { buildGlyph, buildGlyphAt };')()
+
+// The old radial PORTRAIT-GLYPH block was retired in favor of the IYH_PORTRAIT
+// contour engine (IYH-PORTRAIT-ENGINE block). The workspace test now verifies
+// the engine is wired into both views instead of the size-parametrized glyph.
 
 let n = 0
 const eq = (actual, expected, label) => {
@@ -53,25 +54,19 @@ eq(driftSparkline([0.5, 0.5, 0.5]).points, '2.0,22.0 48.0,22.0 94.0,22.0',
 eq(driftSparkline([0.2, 0.6]).delta, 0.4, 'delta = last - previous')
 ok(driftSparkline([0.9, 0.4]).delta < 0, 'falling series -> negative delta')
 
-// 2. Glyph sizing: buildGlyph is the 48px case; geometry is size-invariant.
-const input = {
-  available: true,
-  user: { directness: 0.8, context_richness: 0.6, exploration: 0.5,
-    analytical_depth: 0.7, iteration: 0.4, scope: 0.9 },
-  agent: null,
-  confidence: null,
-  evidenceCount: 5,
-}
-eq(buildGlyph(input), buildGlyphAt(input, 48), 'buildGlyph === buildGlyphAt(_, 48) (compact case)')
-const big = buildGlyphAt(input, 160)
-ok(big.startsWith('<svg viewBox="0 0 48 48"') && big.includes('width="160" height="160"'),
-  '160px glyph keeps the 48-unit viewBox at 160 render size')
-eq(big.slice(big.indexOf('>') + 1, -'</svg>'.length),
-  buildGlyph(input).slice(buildGlyph(input).indexOf('>') + 1, -'</svg>'.length),
-  'glyph BODY is size-invariant (only the width/height attrs change)')
-ok(buildGlyphAt(input, 0).includes('width="48"'), 'non-positive size falls back to 48')
-ok(buildGlyphAt(input, null).includes('width="48"'), 'null size falls back to 48')
-ok(buildGlyphAt(null, 160).includes('opacity="0.25"'), 'empty input -> the understated seed glyph at any size')
+// 2. Portrait engine wiring: the IYH_PORTRAIT contour engine replaces the old
+// radial glyph; both views render through the same engine + shared template
+// preference store (no second portrait mechanism to drift out of sync).
+ok(src.includes('const IYH_PORTRAIT = (() =>'), 'portrait engine inline bundle present')
+ok(src.includes('id: \'neutral-pencil\'') && src.includes('id: \'angular-pencil\'') && src.includes('id: \'soft-flow-study\''),
+  'all three drawing templates registered in the engine')
+ok(src.includes('IYH_PORTRAIT.buildPortraitSvg'), 'the engine buildPortraitSvg API is consumed')
+ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48 })'),
+  'compact PORTRAIT renders the engine compact view at the 48px dock budget')
+ok(src.includes('jsx(IyhPortraitStudio, { data, preferences })'),
+  'expanded PORTRAIT renders the engine studio view')
+ok(src.includes('createIyhPortraitTemplatePreferences(ctx)'),
+  'one shared preference store is created in register(ctx)')
 
 // 3. Expand control wiring (source-level, same style as the other suites).
 ok(src.includes("typeof host.openWorkspace === 'function'"),
@@ -80,8 +75,8 @@ ok(src.includes("const WS_WORKSPACE_ID = 'its-in-your-head-workspace'"),
   'stable workspace id (re-fronts the existing tab, never duplicates)')
 ok(src.includes('host.openWorkspace(WS_WORKSPACE_ID, {'),
   'expand click calls host.openWorkspace with the stable id')
-ok(src.includes("jsx(ExpandedWorkspace, { source: source, rest: rest })"),
-  'workspace render is the ExpandedWorkspace component with the pane ctx bridge')
+ok(src.includes("jsx(ExpandedWorkspace, { source: source, rest: rest, portraitPreferences })"),
+  'workspace render passes the pane ctx bridge + the shared portrait-template store')
 ok(src.includes("name: 'expand'") && src.includes('IYH_IC'),
   'expand icon is the plugin atlas symbol (iyh expand, tintable) — not the SDK set')
 ok(!src.includes('icons.Maximize'), 'SDK icons namespace retired in favor of the custom atlas')
@@ -104,9 +99,8 @@ ok(src.includes('const PULSE_MAX_ROWS = 4'), 'compact lane still shows up to 4 t
 ok(src.includes('rows.map((row, ri)'), 'expanded PULSE walks ALL tool rows (uncapped)')
 ok(src.includes("gridTemplateRows: 'repeat(' + PULSE_MAX_ROWS + ', 1fr)'"),
   'compact matrix keeps its fixed track structure')
-ok(src.includes('buildGlyph({'), 'compact PORTRAIT still renders the 48px glyph')
-ok(src.includes("children: 'PORTRAIT · no data yet — evidence empty'") ||
-  src.includes("'PORTRAIT · no data yet — evidence empty'"),
-  'honest empty-state placeholder retained in both views')
+ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48 })'), 'compact PORTRAIT renders the engine compact view at 48px')
+ok(src.includes("'PORTRAIT · no data yet — evidence empty'"),
+  'honest compact empty-state placeholder retained (the studio view carries its own)')
 
 console.log('PASS workspace: ' + n + ' assertions')

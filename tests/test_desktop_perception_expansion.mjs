@@ -73,15 +73,17 @@ ok(/opacity:\s*percOn \? 1 : 0\.55/.test(ep), 'absent section rendered faint (op
 ok(/percOn\s*&&\s*patterns\.length\s*>\s*0/.test(ep), 'per-pattern grid only when available AND entries exist')
 
 // (h) 96px strip output byte-identity snapshot. Re-baselined at the
-// encoder-switcher change: the Strip region now intentionally carries the
-// settings-popover EncoderSwitcher (Sketch <-> MiniLM). The guard still pins
-// the EXACT Strip source so any unintended strip edit is caught — update this
-// hash ONLY when the strip source is intentionally changed.
+// encoder-switcher change, then at the v1.9 icon-set pass, then at the
+// portrait-engine integration: the Strip region now intentionally threads
+// the shared portrait-template preference store (portraitPreferences) into
+// PortraitView + the openWorkspace render. The guard still pins the EXACT
+// Strip source so any unintended strip edit is caught — update this hash
+// ONLY when the strip source is intentionally changed.
 const strip = src.slice(src.indexOf('function Strip'), src.indexOf('export default {'))
 assert.ok(strip.length > 0, 'Strip region found')
-const STRIP_SHA_ENCODER_SWITCHER = '953a63b61b047b2490e8c64c78b19fd5c22a8ac0c1144e703f5567732f36d942'
-assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_ENCODER_SWITCHER,
-  '96px strip source byte-identical to the encoder-switcher baseline')
+const STRIP_SHA_PORTRAIT_ENGINE = 'd2a97686d3f1602b8aac9b13a6af53392df73315014ae9dcec450ae59207c2bc'
+assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_PORTRAIT_ENGINE,
+  '96px strip source byte-identical to the portrait-engine baseline')
 ok(true, 'strip byte-identity snapshot pinned')
 
 // locked invariants (P3 subset, re-asserted where E2 touches the block)

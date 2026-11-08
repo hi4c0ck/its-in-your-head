@@ -87,8 +87,8 @@ assert.ok(!src.includes('drawPulse'), 'drawPulse removed')
 assert.ok(!src.includes('resolveColors'), 'resolveColors removed')
 assert.equal((src.match(/new ResizeObserver/g) || []).length, 1,
   'exactly ONE ResizeObserver: frame-orientation read on the root div (narrow dock); drawing surfaces stay fixed-size')
-assert.equal((src.match(/useEffect\(/g) || []).length, 2,
-  'exactly two mount-once effects: the Strip root orientation observer + the EncoderSwitcher engine-status poll — no per-frame / no-interval redraw loops')
+assert.equal((src.match(/useEffect\(/g) || []).length, 4,
+  'mount-once effects only: Strip orientation observer + EncoderSwitcher engine-status poll + pet affection hold cleanup + portrait template subscription (useIyhPortraitTemplate) — no per-frame / no-interval redraw loops')
 assert.ok(src.includes('pulse.columns'), 'server columns still consumed (via pulseColumns)')
 assert.ok(src.includes('tool_name'), 'pulse rows stay dynamic (tool_name)')
 assert.ok(src.includes('NARROW_W'), 'narrow-dock threshold defined (sidebar frame)')

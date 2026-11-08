@@ -61,8 +61,8 @@ ok(/' · ⛶ full'/.test(pv), 'expand hint unchanged')
 
 // 4) locked invariants still hold (call forms)
 ok(count(src, /new ResizeObserver\(/g) === 1, 'exactly one new ResizeObserver( call (on root)')
-ok(count(src, /buildGlyphAt\(input, 48\)/g) === 1, 'fixed 48px compact glyph call intact')
-ok(count(src, /buildGlyphAt\(\{/g) === 1, 'fixed 160px expanded glyph call intact')
+ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48 })'), 'compact PORTRAIT renders the IYH_PORTRAIT engine compact view')
+ok(src.includes('jsx(IyhPortraitStudio, { data, preferences })'), 'expanded PORTRAIT renders the IYH_PORTRAIT engine studio view')
 ok(!/Math\.random/.test(ep), 'Perception render is deterministic (no Math.random in ExpandedPortrait)')
 ok(!/#[0-9a-fA-F]{3,8}\b/.test(ep.replace(/var\(--[^)]+\)/g, '')), 'Perception section has no hardcoded hex colors')
 
