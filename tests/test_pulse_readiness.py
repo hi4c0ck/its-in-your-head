@@ -379,3 +379,37 @@ def _feed(eng, db):
     ])
     feedback.apply_feedback(eng.protos, eng.capsule_state(), "great job")
     eng.on_events([])
+
+
+# --- Engine wiring: per-category settings reach both PrototypeStore sites ---
+
+def test_engine_passes_per_category_readiness_settings():
+    from engine import Engine
+    eng = Engine(settings={
+        "pulse.min_labeled": 3,
+        "pulse.good_min_samples": 5,
+        "pulse.goal_min_references": 2,
+        "pulse.user_friction_min_samples": 1,
+        "pulse.objective_friction_min_samples": 7,
+    })
+    assert eng.protos.readiness_required("goal") == 2
+    assert eng.protos.readiness_required("good") == 5
+    assert eng.protos.readiness_required("user_friction") == 1
+    assert eng.protos.readiness_required("objective_friction") == 7
+    # Unset categories fall back to the legacy min_labeled.
+    eng = Engine(settings={"pulse.min_labeled": 4})
+    for cat in ("goal", "good", "user_friction", "objective_friction"):
+        assert eng.protos.readiness_required(cat) == 4
+
+
+def test_engine_reset_rebootstrap_wires_per_category_settings():
+    from engine import Engine
+    eng = Engine()
+    eng.reset(settings={
+        "pulse.min_labeled": 3,
+        "pulse.good_min_samples": 5,
+        "pulse.objective_friction_min_samples": 1,
+    })
+    assert eng.protos.readiness_required("good") == 5
+    assert eng.protos.readiness_required("objective_friction") == 1
+    assert eng.protos.readiness_required("goal") == 3

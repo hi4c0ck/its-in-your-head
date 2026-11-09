@@ -98,7 +98,13 @@ class Engine:
         self.registry = pulse.ToolRegistry()
         self.protos = pulse.PrototypeStore(
             cap=int(s.get("pulse.prototype_cap", 8)),
-            min_labeled=int(s.get("pulse.min_labeled", 3)))
+            min_labeled=int(s.get("pulse.min_labeled", 3)),
+            goal_min_references=s.get("pulse.goal_min_references"),
+            good_min_samples=s.get("pulse.good_min_samples"),
+            user_friction_min_samples=s.get(
+                "pulse.user_friction_min_samples"),
+            objective_friction_min_samples=s.get(
+                "pulse.objective_friction_min_samples"))
         self.portrait = _portrait_mod.Portrait(
             retain_days=int(s.get("observation.retain_days", 90)))
         self._capsules: dict[str, deque] = {}
@@ -1294,7 +1300,14 @@ class Engine:
             self._reinforced_loaded = False
             self.protos = pulse.PrototypeStore(
                 cap=int(merged.get("pulse.prototype_cap", 8)),
-                min_labeled=int(merged.get("pulse.min_labeled", 3)))
+                min_labeled=int(merged.get("pulse.min_labeled", 3)),
+                goal_min_references=merged.get(
+                    "pulse.goal_min_references"),
+                good_min_samples=merged.get("pulse.good_min_samples"),
+                user_friction_min_samples=merged.get(
+                    "pulse.user_friction_min_samples"),
+                objective_friction_min_samples=merged.get(
+                    "pulse.objective_friction_min_samples"))
             self.portrait = _portrait_mod.Portrait(
                 retain_days=int(merged.get("observation.retain_days", 90)))
         # Re-bootstrap the reinforced cache from the DB (fault-isolated:
