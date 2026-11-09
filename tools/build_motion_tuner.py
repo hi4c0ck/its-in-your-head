@@ -356,8 +356,12 @@ function render() {
   svgEl.setAttribute('preserveAspectRatio', 'xMidYMid slice');
   if ($('b-mark').classList.contains('on')) {
     const NS = 'http://www.w3.org/2000/svg';
-    const g = model.expression.gazeX + m.gazeDX; // baseline + saccade
-    const gy = (model.expression.gazeY + m.gazeDY) * 0.4; // vertical baseline + saccade
+    // Alias-aware baseline: with default aliases this is byte-identical to
+    // model.expression; once a template owns its alias graph the marker
+    // must follow the template's own expression values.
+    const eTmpl = IYH.expressionFor(model, template);
+    const g = eTmpl.gazeX + m.gazeDX; // baseline + saccade
+    const gy = (eTmpl.gazeY + m.gazeDY) * 0.4; // vertical baseline + saccade
     // near eye only: the marker rides the SAME head-group transform as the
     // rendered pupil, so it stays concentric at every headTilt.
     for (const [cx, cy] of [[309 + g, 367 + gy]]) {
@@ -368,7 +372,7 @@ function render() {
       // (gazeOffsetX/-26 base, half saccade gain) — the studio marker would
       // mislead; skip it there. Saccade log + readout still carry the data.
       if (template === 'soft-flow-study') break;
-      const eT = model.expression.headTilt;
+      const eT = eTmpl.headTilt;
       const cT = eT + m.headTilt;
       const markerT = 'rotate(' + (-2.2 + eT * 0.12).toFixed(2) + ' 360 400) rotate('
         + (-4.2 + cT * 0.62).toFixed(2) + ' 360 360)';

@@ -1,4 +1,4 @@
-# MOVEMENT-CONTRACT.md — template-owned portrait motion (Stage 1 of 5)
+# MOVEMENT-CONTRACT.md — template-owned portrait motion (Stage 2 of 5)
 
 Owner: lane-d (`desktop/`), settled by the parent run.
 Governing doc: the 5-stage "Portrait Motion System" upgrade design (owner-pasted,
@@ -9,8 +9,8 @@ contract says, and what the remaining stages must do.
 
 | Stage | Scope | State |
 |-------|-------|-------|
-| 1 | Fix the movement contract + widen ranges + 48px visibility measurements | **DONE** (this commit) |
-| 2 | Alias compiler: engine emits normalized semantic axes; templates declare axis→feature aliases, response curves, sensitivity (no mandatory universal aliases) | pending |
+| 1 | Fix the movement contract + widen ranges + 48px visibility measurements | **DONE** |
+| 2 | Alias compiler: engine emits normalized semantic axes; templates declare axis→feature aliases, response curves, sensitivity (no mandatory universal aliases) | **DONE** |
 | 3 | Head-movement parts: template-declared parts, coordinated transforms, trajectories, allowed regions | pending |
 | 4 | Template renderer: each template renders its own visual language at studio AND compact sizes (compact currently shares the studio builder) | pending |
 | 5 | Tuner upgrade: pixel-level checks (image diff between adjacent steps) in the browser, per-template calibration UI | pending |
@@ -77,6 +77,45 @@ contract says, and what the remaining stages must do.
   tuner: `py -3.12 tools/build_motion_tuner.py` (it embeds the same block
   and prints the engine sha; a stale HTML prints an old one).
 - Tests: `node tests/test_desktop_48px_visibility.mjs` (contract +
-  48px), `node tests/test_desktop_motion_grammar.mjs` (grammar),
+  48px), `node tests/test_desktop_alias_compiler.mjs` (alias graph,
+  Stage 2), `node tests/test_desktop_motion_grammar.mjs` (grammar),
   `node tests/test_desktop_portrait_engine.mjs` (routes/state),
   `py -3.12 -m pytest tests/ -q` (perception lane).
+
+## The alias compiler (Stage 2)
+
+Templates may now author their own **axis → group → feature** graph:
+
+- `registerPortraitTemplate({..., aliases})` where `aliases` is:
+  ```js
+  {
+    groups: {
+      focus:  { axes: { analytical_depth: 1.0 }, curve: 'tanh',
+                gain: 3, sensitivity: 2.0 },
+    },
+    features: {
+      brow: { rest: 0, focus: -8.0 },        // template's OWN coefficients
+    },
+  }
+  ```
+  - **A declared group/feature replaces the shared definition — no
+    implicit merge.** Undeclared keys keep the shared formula. Templates
+    may also invent new groups/features (union of keys).
+  - **No mandatory universal aliases:** a template may declare nothing
+    (byte-identical to legacy) or only a slice of the graph.
+  - Curves: `linear` (identity), `tanh` (`tanh(g·u)/tanh(max(1,g))`),
+    `step` (sign). `sensitivity` scales the weighted sum before the
+    ±1 clamp; `gain` shapes the curve.
+- `expressionFor(model, templateId)` — the template-owned expression:
+  groups recomputed through its graph, features recomputed from
+  `rest + Σ coefficient · source(group-or-axis)`. Missing input ⇒ no
+  signal (rest value only). Deterministic; same model + template ⇒
+  same expression.
+- **Byte-identity guarantee:** the default alias set
+  (`DEFAULT_ALIASES`) reproduces the legacy shared expression layer
+  exactly — all three stock templates fall back to it, and
+  `tests/test_desktop_alias_compiler.mjs` asserts `===` on all 9
+  expressive channels for every stock template.
+- Both glyph and studio builders now read `expressionFor(model,
+  template)` instead of `model.expression`; `model.expression` stays
+  available for legacy consumers.

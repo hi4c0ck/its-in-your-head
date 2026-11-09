@@ -388,6 +388,133 @@ function visibilityReport(templateId) {
   });
 }
 
+// ------------------------------------------------------------------------
+// Alias compiler (Stage 2 — template-owned axis→feature graph)
+//
+// The engine owns the six semantic axes (model.axes, normalized −1..+1,
+// confidence as metadata). A template owns HOW those axes become visual
+// signals: which axes combine into each alias group (openness / focus /
+// warmth), with what weights, curve and sensitivity, and which features
+// each group (or raw axis) drives at what coefficient.
+//
+//   group value  u = clamp( Σ w_i · dev_i · sensitivity , −1, +1 )
+//   r = curve(u)  — 'linear' (legacy), 'tanh'(gain) (the doc's normalized
+//                   response), or 'step' (territory: sign only)
+//
+// Where dev_i = axis value × 0.5 — the same deviation units the shared
+// expression layer has always used, so the DEFAULT alias set reproduces
+// the legacy formulas byte-exactly. No universal aliases are mandatory:
+// a template may alias any subset of axes into any group, drive any
+// feature from groups or raw axes, or leave a channel on its shared
+// formula. Missing input means no signal (dev = 0 → rest).
+// ------------------------------------------------------------------------
+
+const ALIAS_CURVES = Object.freeze({
+  linear: (u, _g) => u,
+  tanh: (u, g) => Math.tanh((Number.isFinite(g) ? g : 1) * u) / Math.tanh(Math.max(1, Number.isFinite(g) ? g : 1)),
+  step: (u, _g) => (u > 0 ? 1 : u < 0 ? -1 : 0),
+});
+
+// The legacy expression formulas, made explicit as the default alias set:
+// every group and feature below reproduces model.expression exactly when
+// used as-is (linear curve, unit sensitivity, the shared weights).
+const DEFAULT_ALIASES = Object.freeze({
+  groups: Object.freeze({
+    openness: { axes: { directness: 0.42, exploration: 0.38, scope: 0.20 }, curve: 'linear', gain: 1, sensitivity: 1 },
+    focus: { axes: { analytical_depth: 0.66, directness: 0.18, exploration: -0.16 }, curve: 'linear', gain: 1, sensitivity: 1 },
+    warmth: { axes: { context_richness: 0.58, exploration: 0.42 }, curve: 'linear', gain: 1, sensitivity: 1 },
+  }),
+  // feature value = rest + Σ (group-or-axis) × coefficient, in deviation units
+  features: Object.freeze({
+    brow: { rest: 0, openness: 8.0, focus: -6.0 },
+    eyeOpen: { rest: 0.82, openness: 0.18, focus: -0.08 },
+    gaze: { rest: 0, directness: 8.0, exploration: 4.5 },
+    gazeX: { rest: -28.0, exploration: 1.0 },
+    gazeY: { rest: 16.0, analytical_depth: 0.6, context_richness: -0.2 },
+    mouthTension: { rest: 0, directness: 4.2, analytical_depth: 2.2 },
+    mouthLift: { rest: 0, warmth: 9.0 },
+    headTilt: { rest: 0, exploration: 3.2, scope: 1.0 },
+    contourDrift: { rest: 0, exploration: 7.0 },
+  }),
+});
+
+function normalizeAliases(aliases, fallback) {
+  if (!aliases || typeof aliases !== 'object') return fallback;
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const groupSet = (gs, fbGs) => {
+    const out = {};
+    const keys = new Set([...Object.keys(fbGs), ...(gs ? Object.keys(gs) : [])]);
+    for (const g of keys) {
+      const s = gs && gs[g];
+      out[g] = s && typeof s === 'object' ? Object.freeze({
+        axes: Object.freeze(Object.fromEntries(Object.entries(s.axes ? s.axes : (fbGs[g] ? fbGs[g].axes : {})).map(([k, w]) => [k, num(w)]))),
+        curve: ALIAS_CURVES[s.curve] ? s.curve : 'linear',
+        gain: num(s.gain) || 1,
+        sensitivity: num(s.sensitivity) || 1,
+      }) : fbGs[g];
+    }
+    return Object.freeze(out);
+  };
+  const featSet = (fs, fbFs) => {
+    const out = {};
+    // Union of keys: the shared features (so undeclared ones survive)
+    // PLUS any feature the template invents on its own.
+    const keys = new Set([...Object.keys(fbFs), ...(fs ? Object.keys(fs) : [])]);
+    for (const ftr of keys) {
+      const s = fs && fs[ftr];
+      // A declared feature defines the template's OWN vocabulary (its
+      // coefficients, rest defaulting to 0) — no implicit merge with the
+      // shared formula. An undeclared feature keeps the shared one.
+      out[ftr] = s && typeof s === 'object'
+        ? Object.freeze(Object.fromEntries(
+            Object.entries(s).map(([k, w]) => [k, num(w)])))
+        : fbFs[ftr];
+    }
+    return Object.freeze(out);
+  };
+  return Object.freeze({
+    groups: groupSet(aliases.groups, fallback.groups),
+    features: featSet(aliases.features, fallback.features),
+  });
+}
+
+// Template-owned expression baseline: the shared expression with its
+// expressive channels recomputed through the template's alias graph.
+// Channels without an alias declaration keep the shared value, so a
+// template that declares nothing renders exactly as before.
+function expressionFor(model, templateId) {
+  const t = portraitTemplates.get(safeTemplateId(String(templateId || DEFAULT_PORTRAIT_TEMPLATE)));
+  const set = t && t.aliases ? t.aliases : DEFAULT_ALIASES;
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  // Deviation units, exactly as the shared expression layer always
+  // consumed them (byte-identity with the legacy formulas).
+  const dev = {};
+  for (const k of PORTRAIT_DIMENSIONS) dev[k] = num(model.observed[k].deviation);
+  const groups = {};
+  for (const [g, spec] of Object.entries(set.groups)) {
+    let u = 0;
+    for (const [axis, w] of Object.entries(spec.axes)) u += (dev[axis] || 0) * w;
+    u *= spec.sensitivity;
+    u = Math.max(-1, Math.min(1, u));
+    groups[g] = (ALIAS_CURVES[spec.curve] || ALIAS_CURVES.linear)(u, spec.gain);
+  }
+  const src = (key) => (key in groups ? groups[key] : (dev[key] || 0)); // groups win; raw axes otherwise
+  const out = { ...model.expression };
+  // Overwrite every alias-managed channel (groups AND features) with the
+  // template-graph values so stale shared values never leak through;
+  // any other key model.expression carries is preserved untouched:
+  for (const g of Object.keys(groups)) out[g] = groups[g];
+  for (const [feat, spec] of Object.entries(set.features)) {
+    let v = num(spec.rest);
+    for (const [key, w] of Object.entries(spec)) {
+      if (key === 'rest') continue;
+      v += src(key) * w;
+    }
+    out[feat] = v;
+  }
+  return Object.freeze(out);
+}
+
 function liveControls(data = {}) {
   const raw = data.live_expression && typeof data.live_expression === 'object' ? data.live_expression : null;
   const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
@@ -789,6 +916,9 @@ function registerPortraitTemplate(definition, { replace = false } = {}) {
     // safe regions). Absent means the shared legacy travel, which keeps
     // the pre-migration look for that template.
     movement: normalizeMovement(definition.movement, SHARED_MOVEMENT),
+    // Template-owned alias graph (axis→group→feature). Absent means the
+    // default alias set, which reproduces the legacy expression exactly.
+    aliases: normalizeAliases(definition.aliases, DEFAULT_ALIASES),
   });
   portraitTemplates.set(id, entry);
   return () => {
@@ -893,7 +1023,7 @@ const neutralProfile = Object.freeze({
 
 function buildCompactPortraitGlyph(model, options = {}, profile = neutralProfile) {
   const id = esc(options.id || `iyh-${options.template || 'neutral-pencil'}`);
-  const e = model.expression;
+  const e = expressionFor(model, options.template);
   const graphite = options.graphite && typeof options.graphite === 'object' ? options.graphite : {};
   const palette = options.accentPalette && typeof options.accentPalette === 'object' ? options.accentPalette : {};
   const ink = cssColor(graphite.primary, '#D9DAD5');
@@ -989,7 +1119,7 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
   const id = esc(options.id || `iyh-${options.template || 'neutral-pencil'}`);
   if (options.rendering === 'compact') return buildCompactPortraitGlyph(model, options, profile);
   const rendering = options.rendering === 'compact' ? 'compact' : 'studio';
-  const e = model.expression;
+  const e = expressionFor(model, options.template);
   const graphite = options.graphite && typeof options.graphite === 'object' ? options.graphite : {};
   const palette = options.accentPalette && typeof options.accentPalette === 'object' ? options.accentPalette : {};
   const ink = cssColor(graphite.primary, '#D9DAD5');
@@ -1269,5 +1399,9 @@ return Object.freeze({
   STUDIO_MOVEMENT,
   movementFor,
   visibilityReport,
+  // Alias compiler (Stage 2 — template-owned axis→feature graph):
+  ALIAS_CURVES,
+  DEFAULT_ALIASES,
+  expressionFor,
 })
 })()
