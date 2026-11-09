@@ -1843,11 +1843,43 @@ function IyhPortraitTemplatePicker({ preferences }) {
   })
 }
 
+// ---- pane-owned deterministic portrait clock (Stage 4/5 apply) -------------
+// The engine owns no clock; the pane supplies `options.clock` (seconds of
+// local phase). The pane's clock is POLL-STEP, not wall-time: it advances
+// exactly one 850ms step per fresh /portrait poll result (data-identity
+// guarded, so React re-renders on other state never advance it). First
+// sighting of data is phase 0.0 — parts at rest — so every pane open
+// restarts the traversal from neutral (zero persisted live state).
+// Deterministic: same poll sequence → same clock sequence → same frames.
+//
+// IYH-PORTCLOCK-START
+const IYH_PORTRAIT_CLOCKS = new Map() // rendering -> { tick, lastData }
+function iyhPortraitClockFor(rendering, data) {
+  let rec = IYH_PORTRAIT_CLOCKS.get(rendering)
+  if (!rec) {
+    rec = { tick: 0, lastData: null }
+    IYH_PORTRAIT_CLOCKS.set(rendering, rec)
+  }
+  if (data !== rec.lastData) {
+    // Fresh /portrait poll result (new object identity). The FIRST sighting
+    // stays at phase 0 (rest invariance at pane open); each subsequent one
+    // advances exactly one poll step.
+    if (rec.lastData !== null) rec.tick += 1
+    rec.lastData = data
+  }
+  // PORTRAIT_POLL_MS is declared later in this module (const, TDZ at module
+  // eval time) — the phase is computed lazily at render time, never at load.
+  return rec.tick * (PORTRAIT_POLL_MS / 1000)
+}
+// IYH-PORTCLOCK-END
+
 function buildIyhPortraitMarkup(data, template, rendering, id) {
   const svg = IYH_PORTRAIT.buildPortraitSvg(data || {}, {
     template: template || IYH_PORTRAIT.DEFAULT_PORTRAIT_TEMPLATE,
     rendering,
     id,
+    // Pane-owned deterministic part-traversal phase (see IYH-PORTCLOCK block).
+    clock: iyhPortraitClockFor(rendering, data),
     // Leave graphite/accent colors at the engine defaults initially.
     // The renderer emits graphite as its main material and accent only on
     // explicit extension/interpretation layers.

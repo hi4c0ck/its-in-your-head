@@ -39,6 +39,9 @@ const context = vm.createContext({
   jsx: () => null,
   jsxs: () => null,
   clamp01: (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null),
+  // module constant declared after the UI block in plugin.js; the pane clock
+  // (iyhPortraitClockFor) closes over it at call time — mirror the value.
+  PORTRAIT_POLL_MS: 850,
 })
 vm.runInContext(engineBlock + '\nglobalThis.__IYH_PORTRAIT__ = IYH_PORTRAIT;', context)
 vm.runInContext(uiBlock + '\nglobalThis.__IYH_UI__ = { buildIyhPortraitMarkup, createIyhPortraitTemplatePreferences, IYH_PORTRAIT_TEMPLATE_PREF_KEY };', context)
