@@ -107,8 +107,13 @@ def test_tier1_reasoning_scores_patterns_no_noop_and_guard_fires():
 def test_portrait_view_perception_empty_shape():
     eng = _eng()
     view = eng.portrait_view()
+    # S16: the two additive keys ride along (neutral on a fresh engine).
     assert set(view) == {"available", "dimensions", "confidence",
-                         "user", "agent", "perception"}
+                         "user", "agent", "perception",
+                         "live_expression", "morphology"}
+    assert view["live_expression"]["stage"] == "none"
+    assert view["live_expression"]["updated_at"] is None
+    assert view["morphology"]["available"] is False
     dims = set(view["perception"]["dim_signals"])
     assert dims == {d for d in
                     ["directness", "context_richness", "exploration",

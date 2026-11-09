@@ -672,3 +672,411 @@ def confidence_from_evidence(n, agreement, age_s=None, now_s=None,
                  * margin_gate(margin)
                  * math.exp(-CONFIDENCE_LAMBDA * age))
     return max(0.0, min(1.0, value))
+
+
+# ============================================================================
+# Live expression (transient portrait gesture controls)
+#
+# Drawing controls, NOT psychological diagnoses: the controls below steer
+# how the portrait moves during and just after an interaction. They are
+# derived from the existing pattern-affinity numbers only (prompt-side and,
+# when available, agent-side), with zero new perception machinery.
+#
+# Timestamp-based settle/hold/release arithmetic only — no background
+# timer, no animation worker, no persisted live state (a process restart
+# returns to neutral).
+# ============================================================================
+
+# Lifecycle targets (plan §3.3 initial tuning; the pane polls every ~0.85s,
+# so the settle window is well under one poll interval).
+EXPR_SETTLE_S = 0.4       # smooth arrival (~200-500 ms target)
+EXPR_HOLD_S = 3.6        # expression hold, several seconds
+EXPR_RELEASE_TAU_S = 2.0 # exponential release back to neutral rest
+
+# Prompt-only confidence is deliberately low: one side of the pair.
+EXPR_PROMPT_CONFIDENCE = 0.30
+EXPR_PAIRED_CONFIDENCE_BASE = 0.35
+EXPR_PAIRED_CONFIDENCE_SPAN = 0.45  # scaled by the top pattern's margin gate
+
+# Curated initial mapping of pattern affinities -> gesture controls
+# (plan §3.1: exploratory breadth, analytical directness). Tunable.
+LIVE_EXPR_WEIGHTS = {
+    "openness": {"exploration": 0.45, "context_richness": 0.35,
+                 "scope": 0.20},
+    "focus": {"directness": 0.45, "analytical_depth": 0.40,
+              "iteration": 0.15},
+}
+
+
+def neutral_live_expression() -> dict:
+    """Resting state: controls at neutral, no stage, no timestamp."""
+    return {"openness": 0.0, "focus": 0.0, "resonance": 0.5,
+            "tension": 0.5, "intensity": 0.0, "confidence": 0.0,
+            "stage": "none", "updated_at": None}
+
+
+def _affinity_control(affinities: dict, weights: dict) -> float:
+    """Weighted deviation-from-0.5 of pattern affinities, in [-1, 1].
+
+    Missing patterns are skipped (their weight is renormalized over the
+    present ones) — absence of a signal is never a value.
+    """
+    num = 0.0
+    den = 0.0
+    for name, w in weights.items():
+        a = affinities.get(name)
+        if a is None:
+            continue
+        num += w * (float(a) - 0.5) * 2.0
+        den += float(w)
+    if den <= 0.0:
+        return 0.0
+    return max(-1.0, min(1.0, num / den))
+
+
+def derive_live_expression(entries, paired: bool = False, ts=None) -> dict:
+    """Target gesture controls for one scored turn (pure, deterministic).
+
+    ``entries`` is the ``score_turn`` pattern list (all six patterns with
+    prompt_affinity / agent_affinity / amplification / margin).
+
+    Stage 1 (``paired=False``, prompt only): openness/focus/intensity come
+    from the prompt-side affinities; resonance and tension STAY None —
+    the agent side is unavailable, and the missing channel is never
+    fabricated. Confidence is the low prompt-only gate.
+
+    Stage 2 (``paired=True``, reasoning available): openness/focus are
+    refined by blending the two sides, and resonance/tension derive from
+    the mean amplification (agent-minus-prompt divergence) over the
+    patterns that carry both affinities. The two channels share one
+    divergence signal and sum to 1.0 at neutral, so they stay bounded.
+    """
+    if not isinstance(entries, (list, tuple)) or not entries:
+        target = neutral_live_expression()
+        target["updated_at"] = ts
+        return target
+    prompt_aff = {}
+    agent_aff = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        name = e.get("name")
+        if name is None:
+            continue
+        if e.get("prompt_affinity") is not None:
+            prompt_aff[name] = float(e["prompt_affinity"])
+        if e.get("agent_affinity") is not None:
+            agent_aff[name] = float(e["agent_affinity"])
+    openness = _affinity_control(prompt_aff, LIVE_EXPR_WEIGHTS["openness"])
+    focus = _affinity_control(prompt_aff, LIVE_EXPR_WEIGHTS["focus"])
+    if paired:
+        blend = {n: (prompt_aff.get(n, 0.0) + agent_aff.get(n, 0.0)) / 2.0
+                 for n in prompt_aff if n in agent_aff}
+        openness = 0.5 * openness + 0.5 * _affinity_control(
+            blend, LIVE_EXPR_WEIGHTS["openness"])
+        focus = 0.5 * focus + 0.5 * _affinity_control(
+            blend, LIVE_EXPR_WEIGHTS["focus"])
+        amps = [float(e["amplification"]) for e in entries
+                if isinstance(e, dict)
+                and e.get("amplification") is not None]
+        if amps:
+            mean_amp = max(-1.0, min(1.0, sum(amps) / len(amps)))
+            resonance = round(0.5 + mean_amp, 4)
+            tension = round(0.5 - mean_amp, 4)
+        else:
+            resonance = None
+            tension = None
+        margin = None
+        for e in entries:
+            if isinstance(e, dict) and e.get("margin") is not None:
+                try:
+                    margin = float(e["margin"])
+                except (TypeError, ValueError):
+                    margin = None
+                break
+        if margin is not None:
+            confidence = (EXPR_PAIRED_CONFIDENCE_BASE
+                          + EXPR_PAIRED_CONFIDENCE_SPAN
+                          * margin_gate(margin))
+        else:
+            confidence = EXPR_PAIRED_CONFIDENCE_BASE
+        stage = "paired"
+    else:
+        resonance = None
+        tension = None
+        confidence = EXPR_PROMPT_CONFIDENCE
+        stage = "prompt"
+    openness = round(max(-1.0, min(1.0, openness)), 4)
+    focus = round(max(-1.0, min(1.0, focus)), 4)
+    deviation = max(abs(openness), abs(focus))
+    if paired and resonance is not None:
+        deviation = max(deviation, abs(resonance - 0.5) * 2.0,
+                        abs(tension - 0.5) * 2.0)
+    intensity = round(max(0.0, min(1.0, deviation)), 4)
+    return {"openness": openness, "focus": focus,
+            "resonance": resonance, "tension": tension,
+            "intensity": intensity,
+            "confidence": round(max(0.0, min(1.0, confidence)), 4),
+            "stage": stage, "updated_at": ts}
+
+
+def _smoothstep(x: float) -> float:
+    x = max(0.0, min(1.0, float(x)))
+    return x * x * (3.0 - 2.0 * x)
+
+
+def live_expression_display(base, target, target_ts, now) -> dict:
+    """Settle/hold/release interpolation between events (pure).
+
+    ``base`` is the DISPLAY snapshot taken the moment ``target`` was set
+    (continuity: a new target settles from the current display value,
+    never jumps), ``target_ts`` when it was set, ``now`` the read time.
+    Timeline: smoothstep settle over EXPR_SETTLE_S, hold EXPR_HOLD_S,
+    then exponential release toward neutral (resonance/tension toward
+    their 0.5 rest midpoint). After ~3 release taus the display is
+    clamped to rest. No timers: the same inputs always give the same
+    display (deterministic; identical inputs never produce jitter).
+    """
+    neutral = neutral_live_expression()
+    if not isinstance(target, dict) or target.get("stage") in (None, "none"):
+        return neutral
+    b = neutral if not isinstance(base, dict) else base
+    now_f = float(now if now is not None else target_ts or 0.0)
+    t = max(0.0, now_f - float(target_ts if target_ts is not None else now_f))
+    released = False
+    if t < EXPR_SETTLE_S:
+        frac = _smoothstep(t / EXPR_SETTLE_S)
+    elif t < EXPR_SETTLE_S + EXPR_HOLD_S:
+        frac = 1.0
+    else:
+        frac = math.exp(-(t - EXPR_SETTLE_S - EXPR_HOLD_S) / EXPR_RELEASE_TAU_S)
+        released = frac < 0.01
+        if released:
+            frac = 0.0
+    # Release floor: a FULLY released expression returns to the NEUTRAL
+    # REST, not to the previous expression — otherwise the portrait would
+    # remain stuck in an old expression (acceptance: "gradually returns
+    # to neutral"). Continuity still holds DURING settle (a new target
+    # departs from the current display value); only the end-of-life
+    # floor snaps to rest.
+    out = {}
+    for key in ("openness", "focus", "intensity", "confidence"):
+        bv = b.get(key)
+        bv = 0.0 if bv is None else float(bv)
+        if released:
+            bv = 0.0
+        gv = target.get(key)
+        gv = 0.0 if gv is None else float(gv)
+        out[key] = round(bv + (gv - bv) * frac, 4)
+    for key in ("resonance", "tension"):
+        gv = target.get(key)
+        if gv is None:
+            out[key] = None
+            continue
+        bv = b.get(key)
+        bv = 0.5 if bv is None else float(bv)
+        if released:
+            bv = 0.5
+        out[key] = round(bv + (float(gv) - bv) * frac, 4)
+    out["stage"] = target.get("stage")
+    out["updated_at"] = target.get("updated_at")
+    return out
+
+
+# ============================================================================
+# Pattern-pair morphology (bounded, evidence-gated drawing mutations)
+#
+# Recurring pairs of the six preset patterns are discovered from the
+# already-persisted ``pattern_affinity_history`` top-three rows (bounded
+# 512 rows, shared ``turn_key``, no new table/migration). A pair is
+# promoted only on REPEATED co-occurrence that exceeds its expected
+# independent rate (lift) — a single turn, or two merely frequent
+# patterns, never mutate the drawing. Strength is bounded, accumulates
+# slowly with turn count, and decays with recency weighting so stale
+# evidence weakens the mutation.
+# ============================================================================
+
+PAIR_MIN_TURNS = 3          # distinct co-occurring turns required (a
+                            # single turn can never create a mutation)
+PAIR_MIN_LIFT = 1.20       # co-occurrence must exceed the independent
+                           # expectation (for rare-ish patterns)
+PAIR_COND_GATE = 0.95      # conditional co-occurrence P(other|this) gate
+                           # for the frequently-occurring patterns where
+                           # lift degenerates to ~1 by construction
+PAIR_HALF_LIFE_S = 14.0 * 24.0 * 60.0 * 60.0  # recency weighting (days)
+PAIR_EVIDENCE_TARGET = 10   # turns for full evidence accumulation
+PAIR_SUPPORT_FLOOR = 0.5    # weighted-support level for full recency credit
+MORPH_MAX_STRENGTH = 0.60   # bounded maximum influence of any mutation
+MORPH_ACTIVE_FLOOR = 0.02  # below this the pair is known but too weak/stale
+                           # to touch the drawing (neutral wins)
+
+# Curated initial artistic hypotheses (pair -> drawing motif), NOT facts
+# about the user: the pair detector decides whether a combination actually
+# recurs; unmapped pairs fall back to the generic motif. Motif values are
+# unit magnitudes scaled by the pair's strength.
+PAIR_MOTIFS = {
+    frozenset(("context_richness", "analytical_depth")): {
+        "line_density": 0.35, "contour_asymmetry": 0.05,
+        "echo_strength": 0.10, "gesture_bias": 0.0},
+    frozenset(("exploration", "scope")): {
+        "line_density": 0.10, "contour_asymmetry": 0.25,
+        "echo_strength": 0.05, "gesture_bias": 0.30},
+    frozenset(("directness", "iteration")): {
+        "line_density": 0.05, "contour_asymmetry": 0.10,
+        "echo_strength": 0.30, "gesture_bias": -0.20},
+}
+GENERIC_MOTIF = {
+    "line_density": 0.10, "contour_asymmetry": 0.15,
+    "echo_strength": 0.10, "gesture_bias": 0.0,
+}
+MORPH_PARAMS = ("line_density", "contour_asymmetry",
+               "echo_strength", "gesture_bias")
+
+
+def neutral_morphology() -> dict:
+    """No learned mutation: a documented empty shape, never fabricated."""
+    return {"pair": None, "strength": 0.0, "confidence": 0.0, "evidence": 0,
+            "available": False,
+            **{p: 0.0 for p in MORPH_PARAMS}}
+
+
+def group_turns(rows) -> list:
+    """Group (ts, turn_key, name) history rows into per-turn observations.
+
+    Returns ``[(ts, turn_key, [names])...]`` sorted by (ts, key): keyed
+    turns pool their ranked names under the shared ``turn_key`` (max ts of
+    the turn's rows); legacy rows (turn_key None/empty) are EACH their own
+    single-name turn — a pair can only co-occur within a keyed top-three
+    turn, so legacy data can never fabricate pair evidence.
+    """
+    keyed: dict = {}
+    legacy = []
+    for ts, turn_key, name in rows or []:
+        if name is None or str(name) == "":
+            continue
+        key = None if turn_key in (None, "") else str(turn_key)
+        if key is None:
+            legacy.append((float(ts), None, [str(name)]))
+        else:
+            entry = keyed.get(key)
+            if entry is None:
+                keyed[key] = [float(ts), [str(name)]]
+            else:
+                entry[0] = max(entry[0], float(ts))
+                if str(name) not in entry[1]:
+                    entry[1].append(str(name))
+    out = [(ts, key, sorted(names)) for key, (ts, names) in keyed.items()]
+    out.extend(legacy)
+    out.sort(key=lambda item: (item[0], str(item[1] or "")))
+    return out
+
+
+def pattern_pair_summary(observations, now_s=None) -> list:
+    """Score recurring pattern pairs from per-turn observations (pure).
+
+    ``observations`` is ``group_turns`` output: (ts, turn_key, [names]).
+    Co-occurrence is measured over INDEPENDENT turns and compared against
+    the product of the individual patterns' turn rates (lift); for
+    frequently-occurring patterns lift degenerates, so the conditional
+    co-occurrence P(other|this) is the second, equivalent gate. Recency
+    weighting (half-life PAIR_HALF_LIFE_S) makes stale evidence lose
+    support. Only gated pairs are returned (turns >= PAIR_MIN_TURNS AND
+    (lift >= PAIR_MIN_LIFT OR cond >= PAIR_COND_GATE)), strongest first.
+    Deterministic: the same rows in any order always produce the same
+    summary.
+    """
+    obs = [o for o in (observations or [])
+           if isinstance(o, (list, tuple)) and len(o) == 3
+           and o[2]]
+    if not obs:
+        return []
+    now = float(now_s) if now_s is not None else 0.0
+    day_s = 24.0 * 60.0 * 60.0
+    total_w = 0.0
+    name_w: dict = {}
+    pair_w: dict = {}
+    pair_n: dict = {}
+    for ts, _key, names in obs:
+        age_days = max(0.0, now - float(ts)) / day_s
+        w = 0.5 ** (age_days / (PAIR_HALF_LIFE_S / day_s))
+        total_w += w
+        uniq = list(dict.fromkeys(names))  # rank order, deduped
+        for n in uniq:
+            name_w[n] = name_w.get(n, 0.0) + w
+        for i, a in enumerate(uniq):
+            for b in uniq[i + 1:]:
+                p = (a, b) if a < b else (b, a)
+                pair_w[p] = pair_w.get(p, 0.0) + w
+                pair_n[p] = pair_n.get(p, 0) + 1
+    if total_w <= 0.0:
+        return []
+    summary = []
+    for pair in sorted(set(list(pair_w) + list(pair_n))):
+        co_n = int(pair_n.get(pair, 0))
+        if co_n < PAIR_MIN_TURNS:
+            continue
+        p_a = name_w.get(pair[0], 0.0) / total_w
+        p_b = name_w.get(pair[1], 0.0) / total_w
+        support = pair_w.get(pair, 0.0) / total_w
+        expected = p_a * p_b
+        lift = (support / expected) if expected > 0.0 else 0.0
+        # Conditional co-occurrence covers the frequent-pattern case where
+        # lift cannot exceed ~1 (both patterns in nearly every turn):
+        # P(b|a) = support/p_a, P(a|b) = support/p_b. Independent patterns
+        # give cond ~= the other's occurrence rate; associated pairs -> 1.
+        cond = 0.0
+        if p_a > 0.0:
+            cond = max(cond, support / p_a)
+        if p_b > 0.0:
+            cond = max(cond, support / p_b)
+        lift_factor = min(1.0, max(0.0, (lift - 1.0) / 1.0))
+        cond_factor = min(1.0, max(0.0, (cond - 0.5) / 0.5))
+        assoc = max(lift_factor, cond_factor)
+        if lift < PAIR_MIN_LIFT and cond < PAIR_COND_GATE:
+            continue
+        evidence_factor = min(1.0, co_n / PAIR_EVIDENCE_TARGET)
+        recency = min(1.0, support / PAIR_SUPPORT_FLOOR)
+        strength = round(MORPH_MAX_STRENGTH
+                         * evidence_factor * assoc * recency, 4)
+        confidence = round(max(0.0, min(1.0,
+                                        0.5 * min(1.0, co_n / 6.0)
+                                        + 0.5 * assoc)), 4)
+        last_ts = max(float(ts) for ts, _k, names in obs
+                      if set(names) >= set(pair))
+        summary.append({"pair": [pair[0], pair[1]], "turns": co_n,
+                       "support": round(support, 4),
+                       "lift": round(lift, 4),
+                       "cond": round(cond, 4),
+                       "strength": strength, "confidence": confidence,
+                       "last_seen_ts": last_ts})
+    summary.sort(key=lambda e: (-e["strength"], e["pair"][0], e["pair"][1]))
+    return summary
+
+
+def morphology_from_summary(summary) -> dict:
+    """The strongest supported pair -> bounded visual mutation parameters."""
+    if not summary:
+        return neutral_morphology()
+    top = summary[0]
+    if not isinstance(top, dict) or float(
+            top.get("strength", 0.0) or 0.0) < MORPH_ACTIVE_FLOOR:
+        return neutral_morphology()  # known but too weak/stale: neutral wins
+    pair = [str(x) for x in (top.get("pair") or [])]
+    motif = PAIR_MOTIFS.get(frozenset(pair[:2]), GENERIC_MOTIF)
+    s = float(top.get("strength", 0.0))
+    out = {
+        "pair": pair if len(pair) == 2 else None,
+        "strength": round(s, 4),
+        "confidence": round(float(top.get("confidence", 0.0)), 4),
+        "evidence": int(top.get("turns", 0)),
+        "available": True,
+    }
+    for param in MORPH_PARAMS:
+        out[param] = round(motif.get(param, 0.0) * s, 4)
+    return out
+
+
+def morphology_from_rows(rows, now_s=None) -> dict:
+    """One-call path: history rows -> gated pair summary -> morphology."""
+    return morphology_from_summary(
+        pattern_pair_summary(group_turns(rows), now_s=now_s))

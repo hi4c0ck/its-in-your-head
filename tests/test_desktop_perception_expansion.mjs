@@ -81,9 +81,12 @@ ok(/percOn\s*&&\s*patterns\.length\s*>\s*0/.test(ep), 'per-pattern grid only whe
 // ONLY when the strip source is intentionally changed.
 const strip = src.slice(src.indexOf('function Strip'), src.indexOf('export default {'))
 assert.ok(strip.length > 0, 'Strip region found')
-const STRIP_SHA_PORTRAIT_ENGINE = 'd2a97686d3f1602b8aac9b13a6af53392df73315014ae9dcec450ae59207c2bc'
-assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_PORTRAIT_ENGINE,
-  '96px strip source byte-identical to the portrait-engine baseline')
+// Re-baselined at the S16 live-expression/morphology pass: the strip now
+// threads PORTRAIT_POLL_MS (portrait-only ~0.85s cadence) and the
+// learned-pair readout into the expanded portrait inspection.
+const STRIP_SHA_S16_MOTION = '82b3853915e9aed3c9507ac8a6453b5e26b2e0dbd3a9ab49ac86e235cb41aeca'
+assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_S16_MOTION,
+  '96px strip source byte-identical to the S16 motion-grammar baseline')
 ok(true, 'strip byte-identity snapshot pinned')
 
 // locked invariants (P3 subset, re-asserted where E2 touches the block)

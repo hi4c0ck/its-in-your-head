@@ -32,6 +32,7 @@ try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from .perception import encoder as _encoder
     from .perception import anchors as _anchors
     from .perception import portrait as _portrait_mod
+    from .perception import patterns as _patterns
     from .core import settings as _settings
 except ImportError:
     import pulse
@@ -40,9 +41,24 @@ except ImportError:
     from perception import encoder as _encoder
     from perception import anchors as _anchors
     from perception import portrait as _portrait_mod
+    from perception import patterns as _patterns
     from core import settings as _settings
 
 logger = logging.getLogger(__name__)
+
+# Live-expression / morphology neutral literals (module constants so the
+# fault paths never depend on a live import): identical shapes to
+# _patterns.neutral_live_expression() / neutral_morphology().
+NEUTRAL_LIVE_EXPRESSION: dict = {
+    "openness": 0.0, "focus": 0.0, "resonance": 0.5, "tension": 0.5,
+    "intensity": 0.0, "confidence": 0.0, "stage": "none",
+    "updated_at": None,
+}
+NEUTRAL_MORPHOLOGY: dict = {
+    "pair": None, "strength": 0.0, "confidence": 0.0, "evidence": 0,
+    "available": False, "line_density": 0.0, "contour_asymmetry": 0.0,
+    "echo_strength": 0.0, "gesture_bias": 0.0,
+}
 
 DRIFT_MAX = 512            # bounded in-memory portrait history rows
 CAPSULES_PER_TOOL = 32    # recent encoded capsules kept for GOAL fallback
@@ -116,6 +132,22 @@ class Engine:
         self._pattern_turns = 0
         self._pattern_top_counts: dict = {}
         self._pattern_last_evidence: dict = {}
+        # Transient live-expression state (process-only, never persisted):
+        # Live expression (transient portrait gesture controls): target +
+        # display base + timestamps ONLY. Zero persisted state, no timers,
+        # no animation worker — a process restart returns to the neutral
+        # resting state; the settle/hold/release arithmetic runs on READ
+        # (portrait_view), driven by target_ts/now timestamps.
+        self._live_expr_target: dict | None = None
+        self._live_expr_ts: float | None = None
+        # The display snapshot captured when the target was set: the next
+        # settle starts from the current display value (continuity rule).
+        self._live_expr_base: dict | None = None
+        # Morphology: lazily derived from the persisted
+        # pattern_affinity_history (reconstructs after restart) and cached
+        # by the DB row signature so polls don't re-scan 512 rows.
+        self._morph_cache: dict | None = None
+        self._morph_cache_key: tuple | None = None
         # Reinforced-bank dirty set (L10, L5 open item (a)): in-memory mirror
         # of the persisted pattern_bank rows, loaded once at bootstrap.
         # _reinforced_cache: {name: {prompt_anchor, agent_anchor, evidence,
@@ -518,6 +550,12 @@ class Engine:
                 name = entry.get("name")
                 if name is not None:
                     self._pattern_last_evidence[name] = now
+            # Live expression (transient): prompt arrives -> stage 1
+            # (prompt-only affinities); reasoning folded -> stage 2
+            # (paired affinities refine resonance/tension). Timestamps
+            # only — nothing here persists.
+            self._set_live_expression(
+                patterns, paired=reaction_vector is not None, ts=now)
             top = patterns[0]
             snap = self.portrait.snapshot()
             evidence_by_name = {}
@@ -777,6 +815,112 @@ class Engine:
         except Exception:
             logger.exception("its-in-your-head: engine user_turn feed failed")
 
+    # -- live expression + morphology (transient / lazy) ------------------- #
+    def _set_live_expression(self, patterns, paired: bool, ts) -> None:
+        """Set the transient live-expression target for one scored turn.
+
+        Stage 1 (``paired=False``) fires when the prompt lands — the
+        portrait must react WITHOUT waiting for the agent's reasoning.
+        Stage 2 (``paired=True``) fires when a reasoning segment folds in:
+        the paired affinities refine the expression (resonance/tension
+        become available; the prompt-only channels are re-derived from
+        BOTH sides). Missing reasoning never fabricates values — the
+        paired derivation keeps the unavailable channels None and lowers
+        confidence (perception/patterns.derive_live_expression).
+
+        Continuity: the display snapshot at the moment of setting becomes
+        the next settle's base, so a new target settles from where the
+        portrait currently sits (no snap between unrelated expressions).
+        Timestamps only — no timers, no animation worker, no persisted
+        live state (process restart -> neutral resting state).
+        """
+        try:
+            target = _patterns.derive_live_expression(
+                patterns, paired=paired, ts=ts)
+            now = float(ts) if ts is not None else time.time()
+            self._live_expr_base = self._live_expression_display(now)
+            self._live_expr_target = target
+            self._live_expr_ts = now
+            if paired:
+                # A new paired row is about to land in the DB: the lazy
+                # morphology summary is now potentially stale — invalidate
+                # (recompute on the next read; the engine is the only
+                # in-process writer, so this can't thrash).
+                self._morph_cache_key = None
+        except Exception:
+            logger.exception(
+                "its-in-your-head: live expression target set failed")
+
+    def _live_expression_display(self, now: float | None = None) -> dict:
+        """The live-expression DISPLAY value at read time (pure).
+
+        Settle/hold/release arithmetic over the stored target + base
+        timestamps (perception/patterns.live_expression_display): smooth
+        arrival well under one pane poll, a several-second hold, then an
+        exponential release back to the neutral resting state. Identical
+        inputs always give the identical display (deterministic, no
+        uncontrolled jitter). No evidence yet -> the neutral resting
+        state, never an invented value.
+        """
+        if self._live_expr_target is None:
+            return dict(NEUTRAL_LIVE_EXPRESSION)
+        try:
+            return _patterns.live_expression_display(
+                self._live_expr_base, self._live_expr_target,
+                self._live_expr_ts,
+                now if now is not None else time.time())
+        except Exception:
+            logger.exception(
+                "its-in-your-head: live expression display failed")
+            return dict(NEUTRAL_LIVE_EXPRESSION)
+
+    def morphology_view(self, now: float | None = None) -> dict:
+        """Lazy, cached morphology from the persisted pattern history.
+
+        Recurring two-pattern pairs are discovered from the existing
+        pattern_affinity_history top-three rows (shared turn_key, bounded
+        table — no new table, no migration). The summary is recomputed
+        only when the underlying row set changed, then cached in this
+        process; because the history is persisted, the morphology
+        RECONSTRUCTS after a normal process restart. Derived numbers
+        only — never raw prompts or reasoning text. Fault-isolated: any
+        DB/module fault degrades to the neutral morphology (no mutation),
+        never raises.
+        """
+        ts = float(now) if now is not None else time.time()
+        try:
+            rows = self._pattern_history_rows()
+            sig = (len(rows), max((r[0] for r in rows), default=None))
+            if self._morph_cache is not None and sig == self._morph_cache_key:
+                return self._morph_cache
+            self._morph_cache = _patterns.morphology_from_rows(
+                rows, now_s=ts)
+            self._morph_cache_key = sig
+            return self._morph_cache
+        except Exception:
+            logger.exception(
+                "its-in-your-head: morphology view failed")
+            return dict(NEUTRAL_MORPHOLOGY)
+
+    def _pattern_history_rows(self) -> list:
+        """(ts, turn_key, name) rows of the persisted PAIRED pattern
+        history, for pair-morphology discovery. Read-only; the table is
+        bounded (512 rows), so this is a cheap, capped read. Legacy rows
+        without a turn_key are treated as single-name turns by the
+        grouping helper — they can never fabricate pair evidence."""
+        _db, _mig = self._storage()
+        conn = _db.connect()
+        try:
+            _mig.schema_bootstrap(conn)
+            rows = conn.execute(
+                "SELECT ts, turn_key, top_pattern FROM "
+                "pattern_affinity_history "
+                "WHERE top_pattern IS NOT NULL "
+                "ORDER BY ts ASC, id ASC").fetchall()
+            return [(float(r[0]), r[1], r[2]) for r in rows if r[2]]
+        finally:
+            conn.close()
+
     def _store_capsule(self, tool, capsule) -> None:
         if not isinstance(capsule, dict) or capsule.get("vector") is None:
             return
@@ -998,11 +1142,15 @@ class Engine:
                     "confidence": {d: None for d in dims},
                     "user": {d: None for d in dims},
                     "agent": {d: None for d in dims},
-                    "perception": perception}
+                    "perception": perception,
+                    "live_expression": self._live_expression_display(),
+                    "morphology": self.morphology_view()}
         return {"available": True,
                 "dimensions": values, "confidence": conf,
                 "user": dict(values), "agent": agent,
-                "perception": perception}
+                "perception": perception,
+                "live_expression": self._live_expression_display(),
+                "morphology": self.morphology_view()}
 
     def drift_view(self) -> dict:
         # Lazy rehydrate: first drift access after a plugin-process
@@ -1040,6 +1188,16 @@ class Engine:
             self._pattern_turns = 0
             self._pattern_top_counts.clear()
             self._pattern_last_evidence.clear()
+            # Explicit wipe also clears the transient live expression and
+            # the lazy morphology cache (a post-wipe read must not
+            # resurrect pre-wipe pair evidence: the route's
+            # _reset_dataset() deletes the pattern history, so the next
+            # read recomputes from the wiped table -> neutral).
+            self._live_expr_target = None
+            self._live_expr_ts = None
+            self._live_expr_base = None
+            self._morph_cache = None
+            self._morph_cache_key = None
             # Reinforced dirty set (L10): reset is a re-bootstrap path —
             # clear the dirty marks and re-read the cache from the DB
             # below, so cross-process persists become visible again.

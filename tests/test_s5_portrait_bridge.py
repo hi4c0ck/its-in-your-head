@@ -168,7 +168,12 @@ def test_portrait_fallback_empty_db_returns_documented_shape(tmp_path):
                      "confidence": {d: None for d in dims},
                      "user": {d: None for d in dims},
                      "agent": {d: None for d in dims},
-                     "perception": _empty_perception_expected(dims)}
+                     "perception": _empty_perception_expected(dims),
+                     # S16 additive keys: the transient live state is never
+                     # reconstructed from history (neutral rest), and the
+                     # morphology is neutral without persisted evidence.
+                     "live_expression": dict(api._NEUTRAL_LIVE_EXPRESSION),
+                     "morphology": dict(api._NEUTRAL_MORPHOLOGY)}
 
 
 def test_portrait_live_view_wins_over_fallback(agent_env, monkeypatch):

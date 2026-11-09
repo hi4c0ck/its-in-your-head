@@ -703,6 +703,51 @@ def _empty_perception(dims) -> dict:
     }
 
 
+# Live-expression / morphology neutral literals (module constants so the
+# fault paths never depend on a live import): identical shapes to
+# perception.patterns.neutral_live_expression() / neutral_morphology()
+# and engine.NEUTRAL_*.
+_NEUTRAL_LIVE_EXPRESSION: dict = {
+    "openness": 0.0, "focus": 0.0, "resonance": 0.5, "tension": 0.5,
+    "intensity": 0.0, "confidence": 0.0, "stage": "none",
+    "updated_at": None,
+}
+_NEUTRAL_MORPHOLOGY: dict = {
+    "pair": None, "strength": 0.0, "confidence": 0.0, "evidence": 0,
+    "available": False, "line_density": 0.0, "contour_asymmetry": 0.0,
+    "echo_strength": 0.0, "gesture_bias": 0.0,
+}
+
+
+def _morphology_from_history(conn) -> dict:
+    """Reconstruct the learned-pair morphology from the persisted
+    ``pattern_affinity_history`` (bounded top-three rows, shared
+    turn_key). This is the restart/isolated-dashboard path (plan §5.4):
+    the mutation is derived from already-persisted history, so no new
+    storage. Any fault or missing import returns the neutral shape."""
+    try:
+        from perception import patterns as _pats
+    except Exception:
+        try:
+            from ..perception import patterns as _pats  # type: ignore
+        except Exception:
+            return dict(_NEUTRAL_MORPHOLOGY)
+    try:
+        rows = conn.execute(
+            "SELECT ts, turn_key, top_pattern FROM "
+            "pattern_affinity_history WHERE top_pattern IS NOT NULL "
+            "ORDER BY ts DESC, id DESC").fetchall()
+    except Exception:
+        return dict(_NEUTRAL_MORPHOLOGY)
+    if not rows:
+        return dict(_NEUTRAL_MORPHOLOGY)
+    try:
+        morpho = _pats.morphology_from_rows(rows)
+    except Exception:
+        return dict(_NEUTRAL_MORPHOLOGY)
+    return morpho if isinstance(morpho, dict) else dict(_NEUTRAL_MORPHOLOGY)
+
+
 def _portrait_db_fallback(shape: dict, dims) -> dict:
     """Profile-DB fallback for the isolated dashboard half: bridges the
     persisted observed track through ``portrait_history`` (v3; the same
@@ -804,6 +849,14 @@ def _portrait_db_fallback(shape: dict, dims) -> dict:
                     }
         except Exception:
             shape["perception"] = _empty_perception(dims)
+        # Morphology (plan §5.4): the learned-pair mutation survives
+        # process restarts because it is derived from the persisted
+        # top-three pattern history — reconstructed lazily here, in the
+        # isolated dashboard child that has no live engine state.
+        try:
+            shape["morphology"] = _morphology_from_history(conn)
+        except Exception:
+            shape["morphology"] = dict(_NEUTRAL_MORPHOLOGY)
         row = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' "
             "AND name='portrait_history'").fetchone()
@@ -834,7 +887,9 @@ def _portrait_db_fallback(shape: dict, dims) -> dict:
                 "confidence": {d: None for d in dims},
                 "user": {d: None for d in dims},
                 "agent": {d: None for d in dims},
-                "perception": _empty_perception(dims)}
+                "perception": _empty_perception(dims),
+                "live_expression": dict(_NEUTRAL_LIVE_EXPRESSION),
+                "morphology": dict(_NEUTRAL_MORPHOLOGY)}
     finally:
         conn.close()
     return shape
@@ -863,6 +918,12 @@ def _portrait_shape() -> dict:
         "user": {d: None for d in dims},
         "agent": {d: None for d in dims},
         "perception": _empty_perception(dims),
+        # Transient live state is NEVER reconstructed from persisted
+        # history (plan §3.4): the fallback serves the neutral resting
+        # expression. The morphology IS reconstructed from the
+        # persisted pattern history below (plan §5.4).
+        "live_expression": dict(_NEUTRAL_LIVE_EXPRESSION),
+        "morphology": dict(_NEUTRAL_MORPHOLOGY),
     }
     _, fn = _engine_first(
         ("perception.portrait", "perception.portrait_store"),
@@ -1090,15 +1151,21 @@ def _portrait_live_view() -> dict | None:
 @router.get("/portrait")
 async def portrait():
     """Portrait: six dimensions + confidence + user/agent split +
-    additive ``perception``. Live in-process engine data when it holds
-    observed values; otherwise the profile-DB fallback (isolated
-    dashboard child). Never 500s."""
+    additive ``perception`` + optional ``live_expression`` (transient,
+    neutral in the DB fallback) and ``morphology`` (learned-pair
+    mutation, reconstructed from persisted history in the fallback).
+    Live in-process engine data when it holds observed values; otherwise
+    the profile-DB fallback (isolated dashboard child). Never 500s."""
     view = _portrait_live_view()
     if view is not None:
         if "perception" not in view:
             # Older engine code (or engine without the additive key):
             # documented empty perception, never 500, never invented.
             view = {**view, "perception": _empty_perception(_dimensions())}
+        if "live_expression" not in view:
+            view = {**view, "live_expression": dict(_NEUTRAL_LIVE_EXPRESSION)}
+        if "morphology" not in view:
+            view = {**view, "morphology": dict(_NEUTRAL_MORPHOLOGY)}
         return view
     return _portrait_shape()
 
