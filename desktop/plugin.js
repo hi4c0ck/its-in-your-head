@@ -75,6 +75,195 @@ function channelSet(data) {
   return { observed, interpreted };
 }
 
+/* ------------------------------------------------------------------------
+ * Motion grammar (template contract): the engine layer decides WHAT motion
+ * is requested; each template decides HOW it is expressed in its own
+ * drawing language. Rules:
+ *  - Bounded freedom: every displacement saturates inside a fixed
+ *    envelope (the template's expressive region); generated geometry
+ *    never leaves it, and the neutral construction is never moved.
+ *  - High gain: the saturator maps small control changes across a large
+ *    fraction of the region (a 0.1 input crosses ~25% of its envelope),
+ *    so the 48px compact rendering stays visibly alive without
+ *    exaggerated facial expressions.
+ *  - Continuous + reversible: no snapping; the server-side
+ *    settle/hold/release already smooths the input, and this layer adds
+ *    no timers of its own.
+ *  - Deterministic: a pure function of (live, morphology). Identical
+ *    inputs always give identical geometry — no uncontrolled jitter.
+ *  - Mutations reshape the cloud: morphology widens/narrows envelopes
+ *    and shifts treatment within the bounds; it can never break the
+ *    geometric constraints or the template's identity.
+ * ------------------------------------------------------------------------ */
+
+const MOTION_ENVELOPE = Object.freeze({
+  gaze: 22,       // territory width, px, studio coordinate system (clamped to the eye region)
+  headTilt: 4.2,  // deg added on top of the resting rotation
+  brow: 5.5,      // px of brow travel
+  eyeOpen: 0.16,  // aperture delta (0..1 scale of the eye path)
+  mouth: 4.5,     // px of mouth travel inside its region
+  contour: 6.0,   // px of secondary-contour travel
+  pressure: 0.25, // bounded stroke-width modulation
+});
+const MOTION_GAIN = 2.6;
+const _sat = (x) => Math.tanh(MOTION_GAIN * x); // high-gain saturator
+// Gaze travel is bounded by the EYE REGION the pupil lives in (motion
+// contract: every generated point stays inside its permitted region).
+// Resting pupils sit left-of-center in each eye, so the left travel is
+// short and the right travel is long — the clamp is asymmetric on purpose.
+const GAZE_CLAMP = Object.freeze({ min: -3, max: 24 });
+// FNV-1a 32-bit: deterministic saccade selection. No Math.random — the
+// same target signature always lands the gaze in the same place.
+function _fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+function liveControls(data = {}) {
+  const raw = data.live_expression && typeof data.live_expression === 'object' ? data.live_expression : null;
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  const in01 = (v) => Math.max(0, Math.min(1, v));
+  const active = !!(raw && (raw.stage === 'prompt' || raw.stage === 'paired'));
+  const intensity = active ? in01(num(raw.intensity, 0)) : 0;
+  const confidence = active ? in01(num(raw.confidence, 0)) : 0;
+  return Object.freeze({
+    active,
+    stage: active ? String(raw.stage) : 'none',
+    openness: active ? num(raw.openness, 0) : 0,
+    focus: active ? num(raw.focus, 0) : 0,
+    // Unavailable channels rest at the 0.5 midpoint — never fabricated:
+    // a prompt-only stage leaves them exactly 0.5 (no movement), a
+    // paired stage carries the server's derived values.
+    resonance: active && raw.resonance != null ? num(raw.resonance, 0.5) : 0.5,
+    tension: active && raw.tension != null ? num(raw.tension, 0.5) : 0.5,
+    intensity,
+    confidence,
+    // Target identity: the server's expression timestamp. The gaze
+    // saccade signature includes it, so a new target re-rolls the
+    // landing while repeated polls of the same target hold it exactly.
+    updated_at: active ? num(raw.updated_at, 0) : 0,
+    // Effective amplitude: strength scaled by signal reliability. A
+    // prompt-only stage (low confidence) still moves; a paired stage
+    // moves more. Resting (no active stage) is exactly 0.
+    amp: intensity * (0.45 + 0.55 * confidence),
+  });
+}
+
+function morphologyControls(data = {}) {
+  const raw = data.morphology && typeof data.morphology === 'object' ? data.morphology : null;
+  const active = !!(raw && raw.available === true && Number(raw.strength) > 0.02);
+  const g = (k) => (active ? Math.max(-1, Math.min(1, Number(raw[k]) || 0)) : 0);
+  return Object.freeze({
+    available: active,
+    pair: active && Array.isArray(raw.pair) ? raw.pair.map(String).slice(0, 2) : null,
+    strength: active ? in01raw(raw.strength) : 0,
+    lineDensity: g('line_density'),
+    contourAsymmetry: g('contour_asymmetry'),
+    echoStrength: g('echo_strength'),
+    gestureBias: g('gesture_bias'),
+  });
+  function in01raw(v) { return Math.max(0, Math.min(1, Number(v) || 0)); }
+}
+
+/**
+ * High-gain, bounded motion displacements for one poll.
+ *
+ * `live` are the server's displayed expression controls (already
+ * settled/released by the engine's timestamp arithmetic); `morphology`
+ * reshapes the expressive cloud. The result is frozen so templates
+ * consume it immutably. All values are inside their envelopes by
+ * construction; at rest (no active stage, no mutation) every value is
+ * exactly its neutral value.
+ */
+function motionLayer(data = {}) {
+  const L = liveControls(data);
+  const M = morphologyControls(data);
+  const E = MOTION_ENVELOPE;
+  const open = _sat(L.openness) * L.amp;
+  const focus = _sat(L.focus) * L.amp;
+  const reson = (L.resonance - 0.5) * 2; // -1..1, 0 = rest
+  const tension = (L.tension - 0.5) * 2;
+  const tensionBreak = tension > 0 ? tension : 0; // broken-stroke side only
+  const continuity = Math.max(0, 1 - Math.abs(tension) * 0.45 - Math.max(0, -reson) * 0.45);
+  // Mutations reshape the cloud (envelopes/treatment), not the neutral
+  // construction, and stay inside the bounds.
+  const headEnv = E.headTilt * (1 + M.contourAsymmetry);
+  // GAZE TERRITORY MODEL — the controls shape a CLOUD, not a position.
+  // The gaze hovers near rest and makes ONE deterministic saccade per
+  // expression target: a heavy-tailed landing inside a territory whose
+  // width itself BREATHEs per target (mostly compact, occasionally wide
+  // — that is where the 15px moments come from). Exploratory breadth
+  // widens the territory; focus pins it tight; gesture-mutation widens
+  // it too. A 0.1-level signal change re-rolls the landing; an unchanged
+  // target holds its exact landing (byte-stable across polls — no
+  // jitter, no Math.random). At rest the territory closes to zero and
+  // the gaze returns to its off-axis baseline. Territory width follows
+  // the eased amplitude, so on release the territory shrinks and the
+  // gaze steps back home.
+  const q10 = (v) => Math.round((Number(v) || 0) * 10); // 0.1-precision bucket
+  const sig = [
+    L.stage,
+    q10(L.openness),
+    q10(L.focus),
+    q10(L.intensity),
+    q10(L.confidence),
+    q10(L.updated_at),
+  ].join('|');
+  const h = _fnv1a(sig);
+  const u = (h % 997) / 997; // 0..1, prime modulus avoids 2^32 wrap bias
+  const heavy = Math.pow(u, 2.2); // heavy-tailed landing: mostly inner, moments at the edge
+  const breath = 0.30 + 0.70 * Math.pow(((h >>> 16) % 997) / 997, 2.2); // cloud width per target
+  const pin = 1 - 0.6 * Math.abs(focus); // focus pins the territory tight
+  const territoryW = L.active
+    ? E.gaze
+      * (0.25 + 0.75 * Math.min(1, Math.abs(open) * 1.2))
+      * pin
+      * breath
+      * (1 + M.gestureBias * 0.5)
+      * Math.max(0.25, L.amp)
+    : 0;
+  const territoryC = E.gaze * 0.25 * (open * 0.75 + focus * 0.25);
+  const drift = open * 0.75 + focus * 0.25;
+  let dir;
+  if (Math.abs(drift) > 0.1) dir = drift > 0 ? 1 : -1; // follow the signal
+  else dir = ((h >>> 9) & 1) ? 1 : -1; // weak drift: deterministic coin
+  if (((h >>> 12) & 3) === 0) dir = -dir; // ~25% wander against the drift
+  const landFrac = 0.15 + 0.85 * heavy; // never dead-center; moments at the edge
+  const gazeDXRaw = territoryC + dir * territoryW * landFrac;
+  return Object.freeze({
+    active: L.active,
+    stage: L.stage,
+    // Gaze: one saccade per expression target inside the territory.
+    // Clamped to the eye region (the pupil's permitted travel).
+    gazeDX: Math.max(GAZE_CLAMP.min, Math.min(GAZE_CLAMP.max, gazeDXRaw)),
+    gazeTerritory: territoryW, // cloud width, px units (0 at rest)
+    gazeCenter: territoryC,    // cloud center offset from resting gaze
+    gazeDY: E.gaze * 0.25 * (-open * 0.6 + focus * 0.2) * (L.active ? 1 : 0),
+    headTilt: headEnv * (open * 0.8 + focus * 0.2) + M.contourAsymmetry * 1.2,
+    brow: E.brow * focus,
+    // Aperture: focus sharpens; openness relaxes the lids a little less.
+    eyeOpen: E.eyeOpen * focus + E.eyeOpen * 0.4 * open,
+    mouthLift: E.mouth * (open * 0.85),
+    mouthTension: E.mouth * (Math.max(0, focus) * 0.7),
+    // Secondary contours: openness drifts them; tension breaks them;
+    // low resonance interrupts them (controlled, bounded).
+    contourDrift: E.contour * open * (0.6 + 0.4 * M.contourAsymmetry),
+    continuity,
+    tensionBreak, // broken-stroke side, 0..1 (0 at rest and for negative tension)
+    // Stroke pressure: 1.0 at rest; bounded modulation only when a
+    // stage is active (a resting portrait keeps its native weights).
+    pressure: 1 + E.pressure * (Math.abs(focus) * 0.6 + tensionBreak * 0.4) * (L.active ? 1 : 0),
+    echoBoost: M.echoStrength * 3,
+    lineDensity: M.lineDensity,
+    asymmetry: M.contourAsymmetry,
+    gestureBias: M.gestureBias,
+  });
+}
+
 const line = (d, attrs = '') => `<path d="${d}" ${attrs}/>`;
 
 /** Build a pencil-led SVG study from the existing /portrait response shape. */
@@ -103,26 +292,29 @@ function buildSoftFlowPortraitSvg(data = {}, options = {}) {
 
   // The six observations blend into a small expressive envelope. These are
   // shape controls, not emotion labels or claims about the person.
+  // The motion-grammar layer (shared by all three templates) adds the
+  // transient live gesture and the slow morphology treatment on top.
+  const m = motionLayer(data);
   const openness = d * 0.45 + e * 0.35 + s * 0.20;
   const focus = aDepth * 0.65 + d * 0.20 - e * 0.15;
   const warmth = c * 0.55 + e * 0.45;
   const gaze = d * 4.0 + e * 1.8;
-  const gazeOffsetX = -26.0 + e * 1.0;
-  const gazeOffsetY = 15.0 + aDepth * .6 - c * .2;
-  const browL = openness * 5.0 - focus * 3.5;
-  const eyeOpen = 0.82 + openness * 0.12 - focus * 0.05;
-  const mouthTension = d * 1.35 + focus * 1.0;
-  const mouthLift = warmth * 5.5;
-  const faceTilt = e * 2.1 + s * 0.6;
+  const gazeOffsetX = -26.0 + e * 1.0 + m.gazeDX * .5;
+  const gazeOffsetY = 15.0 + aDepth * .6 - c * .2 + m.gazeDY * .5;
+  const browL = openness * 5.0 - focus * 3.5 + m.brow;
+  const eyeOpen = 0.82 + openness * 0.12 - focus * 0.05 + m.eyeOpen;
+  const mouthTension = d * 1.35 + focus * 1.0 + m.mouthTension * .5;
+  const mouthLift = warmth * 5.5 + m.mouthLift;
+  const faceTilt = e * 2.1 + s * 0.6 + m.headTilt * .62;
   const hairDrift = e * 9.0;
-  const detailOpacity = 0.22 + Math.abs(aDepth) * 0.58;
-  const hatchOpacity = 0.20 + Math.abs(c) * 0.56;
-  const shoulderSpread = 1 + s * 0.055;
+  const detailOpacity = 0.22 + Math.abs(aDepth) * 0.58 + m.lineDensity;
+  const hatchOpacity = 0.20 + Math.abs(c) * 0.56 + m.lineDensity * .8;
+  const shoulderSpread = 1 + s * 0.055 + m.gestureBias * 0.05;
   const shoulderLeftTip = compact ? 166 - (shoulderSpread - 1) * 20 : 150 - (shoulderSpread - 1) * 24;
   const shoulderRightTip = compact ? 566 + (shoulderSpread - 1) * 20 : 581 + (shoulderSpread - 1) * 24;
   const shoulderBottom = compact ? 604 : 681;
   const rightShoulderBottom = compact ? 600 : 672;
-  const echoCount = Math.max(0, Math.min(4, Math.round(Math.abs(it) * 4)));
+  const echoCount = Math.max(0, Math.min(4, Math.round(Math.abs(it) * 4 + m.echoBoost)));
   const interpretedPresent = PORTRAIT_DIMENSIONS.some((dim) => data?.agent?.[dim] != null);
   const agentMean = PORTRAIT_DIMENSIONS.reduce((sum, dim) => sum + a[dim].deviation, 0) / PORTRAIT_DIMENSIONS.length;
   const agentOpacity = interpretedPresent ? 0.10 + Math.min(0.30, Math.abs(agentMean) * 0.35 + 0.06) : 0;
@@ -280,7 +472,7 @@ function buildSoftFlowPortraitSvg(data = {}, options = {}) {
   ${interpretedContour}
 
   <!-- A few final broken graphite strokes keep the hand-drawn edge visible. -->
-  <g id="${id}-pencil-finishing" data-dither-region="pencil-finishing" fill="none" stroke="${mid}" stroke-linecap="round">
+  <g id="${id}-pencil-finishing" data-dither-region="pencil-finishing" fill="none" stroke="${mid}" opacity="${f(0.9 * m.continuity + 0.1)}" stroke-linecap="round">
     ${line('M 220 312 C 216 334 217 350 221 367', 'stroke-width="1.2" opacity=".62"')}
     ${line('M 486 302 C 491 328 489 348 485 365', 'stroke-width="1.1" opacity=".56"')}
     ${line('M 274 528 C 292 551 312 567 329 575', 'stroke-width="1.15" opacity=".52"')}
@@ -354,6 +546,14 @@ function buildPortraitModel(data = {}) {
     Math.abs(directness), Math.abs(context), Math.abs(exploration),
     Math.abs(analysis), Math.abs(iteration), Math.abs(scope),
   );
+  // Three separate, composable inputs (plan §6): persistent dimensions
+  // build the baseline (model.expression), live expression adds the
+  // transient gesture (model.motion from model.live), morphology evolves
+  // the drawing treatment (model.morphology). The layers never overwrite
+  // each other: templates add the motion deltas on top of the baseline.
+  const live = liveControls(data);
+  const morphology = morphologyControls(data);
+  const motion = motionLayer(data);
   return Object.freeze({
     available: !!data?.available,
     observed,
@@ -383,6 +583,17 @@ function buildPortraitModel(data = {}) {
       hatchStrength: 0.14 + Math.abs(context) * 0.42,
       interpretedBias: agentMean,
     }),
+    // Additive live + morphology layers (plan §6): the persistent
+    // dimensions above stay the baseline; `motion` is the transient
+    // gesture displacement and `morphology` the slow drawing treatment.
+    // Raw passthrough so the legacy soft-flow template (which builds
+    // from raw API data, not this model) consumes the SAME derived
+    // numbers.
+    live,
+    morphology,
+    motion,
+    rawLive: data.live_expression || null,
+    rawMorphology: data.morphology || null,
   });
 }
 
@@ -408,6 +619,17 @@ function buildCompactPortraitGlyph(model, options = {}, profile = neutralProfile
   const c = model.observed.context_richness.deviation;
   const s = model.observed.scope.deviation;
   const compact = true;
+  // Motion-grammar deltas: the live layer adds displacement on top of the
+  // persistent baseline (model.expression) without overwriting it; the
+  // morphology layer reshapes treatment (density/echo) within its bounds.
+  const m = model.motion;
+  const cBrow = e.brow + m.brow;
+  const cGazeX = e.gazeX + m.gazeDX;
+  const cGazeY = e.gazeY + m.gazeDY;
+  const cMouthT = e.mouthTension + m.mouthTension;
+  const cMouthL = e.mouthLift + m.mouthLift;
+  const cTilt = e.headTilt + m.headTilt;
+  const pW = m.pressure;
   const accentAlpha = Math.min(.9, Math.max(0, (model.signalStrength - .20) * 1.15));
   const hairFront = jaw > .5
     ? 'M 218 282 C 248 221 300 188 356 191 C 393 194 425 216 449 243 C 463 223 474 204 484 180 C 493 239 468 280 430 297 C 386 317 330 289 286 309 C 258 322 239 342 225 367'
@@ -425,7 +647,7 @@ function buildCompactPortraitGlyph(model, options = {}, profile = neutralProfile
       ${Math.abs(s) > .45 ? `<path d="${compact ? (s > 0 ? 'M 166 604 C 198 584 224 574 268 568' : 'M 566 600 C 538 580 510 570 454 556') : (s > 0 ? 'M 150 681 C 190 630 225 615 267 608' : 'M 581 672 C 540 620 500 604 454 596')}"/>` : ''}
     </g>` : '';
   const interpreted = model.interpretedPresent ? `
-    <g id="${id}-interpreted-contour" data-track="interpreted" data-accent-region="llm-impression" data-dither-region="interpreted" fill="none" stroke="${interpretedAccent}" stroke-width="2.0" opacity="${f(Math.min(.38, .12 + model.interpretedStrength * .28))}" stroke-linecap="round">
+    <g id="${id}-interpreted-contour" data-track="interpreted" data-accent-region="llm-impression" data-dither-region="interpreted" fill="none" stroke="${interpretedAccent}" stroke-width="2.0" opacity="${f(Math.min(.38, .12 + model.interpretedStrength * .28) * m.continuity)}" stroke-linecap="round">
       <path d="M 234 286 C 226 190 287 126 357 122 C 435 118 488 181 486 286"/>
       <path d="M 270 351 C 294 333 321 333 344 351"/>
     </g>` : '';
@@ -434,8 +656,8 @@ function buildCompactPortraitGlyph(model, options = {}, profile = neutralProfile
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="80 65 570 570" role="img" aria-label="It's in Your Head expressive pencil glyph" data-gaze-rest="averted-down-left" data-pose="floating-open-shoulders" shape-rendering="geometricPrecision" preserveAspectRatio="xMidYMid meet">
   <title>It's in Your Head — ${xmlText(options.templateLabel || 'Neutral pencil')}</title>
   <desc>Compact neutral pencil glyph. Bold contours carry the expression at small size; it does not infer sex or gender.</desc>
-  <g id="${id}-figure-attitude" transform="rotate(${f(-2.2 + e.headTilt * .12)} 360 400)">
-  <g id="${id}-head" transform="translate(7 0) rotate(${f(-4.2 + e.headTilt * .70)} 360 360)">
+  <g id="${id}-figure-attitude" transform="rotate(${f(-2.2 + cTilt * .12)} 360 400)">
+  <g id="${id}-head" transform="translate(7 0) rotate(${f(-4.2 + cTilt * .70)} 360 360)">
     <g id="${id}-hair" data-dither-region="hair-back" fill="none" stroke="${ink}" stroke-width="8.2" stroke-linecap="round" stroke-linejoin="round">
       <path id="${id}-hair-primary" data-contour="primary" d="${hairOuterCompact}"/>
       <path d="M 224 326 C 208 369 216 421 239 456 C 251 475 266 487 282 497 M 480 322 C 486 373 472 432 445 469 C 432 488 414 505 397 515" stroke-width="6.6"/>
@@ -444,23 +666,23 @@ function buildCompactPortraitGlyph(model, options = {}, profile = neutralProfile
       <path d="M 220 290 C 245 238 290 207 334 199 C 322 218 314 237 313 255 C 344 229 379 218 414 222 C 445 226 465 243 482 264 C 458 259 439 262 417 274 C 384 292 352 287 322 286 C 283 284 250 307 228 355"/>
     </g>
     <g id="${id}-face" data-dither-region="face" fill="none" stroke-linecap="round" stroke-linejoin="round">
-      <path id="${id}-face-primary" data-contour="primary" d="${faceCompact}" stroke="${ink}" stroke-width="${jaw > .5 ? 8.8 : 7.8}"/>
+      <path id="${id}-face-primary" data-contour="primary" d="${faceCompact}" stroke="${ink}" stroke-width="${f((jaw > .5 ? 8.8 : 7.8) * pW)}"/>
       <path d="M 252 269 C 267 213 314 182 366 182 C 402 182 431 209 445 260" stroke="${mid}" stroke-width="2.0" opacity=".7"/>
     </g>
     <g id="${id}-features" data-dither-region="features" fill="none" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M 267 ${338 - e.brow} C 289 ${320 - e.brow - e.focus} 318 ${320 - e.brow * .25} 343 ${339 + e.focus}" stroke="${ink}" stroke-width="${f(7.2 + profile.brow * 1.6)}"/>
+      <path d="M 267 ${338 - cBrow} C 289 ${320 - cBrow - e.focus} 318 ${320 - cBrow * .25} 343 ${339 + e.focus}" stroke="${ink}" stroke-width="${f(7.2 + profile.brow * 1.6)}"/>
       <g id="${id}-near-eye-plane" data-plane="near">
-        <path d="M 267 ${338 - e.brow} C 289 ${320 - e.brow - e.focus} 318 ${320 - e.brow * .25} 343 ${339 + e.focus}" stroke="${ink}" stroke-width="${f(7.2 + profile.brow * 1.6)}"/>
-        <path d="M 267 367 C 289 ${jaw > .5 ? 354 : 352} 321 ${352 - e.gaze * .5} 345 367 C 323 ${382 + (e.eyeOpen - 1) * 20} 290 ${383 + (e.eyeOpen - 1) * 16} 267 367 Z" stroke="${ink}" stroke-width="${jaw > .5 ? 6.8 : 6.1}"/>
-        <ellipse cx="${309 + e.gazeX}" cy="${367 + e.gazeY * .4}" rx="4.8" ry="6.0" fill="${ink}" stroke="none"/>
+        <path d="M 267 ${338 - cBrow} C 289 ${320 - cBrow - e.focus} 318 ${320 - cBrow * .25} 343 ${339 + e.focus}" stroke="${ink}" stroke-width="${f(7.2 + profile.brow * 1.6)}"/>
+        <path d="M 267 367 C 289 ${jaw > .5 ? 354 : 352} 321 ${352 - e.gaze * .5} 345 367 C 323 ${382 + (e.eyeOpen + m.eyeOpen - 1) * 20} 290 ${383 + (e.eyeOpen + m.eyeOpen - 1) * 16} 267 367 Z" stroke="${ink}" stroke-width="${jaw > .5 ? 6.8 : 6.1}"/>
+        <ellipse cx="${309 + cGazeX}" cy="${367 + cGazeY * .4}" rx="4.8" ry="6.0" fill="${ink}" stroke="none"/>
       </g>
       <g id="${id}-far-eye-plane" data-plane="far" transform="translate(88 0) scale(.74 1)">
-        <path d="M 389 ${337 + e.focus} C 410 ${320 - e.brow * .3} 435 ${322 + e.brow} 451 ${340 + e.focus}" stroke="${mid}" stroke-width="5.8"/>
+        <path d="M 389 ${337 + e.focus} C 410 ${320 - cBrow * .3} 435 ${322 + cBrow} 451 ${340 + e.focus}" stroke="${mid}" stroke-width="5.8"/>
         <path d="M 393 367 C 409 ${359 + e.gaze * .16 - e.focus} 431 ${359 + e.gaze * .16} 450 369 C 432 379 410 379 393 367 Z" stroke="${ink}" stroke-width="5.4"/>
-        <ellipse cx="${414 + e.gazeX * .58}" cy="${369 + e.gazeY * .4}" rx="3.2" ry="4.4" fill="${ink}" stroke="none"/>
+        <ellipse cx="${414 + cGazeX * .58}" cy="${369 + cGazeY * .4}" rx="3.2" ry="4.4" fill="${ink}" stroke="none"/>
       </g>
       <path d="M 366 359 C 362 389 345 414 348 425 C 356 432 369 430 378 422" stroke="${mid}" stroke-width="4.6"/>
-      <path d="M ${310 - e.mouthTension} ${466 - e.mouthLift} C 339 ${463 + e.mouthTension * .12} 371 ${463 - e.mouthTension * .10} ${392 + e.mouthTension} ${460 - e.mouthLift}" stroke="${ink}" stroke-width="5.2"/>
+      <path d="M ${310 - cMouthT} ${466 - cMouthL} C 339 ${463 + cMouthT * .12} 371 ${463 - cMouthT * .10} ${392 + cMouthT} ${460 - cMouthL}" stroke="${ink}" stroke-width="5.2"/>
     </g>
   </g>
   <g id="${id}-shoulder-gesture" data-dither-region="clothing" data-pose="floating-open-shoulders" fill="none" stroke="${ink}" stroke-width="6.2" stroke-linecap="round" stroke-linejoin="round">
@@ -493,25 +715,42 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
   const jaw = profile.jaw || 0;
   const faceWidth = profile.faceWidth || 0;
   const browWeight = profile.brow || 0;
-  const gazeX = e.gazeX;
-  const gazeY = e.gazeY;
-  const rotation = -4.2 + e.headTilt * .62;
+  // Motion-grammar deltas: live displacement on top of the persistent
+  // baseline (model.expression); morphology reshapes treatment only.
+  const m = model.motion;
+  const cBrow = e.brow + m.brow;
+  const cGazeX = e.gazeX + m.gazeDX;
+  const cGazeY = e.gazeY + m.gazeDY;
+  const cMouthT = e.mouthTension + m.mouthTension;
+  const cMouthL = e.mouthLift + m.mouthLift;
+  const cTilt = e.headTilt + m.headTilt;
+  const pW = m.pressure;
+  const gazeX = cGazeX;
+  const gazeY = cGazeY;
+  const rotation = -4.2 + cTilt * .62;
   const c = model.observed.context_richness.deviation;
   const x = model.observed.exploration.deviation;
   const a = model.observed.analytical_depth.deviation;
   const s = model.observed.scope.deviation;
+  const it = model.observed.iteration.deviation;
+  const tb = m.tensionBreak;
+  // Iteration = overdrawn underdrawing: ghost re-strokes of the primary
+  // contour. Count from the observed deviation + the echo morphology;
+  // sign sets the drift direction. Deterministic offsets, bounded.
+  const echoCount = Math.max(0, Math.min(4, Math.round(Math.abs(it) * 3.2 + m.echoBoost)));
+  const echoDir = it < 0 ? -1 : 1;
   const signalAlpha = Math.min(.86, Math.max(0, (model.signalStrength - .20) * 1.12));
   const agentOpacity = model.interpretedPresent
     ? Math.min(.48, .13 + model.interpretedStrength * .32) : 0;
   const compact = rendering === 'compact';
   const detail = compact ? '' : `
-    <g id="${id}-expanded-pencil" data-dither-region="pencil-detail" fill="none" stroke="${faint}" stroke-width="1.15" opacity=".66" stroke-linecap="round">
+    <g id="${id}-expanded-pencil" data-dither-region="pencil-detail" fill="none" stroke="${faint}" stroke-width="1.15" opacity="${f(Math.min(.9, (.66 + m.lineDensity * .4) * (0.35 + 0.65 * m.continuity)))}" stroke-linecap="round">
       <path d="M 246 331 l 11 18 M 252 345 l 10 17 M 260 360 l 9 15 M 452 340 l -9 17 M 446 354 l -9 17 M 440 369 l -8 15"/>
       <path d="M 273 484 l 14 12 M 285 496 l 14 11 M 417 482 l -13 13 M 405 494 l -13 11"/>
       <path d="M 264 221 C 284 186 321 163 354 162 M 425 166 C 455 184 473 212 479 239"/>
       <path d="M 215 290 C 205 323 208 355 218 382 M 493 288 C 502 320 497 353 487 378"/>
     </g>
-    <g id="${id}-micro-hatching" data-dither-region="micro-hatching" stroke="${shade}" stroke-width="1" opacity="${f(.28 + Math.abs(c) * .34)}" stroke-linecap="round">
+    <g id="${id}-micro-hatching" data-dither-region="micro-hatching" stroke="${shade}" stroke-width="1" opacity="${f(Math.min(.9, (.28 + Math.abs(c) * .34 + m.lineDensity * .6) * (0.35 + 0.65 * m.continuity)))}" stroke-linecap="round">
       <path d="M 258 410 l 12 17 M 259 423 l 12 17 M 268 437 l 10 14 M 455 407 l -11 18 M 449 422 l -11 16"/>
       <path d="M 316 520 l 14 10 M 328 526 l 13 8 M 405 519 l -13 10"/>
     </g>`;
@@ -526,7 +765,7 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
     ? 'M 224 326 C 204 280 207 226 231 188 C 242 168 257 151 278 141 L 267 119 C 292 132 313 125 339 108 C 359 124 382 124 405 113 C 450 136 481 169 493 212 C 506 256 490 308 466 347'
     : 'M 225 342 C 183 281 196 174 268 119 C 327 66 423 82 472 157 C 535 229 515 351 486 435 C 466 492 438 544 402 581';
 
-  const echo = Array.from({ length: e.echoCount }, (_, index) => {
+  const echo = Array.from({ length: Math.min(4, e.echoCount + Math.round(m.echoBoost)) }, (_, index) => {
     const n = index + 1;
     const offset = 2.1 * n * (model.observed.iteration.deviation < 0 ? -1 : 1);
     return `<path d="M ${225 + offset} 326 C ${204 + offset} 251 ${247 + offset} 143 ${350 + offset} 111 C ${438 + offset} 106 ${504 + offset} 183 ${487 + offset} 283" stroke="${mid}" stroke-width="1.1" opacity="${f(.14 - index * .025)}" fill="none"/>`;
@@ -557,17 +796,23 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
     <path d="M 151 712 C 217 652 275 625 328 617 M 392 616 C 464 622 520 656 580 712"/>
     ${compact ? '' : '<path d="M 306 107 C 374 73 453 105 493 172"/>'}
   </g>
+  ${echoCount > 0 ? `<g id="${id}-iteration-underdrawing" data-channel="iteration" data-dither-region="iteration-underdrawing" fill="none" stroke="${faint}" stroke-linecap="round">
+    ${Array.from({ length: echoCount }, (_, i) => {
+      const off = (i + 1) * 3.2 * echoDir;
+      return `<path d="${faceContour}" transform="translate(${f(off)} ${f(-off * .55)})" stroke-width="${f(2.6 - i * .4)}" opacity="${f(.2 - i * .035)}"/>`;
+    }).join('\n    ')}
+  </g>` : ''}
 
   <g id="${id}-figure-attitude" data-pose="floating-open-shoulders" transform="rotate(${f(-2.2 + e.headTilt * .12)} 360 400)">
   <g id="${id}-head-gesture" transform="rotate(${f(rotation)} 360 360)">
     <g id="${id}-hair-mass" data-dither-region="hair-back" fill="none" stroke-linecap="round" stroke-linejoin="round">
-      <path id="${id}-hair-primary" data-contour="primary" d="${hairOuterStudio}" stroke="${ink}" stroke-width="${jaw > .5 ? 4.9 : 4.6}"/>
+      <path id="${id}-hair-primary" data-contour="primary" d="${hairOuterStudio}" stroke="${ink}" stroke-width="${f((jaw > .5 ? 4.9 : 4.6) * pW)}"/>
       <path d="M 224 326 C 209 369 216 421 239 456 C 251 475 266 487 282 497" stroke="${ink}" stroke-width="3.0"/>
       <path d="M 480 322 C 486 373 472 432 445 469 C 432 488 414 505 397 515" stroke="${ink}" stroke-width="3.1"/>
       <path d="M 233 261 C 261 190 321 143 385 145 C 436 146 466 177 485 217" stroke="${mid}" stroke-width="1.55" opacity=".72"/>
       <path d="M 238 227 C 273 167 339 137 391 149" stroke="${faint}" stroke-width="1.2" opacity=".7"/>
       <path d="M 470 230 C 490 268 490 306 475 333" stroke="${mid}" stroke-width="1.4" opacity=".72"/>
-      ${compact ? '' : `<g data-dither-region="hair-detail" stroke="${faint}" stroke-width="1.05" opacity="${f(.25 + Math.abs(c) * .25)}"><path d="M 238 250 l 16 -25 M 250 256 l 19 -26 M 264 261 l 22 -26 M 446 210 l 18 22 M 438 222 l 18 25 M 430 236 l 17 26"/></g>`}
+      ${compact ? '' : `<g data-dither-region="hair-detail" stroke="${faint}" stroke-width="1.05" opacity="${f(Math.min(.9, (.25 + Math.abs(c) * .25 + m.lineDensity * .4) * (0.35 + 0.65 * m.continuity)))}"><path d="M 238 250 l 16 -25 M 250 256 l 19 -26 M 264 261 l 22 -26 M 446 210 l 18 22 M 438 222 l 18 25 M 430 236 l 17 26"/></g>`}
     </g>
 
     <g id="${id}-hair-front" data-dither-region="hair-front" fill="none" stroke-linecap="round" stroke-linejoin="round">
@@ -578,7 +823,7 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
     </g>
 
     <g id="${id}-face" data-dither-region="face" fill="none" stroke-linecap="round" stroke-linejoin="round">
-      <path id="${id}-face-primary" data-contour="primary" d="${faceContour}" stroke="${ink}" stroke-width="4.0"/>
+      <path id="${id}-face-primary" data-contour="primary" d="${faceContour}" stroke="${ink}" stroke-width="${f(4.0 * pW)}"${tb > .15 ? ` stroke-dasharray="${f((34 + (1 - tb) * 240).toFixed(1))} ${f((3 + tb * 26).toFixed(1))}"` : ''}/>
       <path d="M 252 269 C 267 213 314 181 366 181 C 407 181 435 208 445 260" stroke="${mid}" stroke-width="1.5" opacity=".7"/>
       <path d="M 243 316 C 242 393 278 466 334 501" stroke="${mid}" stroke-width="1.35" opacity=".62"/>
       <path d="M 468 316 C 464 383 436 447 391 484" stroke="${faint}" stroke-width="1.0" opacity=".65"/>
@@ -586,19 +831,19 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
 
     <g id="${id}-features" data-dither-region="features" fill="none" stroke-linecap="round" stroke-linejoin="round">
       <g id="${id}-near-eye-plane" data-plane="near">
-        <path d="M 267 ${338 - e.brow} C 289 ${320 - e.brow - e.focus} 318 ${320 - e.brow * .25} 343 ${339 + e.focus}" stroke="${ink}" stroke-width="${f(3.2 + browWeight)}"/>
-        <path d="M 267 367 C 289 ${352 - e.gaze - e.focus} 321 ${352 - e.gaze * .5} 345 367 C 323 ${382 + (e.eyeOpen - 1) * 20} 290 ${383 + (e.eyeOpen - 1) * 16} 267 367 Z" stroke="${ink}" stroke-width="2.75"/>
+        <path d="M 267 ${338 - cBrow} C 289 ${320 - cBrow - e.focus} 318 ${320 - cBrow * .25} 343 ${339 + e.focus}" stroke="${ink}" stroke-width="${f((3.2 + browWeight) * pW)}"/>
+        <path d="M 267 367 C 289 ${352 - e.gaze - e.focus} 321 ${352 - e.gaze * .5} 345 367 C 323 ${382 + (e.eyeOpen + m.eyeOpen - 1) * 20} 290 ${383 + (e.eyeOpen + m.eyeOpen - 1) * 16} 267 367 Z" stroke="${ink}" stroke-width="2.75"/>
         <ellipse cx="${309 + gazeX}" cy="${367 + gazeY * .4}" rx="4.5" ry="5.8" fill="${ink}" stroke="none"/>
       </g>
       <g id="${id}-far-eye-plane" data-plane="far" transform="translate(88 0) scale(.74 1)">
-        <path d="M 389 ${337 + e.focus} C 410 ${320 - e.brow * .3} 435 ${322 + e.brow} 451 ${340 + e.focus}" stroke="${mid}" stroke-width="${f(2.4 + browWeight * .45)}"/>
+        <path d="M 389 ${337 + e.focus} C 410 ${320 - cBrow * .3} 435 ${322 + cBrow} 451 ${340 + e.focus}" stroke="${mid}" stroke-width="${f(2.4 + browWeight * .45)}"/>
         <path d="M 393 367 C 409 ${359 + e.gaze * .16 - e.focus} 431 ${359 + e.gaze * .16} 450 369 C 432 379 410 379 393 367 Z" stroke="${ink}" stroke-width="2.45"/>
         <ellipse cx="${414 + gazeX * .58}" cy="${369 + gazeY * .4}" rx="2.9" ry="4.2" fill="${ink}" stroke="none"/>
       </g>
-      <path d="M 366 359 C 362 389 345 414 348 425 C 356 432 369 430 378 422" stroke="${mid}" stroke-width="1.8"/>
+      <path d="M 366 359 C 362 389 345 414 348 425 C 356 432 369 430 378 422" stroke="${mid}" stroke-width="${f(1.8 * pW)}"/>
       <path d="M 338 432 C 348 437 360 437 370 431" stroke="${faint}" stroke-width="1.15"/>
-      <path d="M ${310 - e.mouthTension} ${466 - e.mouthLift} C 339 ${463 + e.mouthTension * .12} 371 ${463 - e.mouthTension * .10} ${392 + e.mouthTension} ${460 - e.mouthLift}" stroke="${ink}" stroke-width="2.15"/>
-      ${compact ? '' : `<path d="M 333 ${476 - e.mouthLift * .45} C 353 ${480 + e.mouthLift * .25} 376 ${474 + e.mouthLift * .22} 390 ${468 - e.mouthLift * .4}" stroke="${mid}" stroke-width="1.0" opacity=".72"/>`}
+      <path d="M ${310 - cMouthT} ${466 - cMouthL} C 339 ${463 + cMouthT * .12} 371 ${463 - cMouthT * .10} ${392 + cMouthT} ${460 - cMouthL}" stroke="${ink}" stroke-width="${f(2.15 * pW)}"/>
+      ${compact ? '' : `<path d="M 333 ${476 - cMouthL * .45} C 353 ${480 + cMouthL * .25} 376 ${474 + cMouthL * .22} 390 ${468 - cMouthL * .4}" stroke="${mid}" stroke-width="1.0" opacity=".72"/>`}
       <path d="M 461 343 C 481 332 495 351 483 379 C 474 398 462 401 451 390" stroke="${mid}" stroke-width="1.55" opacity=".88"/>
     </g>
   </g>
@@ -626,7 +871,7 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
   ${detail}
   ${accentGeometry}
   ${interpreted}
-  <g id="${id}-contour-finishing" data-dither-region="contour-finishing" fill="none" stroke="${mid}" stroke-width="1.15" opacity="${compact ? '.35' : '.62'}" stroke-linecap="round">
+  <g id="${id}-contour-finishing" data-dither-region="contour-finishing" fill="none" stroke="${mid}" stroke-width="1.15" opacity="${f((compact ? .35 : .62) * m.continuity)}" transform="translate(${f(m.contourDrift * .5)} 0)" stroke-linecap="round">
     <path d="M 221 310 C 213 335 216 356 222 374 M 488 306 C 495 331 491 355 484 374"/>
     <path d="M 263 512 C 286 542 312 558 334 565 M 458 512 C 435 542 409 558 388 565"/>
   </g>
@@ -652,7 +897,17 @@ function structuredDataForLegacy(model) {
   const user = Object.fromEntries(PORTRAIT_DIMENSIONS.map((dim) => [dim, model.observed[dim].value]));
   const confidence = Object.fromEntries(PORTRAIT_DIMENSIONS.map((dim) => [dim, model.observed[dim].strength]));
   const agent = Object.fromEntries(PORTRAIT_DIMENSIONS.map((dim) => [dim, model.interpreted[dim].present ? model.interpreted[dim].value : null]));
-  return { available: model.available, user, dimensions: user, confidence, agent };
+  return {
+    available: model.available,
+    user,
+    dimensions: user,
+    confidence,
+    agent,
+    // Same derived live/morphology numbers reach the soft-flow template
+    // as the other two (plan §6: all templates receive the same model).
+    live_expression: model.rawLive,
+    morphology: model.rawMorphology,
+  };
 }
 
 registerPortraitTemplate({
@@ -901,6 +1156,10 @@ function IyhPortraitStudio({ data, preferences }) {
 
 const POLL_MS = 5000
 const PULSE_POLL_MS = 15000
+// Portrait-only cadence: the live expression layer decays over seconds, so
+// PORTRAIT polls ~0.85s (settle window well inside one interval) while
+// PULSE / DRIFT / metrics keep the slow POLL_MS cadence.
+const PORTRAIT_POLL_MS = 850
 // Legacy hourly lane retired: the pane polls /pulse at the same slow cadence
 // the old hourly heat lane used; POLL_MS polling below is the mandatory
 // fallback on every route.
@@ -2343,6 +2602,12 @@ function ExpandedPortrait({ data, drift, preferences }) {
             style: { padding: '3px 0', color: V_QUAT, letterSpacing: 1 },
             children: evidenceCount > 0 ? evidenceCount + ' evidence snapshots · observed track persisted, interpreted where the agent recorded it' : 'no evidence snapshots yet',
           }),
+          // One restrained line (plan §6): the strongest learned pair and
+          // its mutation strength. Gated — absent/neutral renders nothing.
+          ...(data && data.morphology && data.morphology.available && data.morphology.strength > 0.02 ? [jsx('div', {
+            style: { padding: '3px 0', color: V_SEC, letterSpacing: 1, title: 'recurring interaction pair that gradually shapes the drawing; evidence-gated, decays when stale' },
+            children: 'learned pair · ' + data.morphology.pair.join(' + ') + ' · strength ' + num(data.morphology.strength),
+          })] : []),
         ],
       }),
       percSection,
@@ -2419,7 +2684,7 @@ function ExpandedWorkspace({ source, rest, portraitPreferences }) {
   const portraitQ = useQuery({
     queryKey: [source, 'iyh-portrait'],
     queryFn: () => rest('/portrait').catch(() => null),
-    refetchInterval: POLL_MS,
+    refetchInterval: PORTRAIT_POLL_MS,
     retry: false,
   })
   const driftQ = useQuery({
@@ -2656,7 +2921,7 @@ function Strip({ source, rest, portraitPreferences }) {
   const portraitQ = useQuery({
     queryKey: [source, 'iyh-portrait'],
     queryFn: () => rest('/portrait').catch(() => null),
-    refetchInterval: POLL_MS,
+    refetchInterval: PORTRAIT_POLL_MS,
     retry: false,
   })
   const driftQ = useQuery({

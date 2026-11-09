@@ -21,3 +21,6 @@ plugin-data/
 # last 3 failed kept for forensics — the 39 GB %TEMP% incident, 2026-11-06)
 .pytest-basetemp/
 .pytest-basetemp*
+
+# Local measurement/scratch (channel-travel harness, one-off probes)
+scratch/

@@ -1,0 +1,1431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IYH portrait motion tuner</title>
+<style>
+/* Standalone file: fixed dark chrome, paper portrait panes. In the Hermes
+   preview the frame injects theme vars before these rules. */
+:root {
+  --fg: var(--foreground, #e8e6e0);
+  --muted: var(--muted-foreground, #9a958c);
+  --border: var(--border, #2a2d33);
+  --accent: var(--accent, #d8c9a3);
+  --card: var(--card, #14161a);
+  --paper: #ebe5db;
+}
+* { box-sizing: border-box }
+html, body { height: 100%; margin: 0; background: var(--card) }
+body { color: var(--fg); font: 12px/1.45 system-ui, "Segoe UI", sans-serif;
+       display: flex; flex-direction: column }
+/* compact: no scroll at normal pane heights; only scrolls when it truly
+   overflows (very short windows). */
+
+/* ---- top bar ---- */
+.top { flex: none; display: flex; align-items: center; gap: 10px;
+       padding: 7px 14px; border-bottom: 1px solid var(--border) }
+.top .ttl { font-size: 11px; font-weight: 600; letter-spacing: 1.5px }
+.top .sha { font-size: 9px; color: var(--muted); letter-spacing: .5px }
+.top .sp { flex: 1 }
+.btn { font: inherit; font-size: 10px; letter-spacing: .5px; color: var(--fg);
+       background: transparent; border: 1px solid var(--border);
+       border-radius: 6px; padding: 4px 10px; cursor: pointer }
+.btn:hover { border-color: var(--accent) }
+.btn.on { color: var(--accent); border-color: var(--accent) }
+.btn.play { min-width: 74px }
+.tabs { display: flex; gap: 5px }
+.tabs .btn.on { color: var(--fg) }
+
+/* ---- main layout: stage left, controls right ---- */
+main { flex: 1; min-height: 0; display: flex; gap: 14px; padding: 12px 14px }
+.stagecol { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column;
+            gap: 8px; min-height: 0 }
+.pvrow { display: flex; gap: 12px; align-items: flex-start; min-height: 0 }
+.cropbox { flex: none; width: min(46dvh, 430px); height: min(46dvh, 430px);
+           position: relative; overflow: hidden; background: var(--paper);
+           border-radius: 10px; border: 1px solid var(--border) }
+.cropbox .xform { position: absolute; inset: 0; transform-origin: 50% 50% }
+.cropbox.zoom .xform { transform: scale(2) }       /* face zoom: crop-to-fit on the face */
+.cropbox.fit .xform  { transform: scale(1) }       /* full portrait */
+.cropbox svg { position: absolute; inset: 0; width: 100%; height: 100% }
+.cap { font-size: 9px; color: var(--muted); letter-spacing: 1px;
+       text-align: center; margin-top: 4px }
+.minis { flex: none; display: flex; flex-direction: column; gap: 10px }
+.mini { background: var(--paper); border: 1px solid var(--border);
+        border-radius: 8px; display: flex; flex-direction: column; align-items: center }
+.mini .box { display: grid; place-items: center }
+.mini .b48 { width: 48px; height: 48px }
+.mini .b96 { width: 96px; height: 96px }
+.mini svg { display: block }
+.mini .cap { margin: 4px 0 0; padding: 0 8px 5px }
+
+/* ---- saccade log + readout ---- */
+.logbox { flex: none; border: 1px solid var(--border); border-radius: 8px;
+          padding: 6px 10px; background: var(--card) }
+.logbox .lg { font-size: 9px; color: var(--muted); letter-spacing: 1px;
+              display: flex; gap: 14px; margin-bottom: 2px }
+.logbox .lg b { color: var(--accent); font-weight: 600 }
+.logbox svg { display: block; width: 100%; height: 52px }
+.readrow { flex: none; display: flex; flex-wrap: wrap; gap: 4px 14px;
+           font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums;
+           padding: 0 2px }
+.readrow .k { letter-spacing: .4px }
+.readrow .v { color: var(--fg) }
+.readrow .v.big { color: var(--accent); font-size: 12px; font-weight: 600 }
+
+/* ---- control column ---- */
+.ctrlcol { flex: 0 0 302px; overflow-y: auto; min-height: 0; padding-right: 2px }
+.group { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+         margin-bottom: 10px; background: var(--card) }
+.group h2 { font-size: 9px; letter-spacing: 1.5px; color: var(--accent);
+            margin: 0 0 6px; font-weight: 600 }
+.row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 10px }
+.row label { flex: 0 0 96px; color: var(--muted); letter-spacing: .4px }
+.row input[type=range] { flex: 1; accent-color: var(--accent); height: 13px }
+.row .val { flex: 0 0 38px; text-align: right; font-variant-numeric: tabular-nums }
+.row select { flex: 1; background: var(--card); color: var(--fg);
+              border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px;
+              font-size: 10px }
+.row input[type=checkbox] { accent-color: var(--accent) }
+.presets { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px }
+.presets button { font: inherit; font-size: 9px; letter-spacing: .4px; color: var(--fg);
+                  background: var(--card); border: 1px solid var(--border);
+                  border-radius: 99px; padding: 3px 9px; cursor: pointer }
+.presets button:hover { border-color: var(--accent) }
+details.baseline { border: 1px solid var(--border); border-radius: 8px;
+                   padding: 6px 10px; margin-bottom: 10px; background: var(--card) }
+details.baseline summary { font-size: 9px; letter-spacing: 1.5px; color: var(--muted);
+                           cursor: pointer; padding: 2px 0 }
+.note { font-size: 9px; color: var(--muted); letter-spacing: .3px; margin-top: 5px }
+.floor-warn { color: #c9a86a; font-size: 9px; letter-spacing: .5px; margin-top: 4px;
+              display: none }
+</style>
+</head>
+<body>
+<div class="top">
+  <span class="ttl">IYH PORTRAIT · MOTION GRAMMAR TUNER</span>
+  <span class="sha">engine sha 5ce8027dc770 · deterministic · 0.85s poll cadence</span>
+  <span class="sp"></span>
+  <button class="btn" id="b-reset" title="back to tick 0">t = 0</button>
+  <button class="btn" id="b-step">STEP &#9654;</button>
+  <button class="btn play" id="b-play">PLAY</button>
+  <button class="btn on" id="b-zoom">FACE ZOOM</button>
+  <button class="btn on" id="b-mark" title="crosshair rings on the pupils — saccade readout">MARKS</button>
+  <span class="tabs" id="tabs"></span>
+</div>
+
+<main>
+  <div class="stagecol">
+    <div class="pvrow">
+      <div>
+        <div class="cropbox zoom" id="cropbox">
+          <div class="xform" id="xform"></div>
+        </div>
+        <div class="cap" id="cropcap">STUDIO · FACE ZOOM (crop-to-fit)</div>
+      </div>
+      <div class="minis">
+        <div class="mini"><div class="box b48" id="mini48"></div>
+          <div class="cap">DOCK 48PX</div></div>
+        <div class="mini"><div class="box b96" id="mini96"></div>
+          <div class="cap">DOCK 96PX</div></div>
+      </div>
+    </div>
+
+    <div class="logbox">
+      <div class="lg"><span>SACCADE LOG — gaze landings (<b id="lg-gaze">–</b> now) ·
+      cloud band = this target's territory · t = <b id="lg-t">0</b></span></div>
+      <svg id="logsvg" viewBox="0 0 600 52" preserveAspectRatio="none"></svg>
+    </div>
+
+    <div class="readrow" id="readrow"></div>
+  </div>
+
+  <div class="ctrlcol">
+    <div class="presets" id="presets"></div>
+
+    <div class="group">
+      <h2>LIVE EXPRESSION (transient gesture)</h2>
+      <div class="row"><label>stage</label><select id="f-stage">
+        <option value="none">none (rest)</option>
+        <option value="prompt">prompt (stage 1)</option>
+        <option value="paired" selected>paired (stage 2)</option>
+      </select></div>
+      <div class="row"><label>openness</label><input type="range" id="f-openness" min="-1" max="1" step="0.01" value="0"><span class="val"></span></div>
+      <div class="row"><label>focus</label><input type="range" id="f-focus" min="-1" max="1" step="0.01" value="0"><span class="val"></span></div>
+      <div class="row"><label>resonance</label><input type="range" id="f-resonance" min="0" max="1" step="0.01" value="0.5"><span class="val"></span></div>
+      <div class="row"><label>tension</label><input type="range" id="f-tension" min="0" max="1" step="0.01" value="0.5"><span class="val"></span></div>
+      <div class="row"><label>intensity</label><input type="range" id="f-intensity" min="0" max="1" step="0.01" value="0.6"><span class="val"></span></div>
+      <div class="row"><label>confidence</label><input type="range" id="f-confidence" min="0" max="1" step="0.01" value="0.6"><span class="val"></span></div>
+      <div class="note">STEP/PLAY drives a deterministic script around these base values —
+      each tick is a new expression target: the gaze re-saccades, the territory breathes.</div>
+    </div>
+
+    <div class="group">
+      <h2>MORPHOLOGY (learned pair mutation)</h2>
+      <div class="row"><label>mutation active</label><input type="checkbox" id="m-active"></div>
+      <div class="row"><label>pair</label><select id="m-pair">
+        <option value="cr,ad">context_richness + analytical_depth</option>
+        <option value="ex,sc">exploration + scope</option>
+        <option value="di,it">directness + iteration</option>
+        <option value="x,y">unmapped (generic motif)</option>
+      </select></div>
+      <div class="row"><label>strength</label><input type="range" id="m-strength" min="0" max="0.6" step="0.01" value="0"><span class="val"></span></div>
+      <div class="row"><label>line_density</label><input type="range" id="m-ld" min="0" max="0.6" step="0.01" value="0"><span class="val"></span></div>
+      <div class="row"><label>contour_asym</label><input type="range" id="m-ca" min="-0.6" max="0.6" step="0.01" value="0"><span class="val"></span></div>
+      <div class="row"><label>echo_strength</label><input type="range" id="m-es" min="0" max="0.6" step="0.01" value="0"><span class="val"></span></div>
+      <div class="row"><label>gesture_bias</label><input type="range" id="m-gb" min="-0.6" max="0.6" step="0.01" value="0"><span class="val"></span></div>
+      <div class="floor-warn" id="m-warn">strength ≤ 0.02 active floor → mutation inert (neutral wins)</div>
+    </div>
+
+    <details class="baseline">
+      <summary>PERSISTENT DIMENSIONS (baseline profile)</summary>
+      <div class="row"><label>exploration</label><input type="range" id="d-exploration" min="0" max="1" step="0.01" value="0.40"><span class="val"></span></div>
+      <div class="row"><label>directness</label><input type="range" id="d-directness" min="0" max="1" step="0.01" value="0.75"><span class="val"></span></div>
+      <div class="row"><label>analytical_depth</label><input type="range" id="d-analytical_depth" min="0" max="1" step="0.01" value="0.55"><span class="val"></span></div>
+      <div class="row"><label>iteration</label><input type="range" id="d-iteration" min="0" max="1" step="0.01" value="0.30"><span class="val"></span></div>
+      <div class="row"><label>scope</label><input type="range" id="d-scope" min="0" max="1" step="0.01" value="0.65"><span class="val"></span></div>
+      <div class="row"><label>context_richness</label><input type="range" id="d-context_richness" min="0" max="1" step="0.01" value="0.60"><span class="val"></span></div>
+      <div class="note">the stable six-dimension profile the live layer rides on</div>
+    </details>
+  </div>
+</main>
+
+<script>
+// ---- production engine, inlined verbatim from desktop/plugin.js ----
+
+/*
+ * Inline portrait engine for Hermes Desktop's single-file plugin loader.
+ * Generated by build-inline-engine.mjs from portrait-engine.mjs.
+ * Do not edit this copy independently.
+ */
+const IYH_PORTRAIT = (() => {
+/**
+ * It's in Your Head — deterministic, contour-first expressive portrait engine.
+ *
+ * The portrait is an interpretive drawing: it visualises how the LLM's model of
+ * the interaction feels, not a factual depiction or diagnosis of the person.
+ * The neutral state is a quiet pencil study. Evidence changes gesture, gaze,
+ * contour pressure and sketch density; colour is reserved for exceptional
+ * extensions and the separately interpreted agent track.
+ *
+ * Input mirrors GET /portrait. Raw conversation text is ignored.
+ */
+
+const PORTRAIT_DIMENSIONS = Object.freeze([
+  'directness', 'context_richness', 'exploration',
+  'analytical_depth', 'iteration', 'scope',
+]);
+
+const clamp01 = (n) => Math.max(0, Math.min(1, Number.isFinite(Number(n)) ? Number(n) : 0));
+const esc = (s) => String(s).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48) || 'iyh';
+const f = (n) => Number(n).toFixed(2).replace(/\.00$/, '');
+const cssColor = (value, fallback) => typeof value === 'string' && /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(value) ? value : fallback;
+const xmlText = (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+const DEFAULT_ACCENTS = Object.freeze({ signal: '#78BFC2', interpreted: '#B59BCB' });
+
+function getTrack(data, key) {
+  const candidate = data && data[key] && typeof data[key] === 'object' ? data[key] : {};
+  const fallback = key === 'user' && data && data.dimensions && typeof data.dimensions === 'object'
+    ? data.dimensions : {};
+  return Object.fromEntries(PORTRAIT_DIMENSIONS.map((d) => {
+    const v = candidate[d] ?? (key === 'user' ? fallback[d] : undefined);
+    return [d, v == null ? null : clamp01(v)];
+  }));
+}
+
+function effective(value, confidence, available) {
+  const v = value == null ? 0.5 : clamp01(value);
+  const c = confidence == null ? (available && value != null ? 0.32 : 0) : clamp01(confidence);
+  return { value: v, strength: c, deviation: (v - 0.5) * 2 * c, present: value != null };
+}
+
+function channelSet(data) {
+  const user = getTrack(data, 'user');
+  const agent = getTrack(data, 'agent');
+  const confidence = data && data.confidence && typeof data.confidence === 'object' ? data.confidence : {};
+  const available = !!(data && data.available);
+  const observed = {};
+  const interpreted = {};
+  for (const d of PORTRAIT_DIMENSIONS) {
+    observed[d] = effective(user[d], confidence[d], available);
+    interpreted[d] = effective(agent[d], agent[d] == null ? 0 : 0.36, available);
+  }
+  return { observed, interpreted };
+}
+
+/* ------------------------------------------------------------------------
+ * Motion grammar (template contract): the engine layer decides WHAT motion
+ * is requested; each template decides HOW it is expressed in its own
+ * drawing language. Rules:
+ *  - Bounded freedom: every displacement saturates inside a fixed
+ *    envelope (the template's expressive region); generated geometry
+ *    never leaves it, and the neutral construction is never moved.
+ *  - High gain: the saturator maps small control changes across a large
+ *    fraction of the region (a 0.1 input crosses ~25% of its envelope),
+ *    so the 48px compact rendering stays visibly alive without
+ *    exaggerated facial expressions.
+ *  - Continuous + reversible: no snapping; the server-side
+ *    settle/hold/release already smooths the input, and this layer adds
+ *    no timers of its own.
+ *  - Deterministic: a pure function of (live, morphology). Identical
+ *    inputs always give identical geometry — no uncontrolled jitter.
+ *  - Mutations reshape the cloud: morphology widens/narrows envelopes
+ *    and shifts treatment within the bounds; it can never break the
+ *    geometric constraints or the template's identity.
+ * ------------------------------------------------------------------------ */
+
+const MOTION_ENVELOPE = Object.freeze({
+  gaze: 22,       // territory width, px, studio coordinate system (clamped to the eye region)
+  headTilt: 4.2,  // deg added on top of the resting rotation
+  brow: 5.5,      // px of brow travel
+  eyeOpen: 0.16,  // aperture delta (0..1 scale of the eye path)
+  mouth: 4.5,     // px of mouth travel inside its region
+  contour: 6.0,   // px of secondary-contour travel
+  pressure: 0.25, // bounded stroke-width modulation
+});
+const MOTION_GAIN = 2.6;
+const _sat = (x) => Math.tanh(MOTION_GAIN * x); // high-gain saturator
+// Gaze travel is bounded by the EYE REGION the pupil lives in (motion
+// contract: every generated point stays inside its permitted region).
+// Resting pupils sit left-of-center in each eye, so the left travel is
+// short and the right travel is long — the clamp is asymmetric on purpose.
+const GAZE_CLAMP = Object.freeze({ min: -3, max: 24 });
+// FNV-1a 32-bit: deterministic saccade selection. No Math.random — the
+// same target signature always lands the gaze in the same place.
+function _fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+function liveControls(data = {}) {
+  const raw = data.live_expression && typeof data.live_expression === 'object' ? data.live_expression : null;
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  const in01 = (v) => Math.max(0, Math.min(1, v));
+  const active = !!(raw && (raw.stage === 'prompt' || raw.stage === 'paired'));
+  const intensity = active ? in01(num(raw.intensity, 0)) : 0;
+  const confidence = active ? in01(num(raw.confidence, 0)) : 0;
+  return Object.freeze({
+    active,
+    stage: active ? String(raw.stage) : 'none',
+    openness: active ? num(raw.openness, 0) : 0,
+    focus: active ? num(raw.focus, 0) : 0,
+    // Unavailable channels rest at the 0.5 midpoint — never fabricated:
+    // a prompt-only stage leaves them exactly 0.5 (no movement), a
+    // paired stage carries the server's derived values.
+    resonance: active && raw.resonance != null ? num(raw.resonance, 0.5) : 0.5,
+    tension: active && raw.tension != null ? num(raw.tension, 0.5) : 0.5,
+    intensity,
+    confidence,
+    // Target identity: the server's expression timestamp. The gaze
+    // saccade signature includes it, so a new target re-rolls the
+    // landing while repeated polls of the same target hold it exactly.
+    updated_at: active ? num(raw.updated_at, 0) : 0,
+    // Effective amplitude: strength scaled by signal reliability. A
+    // prompt-only stage (low confidence) still moves; a paired stage
+    // moves more. Resting (no active stage) is exactly 0.
+    amp: intensity * (0.45 + 0.55 * confidence),
+  });
+}
+
+function morphologyControls(data = {}) {
+  const raw = data.morphology && typeof data.morphology === 'object' ? data.morphology : null;
+  const active = !!(raw && raw.available === true && Number(raw.strength) > 0.02);
+  const g = (k) => (active ? Math.max(-1, Math.min(1, Number(raw[k]) || 0)) : 0);
+  return Object.freeze({
+    available: active,
+    pair: active && Array.isArray(raw.pair) ? raw.pair.map(String).slice(0, 2) : null,
+    strength: active ? in01raw(raw.strength) : 0,
+    lineDensity: g('line_density'),
+    contourAsymmetry: g('contour_asymmetry'),
+    echoStrength: g('echo_strength'),
+    gestureBias: g('gesture_bias'),
+  });
+  function in01raw(v) { return Math.max(0, Math.min(1, Number(v) || 0)); }
+}
+
+/**
+ * High-gain, bounded motion displacements for one poll.
+ *
+ * `live` are the server's displayed expression controls (already
+ * settled/released by the engine's timestamp arithmetic); `morphology`
+ * reshapes the expressive cloud. The result is frozen so templates
+ * consume it immutably. All values are inside their envelopes by
+ * construction; at rest (no active stage, no mutation) every value is
+ * exactly its neutral value.
+ */
+function motionLayer(data = {}) {
+  const L = liveControls(data);
+  const M = morphologyControls(data);
+  const E = MOTION_ENVELOPE;
+  const open = _sat(L.openness) * L.amp;
+  const focus = _sat(L.focus) * L.amp;
+  const reson = (L.resonance - 0.5) * 2; // -1..1, 0 = rest
+  const tension = (L.tension - 0.5) * 2;
+  const tensionBreak = tension > 0 ? tension : 0; // broken-stroke side only
+  const continuity = Math.max(0, 1 - Math.abs(tension) * 0.45 - Math.max(0, -reson) * 0.45);
+  // Mutations reshape the cloud (envelopes/treatment), not the neutral
+  // construction, and stay inside the bounds.
+  const headEnv = E.headTilt * (1 + M.contourAsymmetry);
+  // GAZE TERRITORY MODEL — the controls shape a CLOUD, not a position.
+  // The gaze hovers near rest and makes ONE deterministic saccade per
+  // expression target: a heavy-tailed landing inside a territory whose
+  // width itself BREATHEs per target (mostly compact, occasionally wide
+  // — that is where the 15px moments come from). Exploratory breadth
+  // widens the territory; focus pins it tight; gesture-mutation widens
+  // it too. A 0.1-level signal change re-rolls the landing; an unchanged
+  // target holds its exact landing (byte-stable across polls — no
+  // jitter, no Math.random). At rest the territory closes to zero and
+  // the gaze returns to its off-axis baseline. Territory width follows
+  // the eased amplitude, so on release the territory shrinks and the
+  // gaze steps back home.
+  const q10 = (v) => Math.round((Number(v) || 0) * 10); // 0.1-precision bucket
+  const sig = [
+    L.stage,
+    q10(L.openness),
+    q10(L.focus),
+    q10(L.intensity),
+    q10(L.confidence),
+    q10(L.updated_at),
+  ].join('|');
+  const h = _fnv1a(sig);
+  const u = (h % 997) / 997; // 0..1, prime modulus avoids 2^32 wrap bias
+  const heavy = Math.pow(u, 2.2); // heavy-tailed landing: mostly inner, moments at the edge
+  const breath = 0.30 + 0.70 * Math.pow(((h >>> 16) % 997) / 997, 2.2); // cloud width per target
+  const pin = 1 - 0.6 * Math.abs(focus); // focus pins the territory tight
+  const territoryW = L.active
+    ? E.gaze
+      * (0.25 + 0.75 * Math.min(1, Math.abs(open) * 1.2))
+      * pin
+      * breath
+      * (1 + M.gestureBias * 0.5)
+      * Math.max(0.25, L.amp)
+    : 0;
+  const territoryC = E.gaze * 0.25 * (open * 0.75 + focus * 0.25);
+  const drift = open * 0.75 + focus * 0.25;
+  let dir;
+  if (Math.abs(drift) > 0.1) dir = drift > 0 ? 1 : -1; // follow the signal
+  else dir = ((h >>> 9) & 1) ? 1 : -1; // weak drift: deterministic coin
+  if (((h >>> 12) & 3) === 0) dir = -dir; // ~25% wander against the drift
+  const landFrac = 0.15 + 0.85 * heavy; // never dead-center; moments at the edge
+  const gazeDXRaw = territoryC + dir * territoryW * landFrac;
+  return Object.freeze({
+    active: L.active,
+    stage: L.stage,
+    // Gaze: one saccade per expression target inside the territory.
+    // Clamped to the eye region (the pupil's permitted travel).
+    gazeDX: Math.max(GAZE_CLAMP.min, Math.min(GAZE_CLAMP.max, gazeDXRaw)),
+    gazeTerritory: territoryW, // cloud width, px units (0 at rest)
+    gazeCenter: territoryC,    // cloud center offset from resting gaze
+    gazeDY: E.gaze * 0.25 * (-open * 0.6 + focus * 0.2) * (L.active ? 1 : 0),
+    headTilt: headEnv * (open * 0.8 + focus * 0.2) + M.contourAsymmetry * 1.2,
+    brow: E.brow * focus,
+    // Aperture: focus sharpens; openness relaxes the lids a little less.
+    eyeOpen: E.eyeOpen * focus + E.eyeOpen * 0.4 * open,
+    mouthLift: E.mouth * (open * 0.85),
+    mouthTension: E.mouth * (Math.max(0, focus) * 0.7),
+    // Secondary contours: openness drifts them; tension breaks them;
+    // low resonance interrupts them (controlled, bounded).
+    contourDrift: E.contour * open * (0.6 + 0.4 * M.contourAsymmetry),
+    continuity,
+    tensionBreak, // broken-stroke side, 0..1 (0 at rest and for negative tension)
+    // Stroke pressure: 1.0 at rest; bounded modulation only when a
+    // stage is active (a resting portrait keeps its native weights).
+    pressure: 1 + E.pressure * (Math.abs(focus) * 0.6 + tensionBreak * 0.4) * (L.active ? 1 : 0),
+    echoBoost: M.echoStrength * 3,
+    lineDensity: M.lineDensity,
+    asymmetry: M.contourAsymmetry,
+    gestureBias: M.gestureBias,
+  });
+}
+
+const line = (d, attrs = '') => `<path d="${d}" ${attrs}/>`;
+
+/** Build a pencil-led SVG study from the existing /portrait response shape. */
+function buildSoftFlowPortraitSvg(data = {}, options = {}) {
+  const compact = options.rendering === 'compact';
+  const { observed: o, interpreted: a } = channelSet(data);
+  const id = esc(options.id || 'iyh-portrait');
+  const palette = {
+    signal: cssColor(options.accentPalette?.signal, DEFAULT_ACCENTS.signal),
+    interpreted: cssColor(options.accentPalette?.interpreted, DEFAULT_ACCENTS.interpreted),
+  };
+  const graphite = options.graphite && typeof options.graphite === 'object' ? options.graphite : {};
+  const ink = cssColor(graphite.primary, '#D8D9D5');
+  const mid = cssColor(graphite.secondary, '#A4A8A8');
+  const faint = cssColor(graphite.construction, '#737D83');
+  const shade = cssColor(graphite.shade, '#9AA0A2');
+
+  // Every channel has a restrained neutral origin (deviation = 0). Confidence
+  // acts as amplitude, so uncertain impressions barely disturb the sketch.
+  const d = o.directness.deviation;
+  const c = o.context_richness.deviation;
+  const e = o.exploration.deviation;
+  const aDepth = o.analytical_depth.deviation;
+  const it = o.iteration.deviation;
+  const s = o.scope.deviation;
+
+  // The six observations blend into a small expressive envelope. These are
+  // shape controls, not emotion labels or claims about the person.
+  // The motion-grammar layer (shared by all three templates) adds the
+  // transient live gesture and the slow morphology treatment on top.
+  const m = motionLayer(data);
+  const openness = d * 0.45 + e * 0.35 + s * 0.20;
+  const focus = aDepth * 0.65 + d * 0.20 - e * 0.15;
+  const warmth = c * 0.55 + e * 0.45;
+  const gaze = d * 4.0 + e * 1.8;
+  const gazeOffsetX = -26.0 + e * 1.0 + m.gazeDX * .5;
+  const gazeOffsetY = 15.0 + aDepth * .6 - c * .2 + m.gazeDY * .5;
+  const browL = openness * 5.0 - focus * 3.5 + m.brow;
+  const eyeOpen = 0.82 + openness * 0.12 - focus * 0.05 + m.eyeOpen;
+  const mouthTension = d * 1.35 + focus * 1.0 + m.mouthTension * .5;
+  const mouthLift = warmth * 5.5 + m.mouthLift;
+  const faceTilt = e * 2.1 + s * 0.6 + m.headTilt * .62;
+  const hairDrift = e * 9.0;
+  const detailOpacity = 0.22 + Math.abs(aDepth) * 0.58 + m.lineDensity;
+  const hatchOpacity = 0.20 + Math.abs(c) * 0.56 + m.lineDensity * .8;
+  const shoulderSpread = 1 + s * 0.055 + m.gestureBias * 0.05;
+  const shoulderLeftTip = compact ? 166 - (shoulderSpread - 1) * 20 : 150 - (shoulderSpread - 1) * 24;
+  const shoulderRightTip = compact ? 566 + (shoulderSpread - 1) * 20 : 581 + (shoulderSpread - 1) * 24;
+  const shoulderBottom = compact ? 604 : 681;
+  const rightShoulderBottom = compact ? 600 : 672;
+  const echoCount = Math.max(0, Math.min(4, Math.round(Math.abs(it) * 4 + m.echoBoost)));
+  const interpretedPresent = PORTRAIT_DIMENSIONS.some((dim) => data?.agent?.[dim] != null);
+  const agentMean = PORTRAIT_DIMENSIONS.reduce((sum, dim) => sum + a[dim].deviation, 0) / PORTRAIT_DIMENSIONS.length;
+  const agentOpacity = interpretedPresent ? 0.10 + Math.min(0.30, Math.abs(agentMean) * 0.35 + 0.06) : 0;
+  const signalStrength = Math.max(Math.abs(d), Math.abs(c), Math.abs(e), Math.abs(aDepth), Math.abs(it), Math.abs(s));
+
+  const echoPaths = Array.from({ length: echoCount }, (_, i) => {
+    const n = (i + 1) * (it < 0 ? -1 : 1);
+    const offset = 2.0 + i * 1.75;
+    const opacity = 0.12 - i * 0.018;
+    return line(
+      `M ${226 + n * offset} 285 C ${207 + n * offset} 188 ${282 + n * offset} 119 ${359 + n * offset} 119 C ${453 + n * offset} 119 ${507 + n * offset} 205 ${492 + n * offset} 321 C ${482 + n * offset} 415 ${438 + n * offset} 505 ${365 + n * offset} 529`,
+      `fill="none" stroke="${mid}" stroke-width="1.05" opacity="${f(opacity)}" vector-effect="non-scaling-stroke"`,
+    );
+  }).join('\n');
+
+  const construction = `
+    <g id="${id}-construction" data-dither-region="construction" fill="none" stroke="${faint}" stroke-width="1.1" opacity=".34" stroke-linecap="round">
+      ${line('M 202 278 C 257 206 357 177 466 226', 'opacity=".45"')}
+      ${line('M 257 514 C 306 558 399 572 466 526', 'opacity=".55"')}
+      ${line('M 168 710 C 224 652 275 628 329 615 M 394 610 C 469 611 529 648 577 704', 'opacity=".62"')}
+      ${line('M 311 112 C 386 81 462 120 499 184', 'opacity=".35"')}
+    </g>`;
+
+  const looseGesture = e === 0 ? '' : `
+    <g id="${id}-gesture-extension" data-dither-region="gesture" data-channel="exploration" fill="none" stroke="${mid}" stroke-width="1.2" opacity="${f(0.16 + Math.abs(e) * 0.22)}" stroke-linecap="round">
+      ${line(e > 0
+        ? `M ${214 - hairDrift} 283 C ${169 - hairDrift * 1.4} 210 ${196 - hairDrift} 128 ${285 - hairDrift * .5} 92`
+        : `M ${500 + hairDrift} 286 C ${548 + hairDrift * 1.4} 221 ${528 + hairDrift} 145 ${451 + hairDrift * .5} 102`)}
+      ${line(e > 0
+        ? `M 165 484 C ${128 - hairDrift} 535 ${150 - hairDrift} 590 211 620`
+        : `M 555 480 C ${592 + hairDrift} 533 ${571 + hairDrift} 589 510 620`)}
+    </g>`;
+
+  const accentExtensions = signalStrength > 0.34 ? `
+    <g id="${id}-accent-extensions" data-accent-region="extensions" data-dither-region="accent-extensions" fill="none" stroke="${palette.signal}" stroke-width="1.65" stroke-linecap="round" opacity="${f(Math.min(.72, (signalStrength - .25) * 1.05))}">
+      ${Math.abs(e) > .34 ? line(e > 0
+        ? 'M 207 266 C 176 215 187 161 227 127'
+        : 'M 512 269 C 544 220 535 165 498 129') : ''}
+      ${Math.abs(c) > .48 ? line(c > 0
+        ? 'M 263 422 C 279 468 304 497 334 510'
+        : 'M 456 415 C 439 463 415 492 386 507') : ''}
+      ${Math.abs(s) > .48 ? line(compact
+        ? (s > 0 ? 'M 166 604 C 198 584 224 574 268 568' : 'M 566 600 C 538 580 510 570 454 556')
+        : (s > 0 ? 'M 150 681 C 190 630 225 615 267 608' : 'M 581 672 C 540 620 500 604 454 596')) : ''}
+    </g>` : '';
+
+  const interpretedContour = interpretedPresent ? `
+    <g id="${id}-interpreted-contour" data-track="interpreted" data-accent-region="llm-impression" data-dither-region="interpreted" fill="none" stroke="${palette.interpreted}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity="${f(agentOpacity)}" vector-effect="non-scaling-stroke">
+      ${line(`M 238 ${278 + agentMean * 5} C 229 184 292 129 360 128 C 449 126 501 201 487 ${323 - agentMean * 4}`)}
+      ${line(`M 487 324 C 481 421 430 502 365 ${529 + agentMean * 5}`)}
+      ${line(`M 278 353 C 301 ${336 - agentMean * 3} 324 339 342 355`)}
+      ${line(`M 381 355 C 400 ${339 + agentMean * 3} 421 340 442 356`)}
+    </g>` : '';
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 760" role="img" aria-label="It's in Your Head expressive pencil portrait" data-pose="floating-open-shoulders" data-gaze-rest="averted-down-left" shape-rendering="geometricPrecision" preserveAspectRatio="xMidYMid meet">
+  <title>It's in Your Head — expressive pencil portrait</title>
+  <desc>A neutral hand-drawn pencil study whose gaze, gesture and contour pressure evolve with the model's interpreted impression. Accent colour is reserved for unusual extensions and the separate interpreted line.</desc>
+  <defs>
+    <clipPath id="${id}-figure-clip"><path d="M 101 760 C 125 665 218 610 360 605 C 502 610 595 665 619 760 Z"/></clipPath>
+  </defs>
+
+  <!-- Quiet underdrawing: construction is visible but never becomes a UI motif. -->
+  ${construction}
+
+  <!-- The head leans into the page rather than sitting squarely like an ID photo. -->
+  <g id="${id}-head-gesture" transform="rotate(${f(-3.2 + faceTilt)} 360 350)">
+  <!-- Hair mass and outer gesture: graphite contour, deliberately imperfect. -->
+  <g id="${id}-hair-back" data-dither-region="hair-back" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    ${line(`M 225 342 C 183 281 ${196 + hairDrift * .25} 174 268 119 C 327 66 423 82 ${472 - hairDrift * .18} 157 C 535 229 515 351 486 435 C 466 492 438 544 402 581`, `id="${id}-hair-primary" data-contour="primary" stroke="${ink}" stroke-width="3.5"`)}
+    ${line('M 213 337 C 183 261 214 176 275 129 C 333 83 403 89 454 126', `stroke="${mid}" stroke-width="1.3" opacity=".72"`)}
+    ${line('M 472 158 C 530 237 512 360 487 433 C 463 502 434 546 409 574', `stroke="${mid}" stroke-width="1.45" opacity=".68"`)}
+    ${line('M 207 348 C 181 430 219 521 284 568 C 300 580 316 588 332 592', `stroke="${mid}" stroke-width="1.15" opacity=".65"`)}
+    ${line('M 236 226 C 279 145 361 114 428 150 C 468 173 488 205 500 246', `stroke="${faint}" stroke-width="1.05" opacity=".7"`)}
+    ${line('M 484 433 C 469 502 441 544 404 575 M 220 392 C 204 463 246 532 299 567', `stroke="${faint}" stroke-width=".95" opacity=".65"`)}
+    <g id="${id}-hair-hatching" data-channel="context_richness" data-dither-region="hair-detail" stroke="${faint}" stroke-width="1" opacity="${f(hatchOpacity)}">
+      ${line('M 225 213 l 21 -28 M 235 224 l 24 -29 M 246 235 l 25 -28 M 258 246 l 27 -26 M 271 255 l 27 -23')}
+      ${line('M 459 210 l 20 25 M 452 224 l 19 26 M 446 239 l 17 26 M 439 254 l 16 27 M 432 269 l 15 26')}
+      ${line('M 214 375 l -10 29 M 219 389 l -9 30 M 226 403 l -7 28')}
+      ${line('M 471 443 l -12 25 M 463 457 l -12 25 M 454 470 l -12 22')}
+    </g>
+  </g>
+
+  <!-- A broken front lock crosses the forehead; its edge is deliberately unresolved. -->
+  <g id="${id}-hair-front" data-dither-region="hair-front" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    ${line(`M 211 307 C 227 226 294 156 374 159 C 345 172 315 203 299 247 C 329 230 365 234 393 254 C 360 261 337 281 323 312 C 294 297 259 308 239 344 C 225 332 215 321 211 307 Z`, `stroke="${ink}" stroke-width="3.15"`)}
+    ${line('M 218 297 C 243 225 300 168 365 164 C 330 190 309 218 296 252', `stroke="${mid}" stroke-width="1.2" opacity=".72"`)}
+    ${line('M 299 246 C 330 228 362 239 387 255 C 358 258 337 278 323 306', `stroke="${mid}" stroke-width="1.35" opacity=".72"`)}
+    ${line('M 239 339 C 260 310 285 301 309 306 M 252 325 C 276 290 309 277 338 280', `stroke="${faint}" stroke-width="1.05" opacity=".72"`)}
+    ${line(`M 211 304 C ${190 + hairDrift * .2} 270 ${196 + hairDrift * .2} 235 218 207`, `stroke="${ink}" stroke-width="1.55" opacity=".78"`)}
+    ${line('M 392 254 C 411 271 426 290 434 311 M 381 261 C 395 280 405 296 410 315', `stroke="${faint}" stroke-width="1.0" opacity=".65"`)}
+  </g>
+
+  <!-- Face plane: no glossy skin rendering; paper remains transparent. -->
+  <g id="${id}-face" data-dither-region="face" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    ${line('M 249 272 C 258 202 310 163 369 166 C 434 169 473 225 464 306 C 457 391 421 474 355 520 C 338 531 327 522 307 507 C 260 473 232 395 237 322 C 239 299 243 283 249 272 Z', `id="${id}-face-primary" data-contour="primary" stroke="${ink}" stroke-width="3.1"`)}
+    ${line('M 254 274 C 266 211 314 173 368 175 C 426 177 464 229 458 301', `stroke="${mid}" stroke-width="1.15" opacity=".7"`)}
+    ${line('M 237 324 C 226 400 266 483 323 515 C 338 526 348 529 360 521 C 419 483 455 400 464 316', `stroke="${mid}" stroke-width="1.15" opacity=".55"`)}
+    ${line('M 252 391 C 258 435 278 472 311 494', `stroke="${faint}" stroke-width=".9" opacity=".6"`)}
+    <g id="${id}-face-hatching" data-channel="context_richness" data-dither-region="face-shading" stroke="${shade}" stroke-width="1.05" opacity="${f(hatchOpacity * .72)}">
+      ${line('M 251 407 l 16 23 M 250 420 l 17 23 M 258 435 l 15 19 M 269 449 l 13 16')}
+      ${line('M 448 396 l -14 22 M 448 409 l -15 22 M 440 427 l -14 18 M 431 442 l -12 15')}
+      ${line('M 322 494 l 13 10 M 332 501 l 13 8 M 345 506 l 12 6')}
+    </g>
+  </g>
+
+  <!-- Eyes and brows: calm, observant at neutral; shape and gaze carry expression. -->
+  <g id="${id}-features" data-dither-region="features" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Near brow carries more weight; far brow is shorter and partially lost in plane. -->
+    ${line(`M 263 ${340 - browL} C 285 ${318 - browL + focus * 1.2} 319 ${320 + browL * .25 + focus * 2.0} 344 ${341 + focus * 2.4}`, `stroke="${ink}" stroke-width="2.8"`)}
+    ${line(`M 386 ${339 + focus * 2.0} C 405 ${322 - browL * .25 + focus} 428 ${326 + browL + focus * 1.5} 444 ${342 + focus * 1.8}`, `stroke="${mid}" stroke-width="2.0"`)}
+    <!-- The near eye is open and legible; the far eye narrows with perspective. -->
+    ${line(`M 263 365 C 286 ${346 - gaze - focus * 1.2} 319 ${348 - gaze * .5 - focus * 1.6} 346 366 C 324 ${388 + (eyeOpen - 1) * 35} 288 ${390 + (eyeOpen - 1) * 28} 263 365 Z`, `stroke="${ink}" stroke-width="2.65"`)}
+    ${line(`M 394 365 C 407 ${355 + gaze * .18 - focus} 426 ${356 + gaze * .18 - focus * .6} 441 368 C 425 ${380 + (eyeOpen - 1) * 18} 406 ${380 + (eyeOpen - 1) * 14} 394 365 Z`, `stroke="${ink}" stroke-width="2.25"`)}
+    <g id="${id}-eyes-detail" data-channel="analytical_depth" opacity="${f(detailOpacity)}" stroke="${mid}" stroke-width="1.25">
+      <ellipse cx="${307 + gazeOffsetX}" cy="${367 + gazeOffsetY * .4}" rx="4.4" ry="5.8" fill="${ink}" stroke="none"/>
+      <ellipse cx="${417 + gazeOffsetX * .5}" cy="${369 + gazeOffsetY * .4}" rx="3.1" ry="4.4" fill="${ink}" stroke="none"/>
+      ${line('M 276 369 C 296 353 321 354 339 369 M 400 369 C 414 359 429 360 439 372', 'opacity=".62"')}
+      ${line('M 285 395 l 5 4 M 297 399 l 5 3 M 412 393 l 4 2 M 423 391 l 4 1', 'opacity=".58"')}
+    </g>
+    <!-- The turned-away side resolves into a small ear contour rather than a symmetrical cheek. -->
+    ${line('M 460 342 C 484 332 494 352 482 379 C 475 396 465 403 453 394', `stroke="${mid}" stroke-width="1.55" opacity=".9"`)}
+    ${line('M 465 355 C 478 349 481 361 472 374 C 468 381 464 382 461 376', `stroke="${faint}" stroke-width="1.0" opacity=".8"`)}
+    <!-- Nose bridge shifts off-centre; broken strokes leave room for interpretation. -->
+    ${line(`M 374 365 C 368 391 352 414 351 424 C 359 432 371 431 382 423`, `stroke="${mid}" stroke-width="1.65"`)}
+    ${line('M 341 430 C 349 435 359 435 365 431 M 381 429 C 387 428 391 424 394 421', `stroke="${faint}" stroke-width="1.05" opacity=".8"`)}
+    <!-- Mouth is quiet at neutral; tension changes only its slight asymmetry. -->
+    ${line(`M ${323 - mouthTension} ${466 - mouthLift} C 343 ${461 + mouthLift * .48 + mouthTension * .2} 370 ${461 + mouthLift * .48 - mouthTension * .25} ${393 + mouthTension} ${459 - mouthLift}`, `stroke="${ink}" stroke-width="2.0"`)}
+    ${line(`M ${332 - mouthTension} ${473 - mouthLift * .55} C 351 ${477 + mouthLift * .35} 373 ${471 + mouthLift * .25} ${386 + mouthTension} ${465 - mouthLift * .55}`, `stroke="${mid}" stroke-width="1.05" opacity=".72"`)}
+    ${line('M 347 446 C 358 449 369 447 376 443', `stroke="${faint}" stroke-width=".95" opacity=".52"`)}
+  </g>
+
+  </g>
+
+  <!-- Open shoulder gesture: asymmetrical, suspended in space, never cut by the frame. -->
+  <g id="${id}-clothing" data-dither-region="clothing" data-pose="floating-open-shoulders" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    ${line('M 310 492 C 317 528 299 555 267 579', `stroke="${ink}" stroke-width="2.7"`)}
+    ${line('M 402 492 C 397 526 421 550 454 566', `stroke="${ink}" stroke-width="2.45"`)}
+    ${line('M 313 545 C 337 567 375 571 403 546', `stroke="${mid}" stroke-width="1.25"`)}
+    ${line(`M 267 579 C 224 576 190 590 166 614 C 144 635 137 660 ${shoulderLeftTip} ${shoulderBottom}`, `stroke="${ink}" stroke-width="2.9" data-contour="secondary"`)}
+    ${line(`M 454 566 C 496 562 530 575 556 598 C 580 622 592 650 ${shoulderRightTip} ${rightShoulderBottom}`, `stroke="${ink}" stroke-width="2.75" data-contour="secondary"`)}
+    ${line('M 286 600 C 315 617 343 622 361 620 C 389 612 413 594 433 576', `stroke="${faint}" stroke-width="1.0" opacity=".66"`)}
+    <!-- Loose airflow-like pencil marks reinforce lift without enclosing the torso. -->
+    ${line(compact ? 'M 166 604 C 147 593 143 574 151 558 C 158 544 174 532 192 523' : 'M 150 681 C 124 665 116 640 126 616 C 134 597 149 584 167 575', `stroke="${mid}" stroke-width="1.25" opacity=".62"`)}
+    ${line(compact ? 'M 566 600 C 588 586 596 567 588 550 C 582 535 571 523 557 513' : 'M 581 672 C 608 654 620 630 612 605 C 605 586 591 574 575 563', `stroke="${mid}" stroke-width="1.2" opacity=".58"`)}
+    <g id="${id}-clothing-hatching" data-channel="scope" data-dither-region="clothing-shading" stroke="${faint}" stroke-width="1" opacity="${f(0.16 + Math.abs(s) * .30)}">
+      ${compact ? '' : line('M 175 646 l 13 16 M 187 635 l 14 17 M 199 625 l 14 16')}
+      ${compact ? '' : line('M 550 626 l -13 17 M 538 616 l -13 17 M 526 607 l -13 16')}
+    </g>
+  </g>
+
+  <!-- Loose pencil corrections: iterations are overdrawn construction, not UI echoes. -->
+  ${echoPaths ? `<g id="${id}-iteration-underdrawing" data-channel="iteration" data-dither-region="iteration" fill="none">${echoPaths}</g>` : ''}
+  ${looseGesture}
+  ${accentExtensions}
+  ${interpretedContour}
+
+  <!-- A few final broken graphite strokes keep the hand-drawn edge visible. -->
+  <g id="${id}-pencil-finishing" data-dither-region="pencil-finishing" fill="none" stroke="${mid}" opacity="${f(0.9 * m.continuity + 0.1)}" stroke-linecap="round">
+    ${line('M 220 312 C 216 334 217 350 221 367', 'stroke-width="1.2" opacity=".62"')}
+    ${line('M 486 302 C 491 328 489 348 485 365', 'stroke-width="1.1" opacity=".56"')}
+    ${line('M 274 528 C 292 551 312 567 329 575', 'stroke-width="1.15" opacity=".52"')}
+    ${line('M 449 528 C 431 551 411 567 394 575', 'stroke-width="1.15" opacity=".52"')}
+  </g>
+  </svg>`;
+}
+
+
+/* -------------------------------------------------------------------------- *
+ * Template layer
+ *
+ * The engine owns evidence -> expressive contour parameters. A template owns
+ * only the drawing grammar. No template is selected from demographic inference.
+ * -------------------------------------------------------------------------- */
+
+const DEFAULT_PORTRAIT_TEMPLATE = 'neutral-pencil';
+const portraitTemplates = new Map();
+
+function safeTemplateId(value) {
+  const id = String(value || '').trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9_-]{1,47}$/.test(id)) {
+    throw new TypeError('Portrait template id must be 2–48 lowercase letters, digits, _ or -');
+  }
+  return id;
+}
+
+/**
+ * Register a drawing template.
+ *
+ * render(model, options) must return a complete SVG string. `model` contains
+ * only normalized six-dimension evidence and derived expression controls; it
+ * never contains raw prompts, messages, profile fields, or demographics.
+ *
+ * Returns an unregister callback. Keep custom template definitions in the
+ * desktop plugin's single ESM file or in its supported build output.
+ */
+function registerPortraitTemplate(definition, { replace = false } = {}) {
+  if (!definition || typeof definition !== 'object') throw new TypeError('Template definition is required');
+  const id = safeTemplateId(definition.id);
+  if (typeof definition.render !== 'function') throw new TypeError(`Template "${id}" must provide render(model, options)`);
+  if (portraitTemplates.has(id) && !replace) throw new Error(`Portrait template "${id}" is already registered`);
+  const entry = Object.freeze({
+    id,
+    label: String(definition.label || id),
+    description: String(definition.description || ''),
+    render: definition.render,
+  });
+  portraitTemplates.set(id, entry);
+  return () => {
+    if (portraitTemplates.get(id) === entry) portraitTemplates.delete(id);
+  };
+}
+
+/** Small metadata only; render functions are deliberately not exposed. */
+function listPortraitTemplates() {
+  return Array.from(portraitTemplates.values(), ({ id, label, description }) => ({ id, label, description }));
+}
+
+function buildPortraitModel(data = {}) {
+  const { observed, interpreted } = channelSet(data);
+  const directness = observed.directness.deviation;
+  const context = observed.context_richness.deviation;
+  const exploration = observed.exploration.deviation;
+  const analysis = observed.analytical_depth.deviation;
+  const iteration = observed.iteration.deviation;
+  const scope = observed.scope.deviation;
+  const interpretedPresent = PORTRAIT_DIMENSIONS.some((dim) => data?.agent?.[dim] != null);
+  const agentMean = PORTRAIT_DIMENSIONS.reduce((sum, dim) => sum + interpreted[dim].deviation, 0) / PORTRAIT_DIMENSIONS.length;
+  const signalStrength = Math.max(
+    Math.abs(directness), Math.abs(context), Math.abs(exploration),
+    Math.abs(analysis), Math.abs(iteration), Math.abs(scope),
+  );
+  // Three separate, composable inputs (plan §6): persistent dimensions
+  // build the baseline (model.expression), live expression adds the
+  // transient gesture (model.motion from model.live), morphology evolves
+  // the drawing treatment (model.morphology). The layers never overwrite
+  // each other: templates add the motion deltas on top of the baseline.
+  const live = liveControls(data);
+  const morphology = morphologyControls(data);
+  const motion = motionLayer(data);
+  return Object.freeze({
+    available: !!data?.available,
+    observed,
+    interpreted,
+    interpretedPresent,
+    signalStrength,
+    interpretedStrength: Math.max(...PORTRAIT_DIMENSIONS.map((dim) => Math.abs(interpreted[dim].deviation))),
+    expression: Object.freeze({
+      openness: directness * 0.42 + exploration * 0.38 + scope * 0.20,
+      focus: analysis * 0.66 + directness * 0.18 - exploration * 0.16,
+      warmth: context * 0.58 + exploration * 0.42,
+      gaze: directness * 8.0 + exploration * 4.5,
+      // Resting gaze deliberately misses the viewer: slightly down and to
+      // the character's left. Evidence can modulate direction, not erase the
+      // off-axis baseline into an intense direct stare.
+      gazeX: -28.0 + exploration * 1.0,
+      gazeY: 16.0 + analysis * 0.6 - context * 0.2,
+      brow: (directness * 0.42 + exploration * 0.38 + scope * 0.20) * 8.0 - (analysis * 0.66 + directness * 0.18 - exploration * 0.16) * 6.0,
+      eyeOpen: 0.82 + (directness * 0.42 + exploration * 0.38 + scope * 0.20) * 0.18 - (analysis * 0.66 + directness * 0.18 - exploration * 0.16) * 0.08,
+      mouthTension: directness * 4.2 + analysis * 2.2,
+      mouthLift: (context * 0.58 + exploration * 0.42) * 9.0,
+      headTilt: exploration * 3.2 + scope * 1.0,
+      contourDrift: exploration * 7.0,
+      shoulderSpread: 1 + scope * 0.085,
+      echoCount: Math.max(0, Math.min(3, Math.round(Math.abs(iteration) * 3))),
+      detailStrength: 0.25 + Math.abs(analysis) * 0.45,
+      hatchStrength: 0.14 + Math.abs(context) * 0.42,
+      interpretedBias: agentMean,
+    }),
+    // Additive live + morphology layers (plan §6): the persistent
+    // dimensions above stay the baseline; `motion` is the transient
+    // gesture displacement and `morphology` the slow drawing treatment.
+    // Raw passthrough so the legacy soft-flow template (which builds
+    // from raw API data, not this model) consumes the SAME derived
+    // numbers.
+    live,
+    morphology,
+    motion,
+    rawLive: data.live_expression || null,
+    rawMorphology: data.morphology || null,
+  });
+}
+
+const neutralProfile = Object.freeze({
+  kind: 'balanced',
+  faceWidth: 2.2,
+  jaw: 0.35,
+  brow: 0.3,
+});
+
+
+function buildCompactPortraitGlyph(model, options = {}, profile = neutralProfile) {
+  const id = esc(options.id || `iyh-${options.template || 'neutral-pencil'}`);
+  const e = model.expression;
+  const graphite = options.graphite && typeof options.graphite === 'object' ? options.graphite : {};
+  const palette = options.accentPalette && typeof options.accentPalette === 'object' ? options.accentPalette : {};
+  const ink = cssColor(graphite.primary, '#D9DAD5');
+  const mid = cssColor(graphite.secondary, '#A7ABAA');
+  const signalColour = cssColor(palette.signal, DEFAULT_ACCENTS.signal);
+  const interpretedAccent = cssColor(palette.interpreted, DEFAULT_ACCENTS.interpreted);
+  const jaw = profile.jaw || 0;
+  const x = model.observed.exploration.deviation;
+  const c = model.observed.context_richness.deviation;
+  const s = model.observed.scope.deviation;
+  const compact = true;
+  // Motion-grammar deltas: the live layer adds displacement on top of the
+  // persistent baseline (model.expression) without overwriting it; the
+  // morphology layer reshapes treatment (density/echo) within its bounds.
+  const m = model.motion;
+  const cBrow = e.brow + m.brow;
+  const cGazeX = e.gazeX + m.gazeDX;
+  const cGazeY = e.gazeY + m.gazeDY;
+  const cMouthT = e.mouthTension + m.mouthTension;
+  const cMouthL = e.mouthLift + m.mouthLift;
+  const cTilt = e.headTilt + m.headTilt;
+  const pW = m.pressure;
+  const accentAlpha = Math.min(.9, Math.max(0, (model.signalStrength - .20) * 1.15));
+  const hairFront = jaw > .5
+    ? 'M 218 282 C 248 221 300 188 356 191 C 393 194 425 216 449 243 C 463 223 474 204 484 180 C 493 239 468 280 430 297 C 386 317 330 289 286 309 C 258 322 239 342 225 367'
+    : 'M 220 290 C 245 238 290 207 334 199 C 322 218 314 237 313 255 C 344 229 379 218 414 222 C 445 226 465 243 482 264 C 458 259 439 262 417 274 C 384 292 352 287 322 286 C 283 284 250 307 228 355';
+  const hairOuterCompact = jaw > .5
+    ? 'M 224 326 C 204 280 207 226 231 188 C 242 168 257 151 278 141 L 267 119 C 292 132 313 125 339 108 C 359 124 382 124 405 113 C 450 136 481 169 493 212 C 506 256 490 308 466 347'
+    : 'M 224 326 C 205 286 203 226 222 185 C 242 139 294 112 350 108 C 411 103 466 136 489 184 C 511 229 501 285 480 322 C 472 337 462 348 450 357';
+  const faceCompact = jaw > .5
+    ? 'M 240 263 C 253 201 303 171 365 173 C 414 173 448 214 453 278 C 458 348 434 411 391 462 C 376 480 361 500 349 502 C 329 500 303 485 280 459 C 251 425 235 376 236 313 C 236 293 237 277 240 263 Z'
+    : 'M 244 264 C 259 201 310 172 366 173 C 407 174 437 212 442 275 C 448 346 428 415 391 464 C 374 486 360 500 349 499 C 332 496 312 480 293 460 C 257 420 239 367 240 313 C 240 293 241 277 244 264 Z';
+  const accent = model.signalStrength > .29 ? `
+    <g id="${id}-accent-extensions" data-accent-region="extensions" data-dither-region="accent-extensions" fill="none" stroke="${signalColour}" stroke-width="2.0" opacity="${f(accentAlpha)}" stroke-linecap="round">
+      ${Math.abs(x) > .31 ? `<path d="${x > 0 ? 'M 218 289 C 192 245 200 190 237 157' : 'M 489 289 C 515 245 507 190 470 157'}"/>` : ''}
+      ${Math.abs(c) > .43 ? `<path d="${c > 0 ? 'M 264 418 C 282 461 310 487 337 502' : 'M 455 418 C 437 461 410 487 383 502'}"/>` : ''}
+      ${Math.abs(s) > .45 ? `<path d="${compact ? (s > 0 ? 'M 166 604 C 198 584 224 574 268 568' : 'M 566 600 C 538 580 510 570 454 556') : (s > 0 ? 'M 150 681 C 190 630 225 615 267 608' : 'M 581 672 C 540 620 500 604 454 596')}"/>` : ''}
+    </g>` : '';
+  const interpreted = model.interpretedPresent ? `
+    <g id="${id}-interpreted-contour" data-track="interpreted" data-accent-region="llm-impression" data-dither-region="interpreted" fill="none" stroke="${interpretedAccent}" stroke-width="2.0" opacity="${f(Math.min(.38, .12 + model.interpretedStrength * .28) * m.continuity)}" stroke-linecap="round">
+      <path d="M 234 286 C 226 190 287 126 357 122 C 435 118 488 181 486 286"/>
+      <path d="M 270 351 C 294 333 321 333 344 351"/>
+    </g>` : '';
+
+  // Square frame keeps the full floating shoulder gesture visible; no body contour is cut by the viewBox.
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="80 65 570 570" role="img" aria-label="It's in Your Head expressive pencil glyph" data-gaze-rest="averted-down-left" data-pose="floating-open-shoulders" shape-rendering="geometricPrecision" preserveAspectRatio="xMidYMid meet">
+  <title>It's in Your Head — ${xmlText(options.templateLabel || 'Neutral pencil')}</title>
+  <desc>Compact neutral pencil glyph. Bold contours carry the expression at small size; it does not infer sex or gender.</desc>
+  <g id="${id}-figure-attitude" transform="rotate(${f(-2.2 + cTilt * .12)} 360 400)">
+  <g id="${id}-head" transform="translate(7 0) rotate(${f(-4.2 + cTilt * .70)} 360 360)">
+    <g id="${id}-hair" data-dither-region="hair-back" fill="none" stroke="${ink}" stroke-width="8.2" stroke-linecap="round" stroke-linejoin="round">
+      <path id="${id}-hair-primary" data-contour="primary" d="${hairOuterCompact}"/>
+      <path d="M 224 326 C 208 369 216 421 239 456 C 251 475 266 487 282 497 M 480 322 C 486 373 472 432 445 469 C 432 488 414 505 397 515" stroke-width="6.6"/>
+    </g>
+    <g id="${id}-hair-front" data-dither-region="hair-front" fill="none" stroke="${ink}" stroke-width="7.0" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 220 290 C 245 238 290 207 334 199 C 322 218 314 237 313 255 C 344 229 379 218 414 222 C 445 226 465 243 482 264 C 458 259 439 262 417 274 C 384 292 352 287 322 286 C 283 284 250 307 228 355"/>
+    </g>
+    <g id="${id}-face" data-dither-region="face" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path id="${id}-face-primary" data-contour="primary" d="${faceCompact}" stroke="${ink}" stroke-width="${f((jaw > .5 ? 8.8 : 7.8) * pW)}"/>
+      <path d="M 252 269 C 267 213 314 182 366 182 C 402 182 431 209 445 260" stroke="${mid}" stroke-width="2.0" opacity=".7"/>
+    </g>
+    <g id="${id}-features" data-dither-region="features" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 267 ${338 - cBrow} C 289 ${320 - cBrow - e.focus} 318 ${320 - cBrow * .25} 343 ${339 + e.focus}" stroke="${ink}" stroke-width="${f(7.2 + profile.brow * 1.6)}"/>
+      <g id="${id}-near-eye-plane" data-plane="near">
+        <path d="M 267 ${338 - cBrow} C 289 ${320 - cBrow - e.focus} 318 ${320 - cBrow * .25} 343 ${339 + e.focus}" stroke="${ink}" stroke-width="${f(7.2 + profile.brow * 1.6)}"/>
+        <path d="M 267 367 C 289 ${jaw > .5 ? 354 : 352} 321 ${352 - e.gaze * .5} 345 367 C 323 ${382 + (e.eyeOpen + m.eyeOpen - 1) * 20} 290 ${383 + (e.eyeOpen + m.eyeOpen - 1) * 16} 267 367 Z" stroke="${ink}" stroke-width="${jaw > .5 ? 6.8 : 6.1}"/>
+        <ellipse cx="${309 + cGazeX}" cy="${367 + cGazeY * .4}" rx="4.8" ry="6.0" fill="${ink}" stroke="none"/>
+      </g>
+      <g id="${id}-far-eye-plane" data-plane="far" transform="translate(88 0) scale(.74 1)">
+        <path d="M 389 ${337 + e.focus} C 410 ${320 - cBrow * .3} 435 ${322 + cBrow} 451 ${340 + e.focus}" stroke="${mid}" stroke-width="5.8"/>
+        <path d="M 393 367 C 409 ${359 + e.gaze * .16 - e.focus} 431 ${359 + e.gaze * .16} 450 369 C 432 379 410 379 393 367 Z" stroke="${ink}" stroke-width="5.4"/>
+        <ellipse cx="${414 + cGazeX * .58}" cy="${369 + cGazeY * .4}" rx="3.2" ry="4.4" fill="${ink}" stroke="none"/>
+      </g>
+      <path d="M 366 359 C 362 389 345 414 348 425 C 356 432 369 430 378 422" stroke="${mid}" stroke-width="4.6"/>
+      <path d="M ${310 - cMouthT} ${466 - cMouthL} C 339 ${463 + cMouthT * .12} 371 ${463 - cMouthT * .10} ${392 + cMouthT} ${460 - cMouthL}" stroke="${ink}" stroke-width="5.2"/>
+    </g>
+  </g>
+  <g id="${id}-shoulder-gesture" data-dither-region="clothing" data-pose="floating-open-shoulders" fill="none" stroke="${ink}" stroke-width="6.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 316 495 C 318 528 302 550 275 564 M 405 493 C 399 527 421 547 450 557"/>
+    <path d="M 275 564 C 236 561 202 572 180 591 C 167 602 161 615 166 604" data-contour="secondary"/>
+    <path d="M 450 557 C 493 554 529 566 554 588 C 566 600 572 612 566 600" data-contour="secondary"/>
+    <path d="M 166 604 C 151 593 147 574 155 558 C 162 544 177 532 194 523 M 566 600 C 588 586 596 567 588 550 C 582 535 571 523 557 513" stroke="${mid}" stroke-width="3.0" opacity=".66"/>
+    <path d="M 286 581 C 313 599 340 606 361 602 C 389 594 413 577 433 558" stroke="${mid}" stroke-width="3.2" opacity=".72"/>
+  </g>
+  ${accent}
+  ${interpreted}
+  </g>
+  </svg>`;
+  return svg;
+}
+
+function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfile) {
+  const id = esc(options.id || `iyh-${options.template || 'neutral-pencil'}`);
+  if (options.rendering === 'compact') return buildCompactPortraitGlyph(model, options, profile);
+  const rendering = options.rendering === 'compact' ? 'compact' : 'studio';
+  const e = model.expression;
+  const graphite = options.graphite && typeof options.graphite === 'object' ? options.graphite : {};
+  const palette = options.accentPalette && typeof options.accentPalette === 'object' ? options.accentPalette : {};
+  const ink = cssColor(graphite.primary, '#D9DAD5');
+  const mid = cssColor(graphite.secondary, '#A7ABAA');
+  const faint = cssColor(graphite.construction, '#758087');
+  const shade = cssColor(graphite.shade, '#A0A5A4');
+  const accent = cssColor(palette.signal, DEFAULT_ACCENTS.signal);
+  const interpretedAccent = cssColor(palette.interpreted, DEFAULT_ACCENTS.interpreted);
+  const jaw = profile.jaw || 0;
+  const faceWidth = profile.faceWidth || 0;
+  const browWeight = profile.brow || 0;
+  // Motion-grammar deltas: live displacement on top of the persistent
+  // baseline (model.expression); morphology reshapes treatment only.
+  const m = model.motion;
+  const cBrow = e.brow + m.brow;
+  const cGazeX = e.gazeX + m.gazeDX;
+  const cGazeY = e.gazeY + m.gazeDY;
+  const cMouthT = e.mouthTension + m.mouthTension;
+  const cMouthL = e.mouthLift + m.mouthLift;
+  const cTilt = e.headTilt + m.headTilt;
+  const pW = m.pressure;
+  const gazeX = cGazeX;
+  const gazeY = cGazeY;
+  const rotation = -4.2 + cTilt * .62;
+  const c = model.observed.context_richness.deviation;
+  const x = model.observed.exploration.deviation;
+  const a = model.observed.analytical_depth.deviation;
+  const s = model.observed.scope.deviation;
+  const it = model.observed.iteration.deviation;
+  const tb = m.tensionBreak;
+  // Iteration = overdrawn underdrawing: ghost re-strokes of the primary
+  // contour. Count from the observed deviation + the echo morphology;
+  // sign sets the drift direction. Deterministic offsets, bounded.
+  const echoCount = Math.max(0, Math.min(4, Math.round(Math.abs(it) * 3.2 + m.echoBoost)));
+  const echoDir = it < 0 ? -1 : 1;
+  const signalAlpha = Math.min(.86, Math.max(0, (model.signalStrength - .20) * 1.12));
+  const agentOpacity = model.interpretedPresent
+    ? Math.min(.48, .13 + model.interpretedStrength * .32) : 0;
+  const compact = rendering === 'compact';
+  const detail = compact ? '' : `
+    <g id="${id}-expanded-pencil" data-dither-region="pencil-detail" fill="none" stroke="${faint}" stroke-width="1.15" opacity="${f(Math.min(.9, (.66 + m.lineDensity * .4) * (0.35 + 0.65 * m.continuity)))}" stroke-linecap="round">
+      <path d="M 246 331 l 11 18 M 252 345 l 10 17 M 260 360 l 9 15 M 452 340 l -9 17 M 446 354 l -9 17 M 440 369 l -8 15"/>
+      <path d="M 273 484 l 14 12 M 285 496 l 14 11 M 417 482 l -13 13 M 405 494 l -13 11"/>
+      <path d="M 264 221 C 284 186 321 163 354 162 M 425 166 C 455 184 473 212 479 239"/>
+      <path d="M 215 290 C 205 323 208 355 218 382 M 493 288 C 502 320 497 353 487 378"/>
+    </g>
+    <g id="${id}-micro-hatching" data-dither-region="micro-hatching" stroke="${shade}" stroke-width="1" opacity="${f(Math.min(.9, (.28 + Math.abs(c) * .34 + m.lineDensity * .6) * (0.35 + 0.65 * m.continuity)))}" stroke-linecap="round">
+      <path d="M 258 410 l 12 17 M 259 423 l 12 17 M 268 437 l 10 14 M 455 407 l -11 18 M 449 422 l -11 16"/>
+      <path d="M 316 520 l 14 10 M 328 526 l 13 8 M 405 519 l -13 10"/>
+    </g>`;
+
+  const faceContour = jaw > .5
+    ? `M ${244 - faceWidth} 268 C 257 198 307 166 365 168 C 411 168 446 207 452 275 C 458 351 432 421 390 472 C 376 490 362 511 350 514 C 332 512 315 498 300 482 C 263 441 241 382 239 315 C 238 294 240 279 244 268 Z`
+    : `M ${246 - faceWidth} 266 C 258 196 309 165 366 168 C 407 171 435 207 441 276 C 447 347 428 416 391 466 C 376 491 362 511 350 507 C 332 502 312 484 294 464 C 258 424 239 369 240 313 C 240 293 242 278 246 266 Z`;
+  const hairFrontStudio = jaw > .5
+    ? 'M 218 282 C 248 221 300 188 356 191 C 393 194 425 216 449 243 C 463 223 474 204 484 180 C 493 239 468 280 430 297 C 386 317 330 289 286 309 C 258 322 239 342 225 367'
+    : 'M 220 290 C 245 238 290 207 334 199 C 322 218 314 237 313 255 C 344 229 379 218 414 222 C 445 226 465 243 482 264 C 458 259 439 262 417 274 C 384 292 352 287 322 286 C 283 284 250 307 228 355';
+  const hairOuterStudio = jaw > .5
+    ? 'M 224 326 C 204 280 207 226 231 188 C 242 168 257 151 278 141 L 267 119 C 292 132 313 125 339 108 C 359 124 382 124 405 113 C 450 136 481 169 493 212 C 506 256 490 308 466 347'
+    : 'M 225 342 C 183 281 196 174 268 119 C 327 66 423 82 472 157 C 535 229 515 351 486 435 C 466 492 438 544 402 581';
+
+  const echo = Array.from({ length: Math.min(4, e.echoCount + Math.round(m.echoBoost)) }, (_, index) => {
+    const n = index + 1;
+    const offset = 2.1 * n * (model.observed.iteration.deviation < 0 ? -1 : 1);
+    return `<path d="M ${225 + offset} 326 C ${204 + offset} 251 ${247 + offset} 143 ${350 + offset} 111 C ${438 + offset} 106 ${504 + offset} 183 ${487 + offset} 283" stroke="${mid}" stroke-width="1.1" opacity="${f(.14 - index * .025)}" fill="none"/>`;
+  }).join('');
+
+  const accentGeometry = model.signalStrength > .29 ? `
+    <g id="${id}-accent-extensions" data-accent-region="extensions" data-dither-region="accent-extensions" fill="none" stroke="${accent}" stroke-width="2.0" opacity="${f(signalAlpha)}" stroke-linecap="round" stroke-linejoin="round">
+      ${Math.abs(x) > .31 ? `<path d="${x > 0 ? 'M 218 287 C 190 239 202 187 233 156' : 'M 487 285 C 516 237 505 188 475 154'}"/>` : ''}
+      ${Math.abs(c) > .43 ? `<path d="${c > 0 ? 'M 257 421 C 275 463 300 488 329 506' : 'M 459 417 C 438 461 414 486 385 504'}"/>` : ''}
+      ${Math.abs(s) > .45 ? `<path d="${s > 0 ? 'M 128 693 C 178 645 221 629 268 618' : 'M 592 694 C 542 646 499 629 452 618'}"/>` : ''}
+    </g>` : '';
+
+  const interpreted = model.interpretedPresent ? `
+    <g id="${id}-interpreted-contour" data-track="interpreted" data-accent-region="llm-impression" data-dither-region="interpreted" fill="none" stroke="${interpretedAccent}" stroke-width="2.0" opacity="${f(agentOpacity)}" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 231 ${282 + e.interpretedBias * 4} C 222 187 285 120 355 117 C 436 112 493 178 489 ${286 - e.interpretedBias * 4}"/>
+      <path d="M 488 286 C 499 393 444 474 365 ${515 + e.interpretedBias * 4}"/>
+      <path d="M 273 349 C 294 331 322 331 343 349 M 390 349 C 408 332 434 335 451 352"/>
+    </g>` : '';
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 760" role="img" aria-label="It's in Your Head expressive pencil study" data-pose="floating-open-shoulders" data-gaze-rest="averted-down-left" shape-rendering="geometricPrecision" preserveAspectRatio="xMidYMid meet">
+  <title>It's in Your Head — ${xmlText(options.templateLabel || 'Neutral pencil study')}</title>
+  <desc>An androgynous, neutral pencil construction whose gesture and contour pressure respond to interaction-derived impression signals. This is an expressive metaphor, not a demographic or factual likeness.</desc>
+  <defs><clipPath id="${id}-lower-crop"><path d="M 80 760 C 116 664 217 610 360 608 C 503 610 604 664 640 760 Z"/></clipPath></defs>
+
+  <g id="${id}-construction" data-dither-region="construction" fill="none" stroke="${faint}" stroke-width="1.1" opacity="${compact ? '.14' : '.28'}" stroke-linecap="round">
+    <path d="M 200 294 C 261 192 374 163 488 221"/>
+    <path d="M 242 523 C 303 566 403 566 468 518"/>
+    <path d="M 151 712 C 217 652 275 625 328 617 M 392 616 C 464 622 520 656 580 712"/>
+    ${compact ? '' : '<path d="M 306 107 C 374 73 453 105 493 172"/>'}
+  </g>
+  ${echoCount > 0 ? `<g id="${id}-iteration-underdrawing" data-channel="iteration" data-dither-region="iteration-underdrawing" fill="none" stroke="${faint}" stroke-linecap="round">
+    ${Array.from({ length: echoCount }, (_, i) => {
+      const off = (i + 1) * 3.2 * echoDir;
+      return `<path d="${faceContour}" transform="translate(${f(off)} ${f(-off * .55)})" stroke-width="${f(2.6 - i * .4)}" opacity="${f(.2 - i * .035)}"/>`;
+    }).join('\n    ')}
+  </g>` : ''}
+
+  <g id="${id}-figure-attitude" data-pose="floating-open-shoulders" transform="rotate(${f(-2.2 + e.headTilt * .12)} 360 400)">
+  <g id="${id}-head-gesture" transform="rotate(${f(rotation)} 360 360)">
+    <g id="${id}-hair-mass" data-dither-region="hair-back" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path id="${id}-hair-primary" data-contour="primary" d="${hairOuterStudio}" stroke="${ink}" stroke-width="${f((jaw > .5 ? 4.9 : 4.6) * pW)}"/>
+      <path d="M 224 326 C 209 369 216 421 239 456 C 251 475 266 487 282 497" stroke="${ink}" stroke-width="3.0"/>
+      <path d="M 480 322 C 486 373 472 432 445 469 C 432 488 414 505 397 515" stroke="${ink}" stroke-width="3.1"/>
+      <path d="M 233 261 C 261 190 321 143 385 145 C 436 146 466 177 485 217" stroke="${mid}" stroke-width="1.55" opacity=".72"/>
+      <path d="M 238 227 C 273 167 339 137 391 149" stroke="${faint}" stroke-width="1.2" opacity=".7"/>
+      <path d="M 470 230 C 490 268 490 306 475 333" stroke="${mid}" stroke-width="1.4" opacity=".72"/>
+      ${compact ? '' : `<g data-dither-region="hair-detail" stroke="${faint}" stroke-width="1.05" opacity="${f(Math.min(.9, (.25 + Math.abs(c) * .25 + m.lineDensity * .4) * (0.35 + 0.65 * m.continuity)))}"><path d="M 238 250 l 16 -25 M 250 256 l 19 -26 M 264 261 l 22 -26 M 446 210 l 18 22 M 438 222 l 18 25 M 430 236 l 17 26"/></g>`}
+    </g>
+
+    <g id="${id}-hair-front" data-dither-region="hair-front" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="${hairFrontStudio}" stroke="${ink}" stroke-width="3.7"/>
+      <path d="M 232 278 C 277 222 333 207 383 211 M 382 215 C 352 231 329 252 312 279" stroke="${mid}" stroke-width="1.45" opacity=".78"/>
+      <path d="M 412 263 C 432 246 448 226 458 205" stroke="${faint}" stroke-width="1.15" opacity=".75"/>
+      <path d="M 222 296 C 214 318 215 341 222 360" stroke="${ink}" stroke-width="1.65" opacity=".8"/>
+    </g>
+
+    <g id="${id}-face" data-dither-region="face" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path id="${id}-face-primary" data-contour="primary" d="${faceContour}" stroke="${ink}" stroke-width="${f(4.0 * pW)}"${tb > .15 ? ` stroke-dasharray="${f((34 + (1 - tb) * 240).toFixed(1))} ${f((3 + tb * 26).toFixed(1))}"` : ''}/>
+      <path d="M 252 269 C 267 213 314 181 366 181 C 407 181 435 208 445 260" stroke="${mid}" stroke-width="1.5" opacity=".7"/>
+      <path d="M 243 316 C 242 393 278 466 334 501" stroke="${mid}" stroke-width="1.35" opacity=".62"/>
+      <path d="M 468 316 C 464 383 436 447 391 484" stroke="${faint}" stroke-width="1.0" opacity=".65"/>
+    </g>
+
+    <g id="${id}-features" data-dither-region="features" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <g id="${id}-near-eye-plane" data-plane="near">
+        <path d="M 267 ${338 - cBrow} C 289 ${320 - cBrow - e.focus} 318 ${320 - cBrow * .25} 343 ${339 + e.focus}" stroke="${ink}" stroke-width="${f((3.2 + browWeight) * pW)}"/>
+        <path d="M 267 367 C 289 ${352 - e.gaze - e.focus} 321 ${352 - e.gaze * .5} 345 367 C 323 ${382 + (e.eyeOpen + m.eyeOpen - 1) * 20} 290 ${383 + (e.eyeOpen + m.eyeOpen - 1) * 16} 267 367 Z" stroke="${ink}" stroke-width="2.75"/>
+        <ellipse cx="${309 + gazeX}" cy="${367 + gazeY * .4}" rx="4.5" ry="5.8" fill="${ink}" stroke="none"/>
+      </g>
+      <g id="${id}-far-eye-plane" data-plane="far" transform="translate(88 0) scale(.74 1)">
+        <path d="M 389 ${337 + e.focus} C 410 ${320 - cBrow * .3} 435 ${322 + cBrow} 451 ${340 + e.focus}" stroke="${mid}" stroke-width="${f(2.4 + browWeight * .45)}"/>
+        <path d="M 393 367 C 409 ${359 + e.gaze * .16 - e.focus} 431 ${359 + e.gaze * .16} 450 369 C 432 379 410 379 393 367 Z" stroke="${ink}" stroke-width="2.45"/>
+        <ellipse cx="${414 + gazeX * .58}" cy="${369 + gazeY * .4}" rx="2.9" ry="4.2" fill="${ink}" stroke="none"/>
+      </g>
+      <path d="M 366 359 C 362 389 345 414 348 425 C 356 432 369 430 378 422" stroke="${mid}" stroke-width="${f(1.8 * pW)}"/>
+      <path d="M 338 432 C 348 437 360 437 370 431" stroke="${faint}" stroke-width="1.15"/>
+      <path d="M ${310 - cMouthT} ${466 - cMouthL} C 339 ${463 + cMouthT * .12} 371 ${463 - cMouthT * .10} ${392 + cMouthT} ${460 - cMouthL}" stroke="${ink}" stroke-width="${f(2.15 * pW)}"/>
+      ${compact ? '' : `<path d="M 333 ${476 - cMouthL * .45} C 353 ${480 + cMouthL * .25} 376 ${474 + cMouthL * .22} 390 ${468 - cMouthL * .4}" stroke="${mid}" stroke-width="1.0" opacity=".72"/>`}
+      <path d="M 461 343 C 481 332 495 351 483 379 C 474 398 462 401 451 390" stroke="${mid}" stroke-width="1.55" opacity=".88"/>
+    </g>
+  </g>
+
+  <g id="${id}-gesture" data-dither-region="gesture" fill="none" stroke="${mid}" stroke-width="1.45" opacity="${f(.18 + Math.abs(x) * .20)}" stroke-linecap="round">
+    ${x === 0 || compact ? '' : `<path d="${x > 0 ? 'M 218 302 C 182 246 194 175 251 132' : 'M 489 303 C 526 246 514 176 466 132'}"/>`}
+    <path d="M 166 489 C 145 539 164 587 210 619 M 555 490 C 575 539 556 588 511 619" opacity="${f(.25 + Math.abs(x) * .25)}"/>
+  </g>
+
+  <g id="${id}-clothing" data-dither-region="clothing" data-pose="floating-open-shoulders" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 310 492 C 317 528 299 555 267 579 M 402 492 C 397 526 421 550 454 566" stroke="${ink}" stroke-width="3.3"/>
+    <path d="M 267 579 C 224 576 190 590 166 614 C 144 635 137 660 150 681" stroke="${ink}" stroke-width="4.0" data-contour="secondary"/>
+    <path d="M 454 566 C 496 562 530 575 556 598 C 580 622 592 650 581 672" stroke="${ink}" stroke-width="3.85" data-contour="secondary"/>
+    <path d="M 313 545 C 337 567 375 571 403 546" stroke="${mid}" stroke-width="1.45"/>
+    <path d="M 286 600 C 315 617 343 622 361 620 C 389 612 413 594 433 576" stroke="${faint}" stroke-width="1.0" opacity=".66"/>
+    <!-- These pencil currents intentionally remain open and stop in free space. -->
+    <path d="M 150 681 C 124 665 116 640 126 616 C 134 597 149 584 167 575" stroke="${mid}" stroke-width="1.35" opacity=".62"/>
+    <path d="M 581 672 C 608 654 620 630 612 605 C 605 586 591 574 575 563" stroke="${mid}" stroke-width="1.3" opacity=".58"/>
+    <g id="${id}-clothing-hatching" data-channel="scope" data-dither-region="clothing-shading" stroke="${faint}" stroke-width="1.0" opacity="${f(.18 + Math.abs(s) * .30)}">
+      <path d="M 175 646 l 13 16 M 187 635 l 14 17 M 199 625 l 14 16 M 550 626 l -13 17 M 538 616 l -13 17 M 526 607 l -13 16"/>
+    </g>
+  </g>
+
+  ${echo ? `<g id="${id}-iteration" data-dither-region="iteration" fill="none">${echo}</g>` : ''}
+  ${detail}
+  ${accentGeometry}
+  ${interpreted}
+  <g id="${id}-contour-finishing" data-dither-region="contour-finishing" fill="none" stroke="${mid}" stroke-width="1.15" opacity="${f((compact ? .35 : .62) * m.continuity)}" transform="translate(${f(m.contourDrift * .5)} 0)" stroke-linecap="round">
+    <path d="M 221 310 C 213 335 216 356 222 374 M 488 306 C 495 331 491 355 484 374"/>
+    <path d="M 263 512 C 286 542 312 558 334 565 M 458 512 C 435 542 409 558 388 565"/>
+  </g>
+  </g>
+  </svg>`;
+
+  // At a 96px dock size, 3x local stroke weights produce ~1–1.6px primary
+  // contours after viewBox scaling. This is deliberately tuned, not CSS zoom.
+  return compact ? svg.replace(/stroke-width="([0-9.]+)"/g, (_, width) => `stroke-width="${f(Number(width) * 2.9)}"`) : svg;
+}
+
+function renderNeutral(model, options) {
+  return buildNeutralPencilTemplate(model, options, neutralProfile);
+}
+
+function renderAngular(model, options) {
+  return buildNeutralPencilTemplate(model, options, {
+    kind: 'angular', faceWidth: 5, jaw: 1, brow: .8, hairSweep: 7,
+  });
+}
+
+function structuredDataForLegacy(model) {
+  const user = Object.fromEntries(PORTRAIT_DIMENSIONS.map((dim) => [dim, model.observed[dim].value]));
+  const confidence = Object.fromEntries(PORTRAIT_DIMENSIONS.map((dim) => [dim, model.observed[dim].strength]));
+  const agent = Object.fromEntries(PORTRAIT_DIMENSIONS.map((dim) => [dim, model.interpreted[dim].present ? model.interpreted[dim].value : null]));
+  return {
+    available: model.available,
+    user,
+    dimensions: user,
+    confidence,
+    agent,
+    // Same derived live/morphology numbers reach the soft-flow template
+    // as the other two (plan §6: all templates receive the same model).
+    live_expression: model.rawLive,
+    morphology: model.rawMorphology,
+  };
+}
+
+registerPortraitTemplate({
+  id: 'neutral-pencil',
+  label: 'Neutral pencil',
+  description: 'Balanced, androgynous human study; the default starting point.',
+  render: renderNeutral,
+});
+registerPortraitTemplate({
+  id: 'angular-pencil',
+  label: 'Angular pencil',
+  description: 'A more angular jaw and stronger brow construction; an artistic style, not a gender label.',
+  render: renderAngular,
+});
+registerPortraitTemplate({
+  id: 'soft-flow-study',
+  label: 'Soft-flow study',
+  description: 'The original flowing pencil portrait, retained as an optional style.',
+  render: (model, options) => {
+    const rawSvg = buildSoftFlowPortraitSvg(structuredDataForLegacy(model), options);
+    if (options.rendering !== 'compact') return rawSvg;
+    return rawSvg
+      .replace('viewBox="0 0 720 760"', 'viewBox="80 65 570 570"')
+      .replace(/stroke-width="([0-9.]+)"/g, (_, width) => `stroke-width="${f(Number(width) * 2.7)}"`);
+  },
+});
+
+/** Render a portrait using a selected registered template. */
+function buildPortraitSvg(data = {}, options = {}) {
+  const templateId = options.template || DEFAULT_PORTRAIT_TEMPLATE;
+  const template = portraitTemplates.get(templateId);
+  if (!template) {
+    const available = listPortraitTemplates().map((entry) => entry.id).join(', ');
+    throw new RangeError(`Unknown portrait template "${templateId}". Available: ${available}`);
+  }
+  const model = buildPortraitModel(data);
+  const renderOptions = {
+    ...options,
+    template: template.id,
+    templateLabel: template.label,
+    id: esc(options.id || `iyh-${template.id}`),
+  };
+  const svg = template.render(model, renderOptions);
+  if (typeof svg !== 'string' || !svg.startsWith('<svg')) {
+    throw new TypeError(`Portrait template "${template.id}" did not return a complete SVG string`);
+  }
+  return svg;
+}
+
+/** Encode for an <img src="..."> in the uncompiled Hermes Desktop plugin. */
+function portraitDataUrl(data = {}, options = {}) {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(buildPortraitSvg(data, options))}`;
+}
+
+return Object.freeze({
+  PORTRAIT_DIMENSIONS,
+  DEFAULT_PORTRAIT_TEMPLATE,
+  buildPortraitModel,
+  buildPortraitSvg,
+  portraitDataUrl,
+  listPortraitTemplates,
+  registerPortraitTemplate,
+})
+})()
+
+// ---- harness stubs the engine block expects at module scope ----
+const useState = () => [null, () => {}], useEffect = () => {};
+const jsx = () => null, jsxs = () => null;
+const clamp01 = (v) => (typeof v === 'number' && Number.isFinite(v)
+  ? Math.min(1, Math.max(0, v)) : null);
+
+// ---- tuner UI: compact, time-driven, deterministic ----
+const IYH = IYH_PORTRAIT;
+const DIMS = IYH.PORTRAIT_DIMENSIONS;
+const $ = (id) => document.getElementById(id);
+const clamp1 = (v) => Math.max(-1, Math.min(1, v));
+const clamp01b = (v) => Math.max(0, Math.min(1, v));
+const TEMPLATES = IYH.listPortraitTemplates();
+let template = IYH.DEFAULT_PORTRAIT_TEMPLATE;
+
+// TIME state. STEP/PLAY advance `tick` at the production poll cadence
+// (0.85s). Every tick is a new expression target: updated_at advances and
+// a deterministic script wobbles the slider bases, so the gaze saccade
+// re-rolls and the territory breathes — exactly like real turns.
+// No Math.random anywhere: identical base sliders + identical tick
+// sequence -> identical renders.
+let tick = 0;
+let playId = null;
+const POLL_MS = 850;
+const script = (k) => ({
+  openness: clamp1((+$('f-openness').value) + 0.22 * Math.sin(k * 0.90)
+             + 0.07 * Math.sin(k * 2.31 + 0.4)),
+  focus: clamp1((+$('f-focus').value) + 0.18 * Math.sin(k * 0.63 + 1.3)),
+  resonance: clamp01b((+$('f-resonance').value) + 0.10 * Math.sin(k * 0.47 + 2.1)),
+  tension: clamp01b((+$('f-tension').value) + 0.08 * Math.sin(k * 0.53 + 0.7)),
+  intensity: clamp01b((+$('f-intensity').value) + 0.15 * Math.sin(k * 0.41 + 2.9)),
+});
+
+function payload(k) {
+  const user = {};
+  for (const d of DIMS) user[d] = parseFloat($('d-' + d).value);
+  const data = { available: true,
+                 dimensions: Object.fromEntries(DIMS.map((d) => [d, 0.5])),
+                 user, agent: null,
+                 confidence: Object.fromEntries(DIMS.map((d) => [d, 0.6])) };
+  const stage = $('f-stage').value;
+  if (stage !== 'none') {
+    const s = script(k);
+    data.live_expression = {
+      stage, updated_at: +(1000 + k * 0.85).toFixed(2),
+      openness: s.openness, focus: s.focus,
+      resonance: s.resonance, tension: s.tension,
+      intensity: s.intensity, confidence: +$('f-confidence').value,
+    };
+  }
+  if ($('m-active').checked) {
+    const pair = $('m-pair').value.split(',');
+    data.morphology = {
+      available: true, pair, evidence: 50, confidence: 0.7,
+      strength: +$('m-strength').value,
+      line_density: +$('m-ld').value, contour_asymmetry: +$('m-ca').value,
+      echo_strength: +$('m-es').value, gesture_bias: +$('m-gb').value,
+    };
+  }
+  return data;
+}
+
+// ---- saccade log: last N targets — landings + their cloud band ----
+const logEntries = [];
+const LOG_N = 48;
+function pushLog(motion) {
+  logEntries.push({ k: tick, gaze: motion.gazeDX, cloud: motion.gazeTerritory,
+                    center: motion.gazeCenter });
+  if (logEntries.length > LOG_N) logEntries.shift();
+}
+function drawLog() {
+  const svg = $('logsvg');
+  const W = 600, H = 52, Y0 = H / 2, SCALE = 1.5; // units -> px
+  const n = logEntries.length;
+  let out = '';
+  const X = (i) => 8 + (W - 16) * (n <= 1 ? 0.5 : i / (n - 1));
+  if (n > 1) {
+    // cloud band: center ± width per target
+    let top = '', bot = '';
+    for (let i = 0; i < n; i++) {
+      const e = logEntries[i];
+      const c = Y0 - e.center * SCALE;
+      const hw = Math.max(0.5, e.cloud * SCALE);
+      top += (i ? 'L' : 'M') + X(i).toFixed(1) + ',' + (c - hw).toFixed(1);
+      const j = n - 1 - i;
+      const ej = logEntries[j];
+      bot += (i ? 'L' : 'M') + X(j).toFixed(1) + ',' +
+             (Y0 - ej.center * SCALE + Math.max(0.5, ej.cloud * SCALE)).toFixed(1);
+    }
+    out += '<path d="' + top + ' ' + bot + ' Z" fill="rgba(216,201,163,0.14)"/>';
+    // cloud center line
+    out += '<path d="' + logEntries.map((e, i) =>
+      (i ? 'L' : 'M') + X(i).toFixed(1) + ',' + (Y0 - e.center * SCALE).toFixed(1)
+    ).join(' ') + '" fill="none" stroke="rgba(154,149,140,0.55)" stroke-width="1"/>';
+    // landing line (gaze saccades — the moments are the spikes)
+    out += '<path d="' + logEntries.map((e, i) =>
+      (i ? 'L' : 'M') + X(i).toFixed(1) + ',' +
+      (Y0 - Math.max(-30, Math.min(30, e.gaze)) * SCALE).toFixed(1)
+    ).join(' ') + '" fill="none" stroke="var(--accent)" stroke-width="1.4"/>';
+  }
+  out += '<line x1="8" x2="' + (W - 8) + '" y1="' + Y0 + '" y2="' + Y0 +
+         '" stroke="rgba(154,149,140,0.35)" stroke-dasharray="3 4"/>';
+  if (n > 0) {
+    const e = logEntries[n - 1];
+    out += '<circle cx="' + X(n - 1) + '" cy="' +
+           (Y0 - Math.max(-30, Math.min(30, e.gaze)) * SCALE).toFixed(1) +
+           '" r="2.6" fill="var(--accent)"/>';
+  }
+  svg.innerHTML = out;
+}
+
+function render() {
+  const data = payload(tick);
+  const model = IYH.buildPortraitModel(data);
+  const m = model.motion;
+
+  // Main stage: crop-to-fit the studio portrait, then zoom the face.
+  // Gaze markers are drawn INSIDE the svg (viewBox units) so the slice
+  // crop and the face zoom apply to them identically — pixel-perfect on
+  // the pupils, where each saccade lands.
+  const xform = $('xform');
+  xform.innerHTML = IYH.buildPortraitSvg(data,
+    { template, rendering: 'studio', id: 'tuner-crop' });
+  const svgEl = xform.querySelector('svg');
+  svgEl.setAttribute('preserveAspectRatio', 'xMidYMid slice');
+  if ($('b-mark').classList.contains('on')) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const g = model.expression.gazeX + m.gazeDX; // baseline + saccade
+    const gy = (model.expression.gazeY + m.gazeDY) * 0.4; // vertical baseline + saccade
+    // near eye only: the marker rides the SAME head-group transform as the
+    // rendered pupil, so it stays concentric at every headTilt.
+    for (const [cx, cy] of [[309 + g, 367 + gy]]) {
+      // The marker rides the SAME nested head transforms as the rendered
+      // pupil of the active template (each template tilts the head a
+      // different way):
+      // soft-flow-study: its legacy face maps gaze through different offsets
+      // (gazeOffsetX/-26 base, half saccade gain) — the studio marker would
+      // mislead; skip it there. Saccade log + readout still carry the data.
+      if (template === 'soft-flow-study') break;
+      const eT = model.expression.headTilt;
+      const cT = eT + m.headTilt;
+      const markerT = 'rotate(' + (-2.2 + eT * 0.12).toFixed(2) + ' 360 400) rotate('
+        + (-4.2 + cT * 0.62).toFixed(2) + ' 360 360)';
+      const mk = document.createElementNS(NS, 'g');
+      mk.setAttribute('stroke', 'rgba(122,96,58,.95)');
+      mk.setAttribute('fill', 'none');
+      mk.setAttribute('transform', markerT);
+      mk.innerHTML =
+        '<circle cx="' + cx + '" cy="' + cy + '" r="13" stroke-width="2.5"/>' +
+        '<line x1="' + (cx - 22) + '" y1="' + cy + '" x2="' + (cx + 22) +
+        '" y2="' + cy + '" stroke-width="1.6"/>' +
+        '<line x1="' + cx + '" y1="' + (cy - 22) + '" x2="' + cx +
+        '" y2="' + (cy + 22) + '" stroke-width="1.6"/>';
+      svgEl.appendChild(mk);
+    }
+  }
+  $('mini48').innerHTML = IYH.buildPortraitSvg(data,
+    { template, rendering: 'compact', id: 'tuner-m48' });
+  $('mini96').innerHTML = IYH.buildPortraitSvg(data,
+    { template, rendering: 'compact', id: 'tuner-m96' });
+
+  pushLog(m);
+  drawLog();
+
+  // compact numeric readout (1u = 0.667px @480 studio, ~1.15px in the crop pane)
+  const px = (u) => (u * 1.15).toFixed(1);
+  $('readrow').innerHTML =
+    '<span class="k">stage <span class="v">' + (m.stage || 'rest') + '</span></span>' +
+    '<span class="k">gaze <span class="v big">' + px(m.gazeDX) + 'px</span>' +
+    ' <span class="v">' + m.gazeDX.toFixed(1) + 'u</span></span>' +
+    '<span class="k">cloud <span class="v">' + px(m.gazeTerritory * 2) + 'px wide</span></span>' +
+    '<span class="k">head <span class="v">' + m.headTilt.toFixed(1) + '°</span></span>' +
+    '<span class="k">brow <span class="v">' + px(m.brow) + 'px</span></span>' +
+    '<span class="k">aperture <span class="v">' + px(m.eyeOpen * 20) + 'px</span></span>' +
+    '<span class="k">mouth <span class="v">' + px(Math.abs(m.mouthLift) + Math.abs(m.mouthTension)) + 'px</span></span>' +
+    '<span class="k">pressure <span class="v">' + m.pressure.toFixed(2) + '</span></span>' +
+    '<span class="k">continuity <span class="v">' + m.continuity.toFixed(2) + '</span></span>';
+  $('lg-gaze').textContent = px(m.gazeDX) + 'px';
+  $('lg-t').textContent = String(tick);
+  for (const id of ['f-openness','f-focus','f-resonance','f-tension','f-intensity',
+                    'f-confidence','m-strength','m-ld','m-ca','m-es','m-gb',
+                    'd-exploration','d-directness','d-analytical_depth',
+                    'd-iteration','d-scope','d-context_richness']) {
+    const el = $(id);
+    el.nextElementSibling.textContent = (+el.value).toFixed(2);
+  }
+  const ms = +$('m-strength').value;
+  $('m-warn').style.display = ($('m-active').checked && ms <= 0.02) ? 'block' : 'none';
+}
+
+function step() { tick += 1; render(); }
+function stopPlay() {
+  if (playId) { clearInterval(playId); playId = null; }
+  $('b-play').textContent = 'PLAY';
+  $('b-play').classList.remove('on');
+}
+function startPlay() {
+  stopPlay();
+  playId = setInterval(step, POLL_MS);
+  $('b-play').textContent = 'PAUSE';
+  $('b-play').classList.add('on');
+}
+
+function setFromPreset(p) {
+  stopPlay();
+  tick = 0;
+  $('f-stage').value = p.stage;
+  $('f-openness').value = p.o; $('f-focus').value = p.f;
+  $('f-resonance').value = p.r; $('f-tension').value = p.t;
+  $('f-intensity').value = p.i; $('f-confidence').value = p.c;
+  $('m-active').checked = p.ma; $('m-strength').value = p.ms;
+  $('m-ld').value = p.ld; $('m-ca').value = p.ca;
+  $('m-es').value = p.es; $('m-gb').value = p.gb;
+  logEntries.length = 0;
+  render();
+}
+
+function buildPresets() {
+  const host = $('presets');
+  const defs = [
+    ['neutral rest', {stage:'none',o:0,f:0,r:.5,t:.5,i:0,c:0,ma:false,ms:0,ld:0,ca:0,es:0,gb:0}],
+    ['exploratory', {stage:'prompt',o:.9,f:.05,r:.6,t:.4,i:.9,c:.3,ma:false,ms:0,ld:0,ca:0,es:0,gb:0}],
+    ['strong focus', {stage:'paired',o:-.2,f:.95,r:.55,t:.45,i:.95,c:.7,ma:false,ms:0,ld:0,ca:0,es:0,gb:0}],
+    ['high resonance', {stage:'paired',o:.3,f:.2,r:.95,t:.05,i:.7,c:.8,ma:false,ms:0,ld:0,ca:0,es:0,gb:0}],
+    ['high divergence', {stage:'paired',o:.1,f:.4,r:.08,t:.92,i:.9,c:.8,ma:false,ms:0,ld:0,ca:0,es:0,gb:0}],
+    ['established pair', {stage:'none',o:0,f:0,r:.5,t:.5,i:0,c:0,ma:true,ms:.59,ld:.21,ca:.03,es:.06,gb:0}],
+    ['live + mutation', {stage:'paired',o:.7,f:.3,r:.7,t:.3,i:.75,c:.7,ma:true,ms:.59,ld:.21,ca:.03,es:.06,gb:0}],
+  ];
+  for (const [label, p] of defs) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.onclick = () => setFromPreset(p);
+    host.appendChild(b);
+  }
+}
+
+function buildTabs() {
+  const host = $('tabs');
+  for (const t of TEMPLATES) {
+    const b = document.createElement('button');
+    b.textContent = t.label || t.id;
+    b.className = 'btn' + (t.id === template ? ' on' : '');
+    b.onclick = () => {
+      template = t.id;
+      for (const x of host.children) x.classList.remove('on');
+      b.classList.add('on');
+      render();
+    };
+    host.appendChild(b);
+  }
+}
+
+$('b-step').onclick = step;
+$('b-play').onclick = () => (playId ? stopPlay() : startPlay());
+$('b-reset').onclick = () => { stopPlay(); tick = 0; logEntries.length = 0; render(); };
+$('b-zoom').onclick = () => {
+  const on = $('b-zoom').classList.toggle('on');
+  $('cropbox').classList.toggle('zoom', on);
+  $('cropbox').classList.toggle('fit', !on);
+  $('cropcap').textContent = on ? 'STUDIO · FACE ZOOM (crop-to-fit)' : 'STUDIO · FULL PORTRAIT';
+};
+$('b-mark').onclick = () => {
+  $('b-mark').classList.toggle('on');
+  render();
+};
+
+for (const el of document.querySelectorAll('input, select')) {
+  el.addEventListener('input', () => { stopPlay(); tick = 0; logEntries.length = 0; render(); });
+}
+
+buildTabs(); buildPresets();
+// start on the exploratory preset so saccades are visible from t = 0
+setFromPreset({ stage: 'prompt', o: .9, f: .05, r: .6, t: .4, i: .9, c: .3,
+                ma: false, ms: 0, ld: 0, ca: 0, es: 0, gb: 0 });
+</script>
+</body>
+</html>

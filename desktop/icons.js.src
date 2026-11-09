@@ -1,0 +1,104 @@
+// its-in-your-head icon set v1.9 — single-stroke 16x16, tintable (currentColor only;
+// "on" state adds accent + glow, "off" stays muted flat).
+// Source of truth: each icon = SVG path segments on a 16x16 viewBox.
+// History: v1.3 crystal portrait family -> v1.5 pencil-sketch-in-frame (owner-accepted)
+// -> v1.8 = owner frozen state.
+// v1.9 — owner spec pass (authorized):
+//   - mirror: redefined as the MIRROR dropdown with the /mirror command list
+//     (pulse | portrait | drift | context | adaptation on/off | reset).
+//     Thin hand mirror; diagonal shine = menu open, no shine = closed.
+//   - tabs (pulse / portrait / drift): flat style, for the minimized word-less menu.
+//     Active state = accent highlight (TabButton border/tint), no separate off glyph.
+//   - extract removed: it was my misread of "experimental mode" (prompt-injection
+//     saturation). New pair: experimental_off = hollow circle, experimental = the same
+//     circle with a core in the center (on).
+//   - animation_off: plain play, no extra marks — off = uncolored/muted only.
+//   - portrait_gen: marker iterated (corner cross -> star -> plus/spinner/refresh,
+//     all rejected); now "shading pass": 3 pencil hatches under the jaw (on) /
+//     single quiet hatch (off) — stays in the pencil language.
+//   - feedback, repo, minimize, portrait family (frame/profile), pet family: untouched.
+const IYH_ICONS = {
+  // — tabs (flat style): for the minimized word-less menu; active tab = accent
+  //   highlight (TabButton border/tint), no separate off glyph.
+  pulse: ['M2 10 L5 10 L7 4 L9 14 L11 10 L14 10'],
+  minimize: ['M3 12 H13', 'M6 8 L8 10 L10 8'],
+  drift: ['M2 12 L6 8 L10 10 L13 5', 'M13 8 V5 H10'],
+
+  // — portrait family (owner-accepted pencil-sketch look): a portrait = the
+  //   picture in a thin frame (pencil profile + hair flow), one soft mark per
+  //   variant (3-hatch shading / 1-hatch / diamond badge).
+  portrait: [
+    'M2.5 2.5 H13.5 V13.5 H2.5 Z',  // thin frame
+    'M9.8 4.2 C9.2 4.9 8.6 5.2 8.2 5.6 L7.2 6.6 L7.8 7.2 C7.4 7.5 7.3 7.9 7.5 8.2 L7.9 8.4 C7.6 9 8 9.8 8.8 10 L9.8 10.4',  // pencil profile
+    'M9.8 4.2 C11.2 4.8 11.8 6.2 11.4 7.8 C11.2 8.8 11.6 9.6 12.2 10.2'  // hair flow
+  ],
+  // — MIRROR dropdown: the /mirror command list (pulse | portrait | drift |
+  //   context | adaptation on/off | reset). Diagonal shine = menu open,
+  //   no shine = closed.
+  mirror: [
+    'M4.6 6.2 a3.4 4.2 0 1 0 6.8 0 a3.4 4.2 0 1 0 -6.8 0',  // hand mirror glass
+    'M5.8 4.4 L9.8 8.8',  // diagonal shine (on)
+    'M8 10.4 V13 M6.6 13 H9.4'  // handle + grip
+  ],
+  mirror_off: [
+    'M4.6 6.2 a3.4 4.2 0 1 0 6.8 0 a3.4 4.2 0 1 0 -6.8 0',  // hand mirror glass
+    'M8 10.4 V13 M6.6 13 H9.4'  // handle + grip, no shine (off)
+  ],
+  portrait_gen: [
+    'M2.5 2.5 H13.5 V13.5 H2.5 Z',  // thin frame (shared base)
+    'M9.8 4.2 C9.2 4.9 8.6 5.2 8.2 5.6 L7.2 6.6 L7.8 7.2 C7.4 7.5 7.3 7.9 7.5 8.2 L7.9 8.4 C7.6 9 8 9.8 8.8 10 L9.8 10.4',  // pencil profile
+    'M9.8 4.2 C11.2 4.8 11.8 6.2 11.4 7.8 C11.2 8.8 11.6 9.6 12.2 10.2',  // hair flow
+    'M7.2 12.4 L8.6 11 M7.8 13 L9.2 11.6 M8.5 12.6 L9.9 11.2'  // shading pass: 3 pencil hatches under the jaw (on)
+  ],
+  portrait_gen_off: [
+    'M2.5 2.5 H13.5 V13.5 H2.5 Z',  // thin frame (shared base)
+    'M9.8 4.2 C9.2 4.9 8.6 5.2 8.2 5.6 L7.2 6.6 L7.8 7.2 C7.4 7.5 7.3 7.9 7.5 8.2 L7.9 8.4 C7.6 9 8 9.8 8.8 10 L9.8 10.4',  // pencil profile
+    'M9.8 4.2 C11.2 4.8 11.8 6.2 11.4 7.8 C11.2 8.8 11.6 9.6 12.2 10.2',  // hair flow
+    'M8.5 12.6 L9.9 11.2'  // quiet single hatch (off)
+  ],
+  special_portrait: [
+    'M2.5 2.5 H13.5 V13.5 H2.5 Z',  // thin frame (shared base)
+    'M9.8 4.2 C9.2 4.9 8.6 5.2 8.2 5.6 L7.2 6.6 L7.8 7.2 C7.4 7.5 7.3 7.9 7.5 8.2 L7.9 8.4 C7.6 9 8 9.8 8.8 10 L9.8 10.4',  // pencil profile
+    'M9.8 4.2 C11.2 4.8 11.8 6.2 11.4 7.8 C11.2 8.8 11.6 9.6 12.2 10.2',  // hair flow
+    'M12 3.4 L12.9 4.7 L12 6 L11.1 4.7 Z'  // diamond badge (sole differentiator)
+  ],
+
+  // — actions: chamfered squares, slanted lines (feedback / repo / animation).
+  // — experimental mode (prompt-injection saturation; /mirror adaptation on/off):
+  //   OFF = hollow circle, ON = the same circle with a core in the center.
+  experimental: [
+    'M8 8 m-4.75 0 a4.75 4.75 0 1 0 9.5 0 a4.75 4.75 0 1 0 -9.5 0',        // circle
+    'M8 8 m-1.75 0 a1.75 1.75 0 1 0 3.5 0 a1.75 1.75 0 1 0 -3.5 0'        // center core (on)
+  ],
+  experimental_off: [
+    'M8 8 m-4.75 0 a4.75 4.75 0 1 0 9.5 0 a4.75 4.75 0 1 0 -9.5 0'        // hollow circle (off)
+  ],
+  feedback: [
+    'M2.8 3 H13.2 V10 H7.6 L4.6 13 L4.6 10 H2.8 Z',                        // sharp bubble, tail
+    'M5.4 5.8 L10.8 4.6 M5.4 8 L8.6 7',                                    // slanted slash lines
+  ],
+  repo: [
+    'M4.6 2.2 L6.1 3.7 L4.6 5.2 L3.1 3.7 Z',                                // node A (diamond)
+    'M11.4 2.2 L12.9 3.7 L11.4 5.2 L9.9 3.7 Z',                            // node B (diamond)
+    'M4.6 10.8 L6.1 12.3 L4.6 13.8 L3.1 12.3 Z',                           // node C (diamond)
+    'M4.6 5.2 V10.6',                                                      // trunk
+    'M4.6 8 L9.9 3.7',                                                     // diagonal branch
+  ],
+  animation: [
+    'M4.5 3.5 L11.5 8 L4.5 12.5 Z',                                       // angular play
+    'M12.5 5.5 L14.5 3.5 M12.5 10.5 L14.5 12.5',                          // diagonal motion slashes
+  ],
+  animation_off: [
+    'M4.5 3.5 L11.5 8 L4.5 12.5 Z',                                        // plain play, no marks, uncolored (off)
+  ],
+
+  // — pet family (retained for the other session's work; the kept creature
+  //   atlas in desktop/plugin.js is what the pane actually renders).
+  pet_idle: ['M8 8 m-3 0 a3 3 0 1 0 6 0 a3 3 0 1 0 -6 0', 'M8 14 V15'],
+  pet_processing: ['M8 8 m-4 0 a4 4 0 1 1 4 -4', 'M8 8 m4 0 a4 4 0 1 1 -4 4', 'M12 6 V4 H10'],
+  pet_reading: ['M3 3 H8 V8 H3 Z', 'M8 8 H13 V13 H8 Z'],
+  pet_writing: ['M4 12 L10 6 M8 4 H12 V8', 'M3 13 H13'],
+  pet_verifying: ['M4 8 L7 11 L12 5', 'M2 4 H14 M2 4 V12'],
+  pet_success: ['M4 8 L7 11 L12 5'],
+  pet_friction: ['M4 5 L12 11 M4 11 L12 5'],
+};
