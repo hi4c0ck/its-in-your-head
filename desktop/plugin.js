@@ -249,18 +249,21 @@ const NEUTRAL_PARTS = Object.freeze({
     rot: { headTilt: 1.0 },                     // reference frame: tilt only
     region: { x: 260, y: 250, w: 200, h: 200, clearance: 8 },
     envelope: { x: 0, y: 0, r: 7 },
+    pivot: [360, 350],
   },
   jaw: {
     tx: { mouthTension: 0.5 },                  // coordinated: tension drags corners
     ty: { mouthLift: 0.6 },                     // and lift carries the cloud
     region: { x: 300, y: 430, w: 120, h: 70, clearance: 6 },
     envelope: { x: 0.6, y: 0.7 },
+    pivot: [360, 465],
     traverse: { period: 3.2, phase: 0.4, amplitude: 1.5, alias: { warmth: 0.5 } },
   },
   shoulders: {
     rot: { headTilt: 0.3 },                     // counter-tilt, restrained
     region: { x: 200, y: 540, w: 320, h: 110, clearance: 10 },
     envelope: { x: 0.3, y: 0.25, r: 3 },
+    pivot: [360, 585],
     traverse: { period: 4.6, phase: 2.1, amplitude: 2.0 },
   },
   hair_mass: {
@@ -268,6 +271,7 @@ const NEUTRAL_PARTS = Object.freeze({
     rot: { headTilt: 0.4 },
     region: { x: 240, y: 90, w: 240, h: 150, clearance: 6 },
     envelope: { x: 0.5, y: 0.4, r: 4 },
+    pivot: [360, 240],
     traverse: { period: 5.2, phase: 4.0, amplitude: 2.5, alias: { focus: -0.4 } },
   },
 });
@@ -276,18 +280,21 @@ const ANGULAR_PARTS = Object.freeze({
     rot: { headTilt: 1.0 },
     region: { x: 260, y: 250, w: 200, h: 200, clearance: 8 },
     envelope: { x: 0, y: 0, r: 7 },
+    pivot: [360, 350],
   },
   jaw: {
     tx: { mouthTension: 0.8 },                  // angular style: the jaw
     ty: { mouthLift: 0.8 },                     // owns more of the cloud
     region: { x: 300, y: 430, w: 120, h: 70, clearance: 6 },
     envelope: { x: 0.75, y: 0.75 },
+    pivot: [360, 465],
     traverse: { period: 2.8, phase: 1.1, amplitude: 1.8, alias: { focus: 0.6 } },
   },
   shoulders: {
     rot: { headTilt: 0.25 },
     region: { x: 200, y: 540, w: 320, h: 110, clearance: 10 },
     envelope: { x: 0.3, y: 0.25, r: 3 },
+    pivot: [360, 585],
     traverse: { period: 5.0, phase: 0.2, amplitude: 1.8 },
   },
   hair_mass: {
@@ -295,6 +302,7 @@ const ANGULAR_PARTS = Object.freeze({
     rot: { headTilt: 0.5 },
     region: { x: 240, y: 90, w: 240, h: 150, clearance: 6 },
     envelope: { x: 0.4, y: 0.35, r: 4 },
+    pivot: [360, 240],
     traverse: { period: 4.2, phase: 3.3, amplitude: 2.2 },
   },
 });
@@ -657,6 +665,11 @@ function normalizeParts(decl) {
         y: num(env.y) > 0 ? num(env.y) : 0,
         r: Math.abs(num(env.r)),
       }),
+      // rotation pivot: explicit, else the region center
+      pivot: p.pivot && Array.isArray(p.pivot) && p.pivot.length === 2
+        ? Object.freeze([num(p.pivot[0]), num(p.pivot[1])])
+        : Object.freeze([num(reg.x) + (num(reg.w) > 0 ? num(reg.w) / 2 : 0),
+                         num(reg.y) + (num(reg.h) > 0 ? num(reg.h) / 2 : 0)]),
     });
   }
   return Object.freeze(out);
@@ -759,6 +772,34 @@ function partSafetyReport(templateId) {
     sample: samples,
   });
 }
+
+/**
+ * Stage 4 — renderer-facing part transforms: SVG `transform` attribute
+ * values for every declared part at local clock time `t`. A part with a
+ * neutral state renders as the EMPTY STRING (the renderer omits the
+ * attribute entirely, keeping no-part / resting output byte-identical).
+ * The template author decides WHICH groups receive which transforms —
+ * the stock builders apply jaw / shoulders / hair_mass and keep the
+ * head group geometry-driven (the head part stays declared for the
+ * safety audit; its transform is available here if a custom renderer
+ * wants to own head rotation instead).
+ */
+function partTransforms(model, templateId, t = 0) {
+  const entry = portraitTemplates.get(safeTemplateId(String(templateId || DEFAULT_PORTRAIT_TEMPLATE)));
+  const out = {};
+  if (!entry || !entry.parts || !Object.keys(entry.parts).length) return Object.freeze(out);
+  const st = partStateFor(model, entry.id, t);
+  for (const [pid, spec] of Object.entries(entry.parts)) {
+    const s = st[pid];
+    if (!s || (s.dx === 0 && s.dy === 0 && s.rot === 0)) { out[pid] = ''; continue; }
+    const bits = [];
+    if (s.dx !== 0 || s.dy !== 0) bits.push(`translate(${f2(s.dx)} ${f2(s.dy)})`);
+    if (s.rot !== 0) bits.push(`rotate(${f2(s.rot)} ${spec.pivot[0]} ${spec.pivot[1]})`);
+    out[pid] = bits.join(' ');
+  }
+  return Object.freeze(out);
+}
+function f2(v) { return (Math.round(v * 100) / 100).toString(); }
 
 function liveControls(data = {}) {
   const raw = data.live_expression && typeof data.live_expression === 'object' ? data.live_expression : null;
@@ -1287,6 +1328,10 @@ function buildCompactPortraitGlyph(model, options = {}, profile = neutralProfile
   // persistent baseline (model.expression) without overwriting it; the
   // morphology layer reshapes treatment (density/echo) within its bounds.
   const m = movementFor(model, options.template);
+  // Stage 4: the compact renderer consumes the template's part states
+  // (empty map for legacy/no-part templates → byte-identical output;
+  // `options.clock` is the caller-owned local animation phase, 0 rest).
+  const pt = partTransforms(model, options.template, Number(options.clock) || 0);
   const cBrow = e.brow + m.brow;
   const cGazeX = e.gazeX + m.gazeDX;
   const cGazeY = e.gazeY + m.gazeDY;
@@ -1321,12 +1366,12 @@ function buildCompactPortraitGlyph(model, options = {}, profile = neutralProfile
   <title>It's in Your Head — ${xmlText(options.templateLabel || 'Neutral pencil')}</title>
   <desc>Compact neutral pencil glyph. Bold contours carry the expression at small size; it does not infer sex or gender.</desc>
   <g id="${id}-figure-attitude" transform="rotate(${f(-2.2 + cTilt * .12)} 360 400)">
-  <g id="${id}-head" transform="translate(7 0) rotate(${f(-4.2 + cTilt * .70)} 360 360)">
-    <g id="${id}-hair" data-dither-region="hair-back" fill="none" stroke="${ink}" stroke-width="8.2" stroke-linecap="round" stroke-linejoin="round">
+  <g id="${id}-head" transform="translate(7 0) rotate(${f(-4.2 + cTilt * .70)} 360 360)${pt.head ? ` ${pt.head}` : ''}">
+    <g id="${id}-hair" data-dither-region="hair-back" fill="none" stroke="${ink}" stroke-width="8.2" stroke-linecap="round" stroke-linejoin="round"${pt.hair_mass ? ` transform="${pt.hair_mass}"` : ''}>
       <path id="${id}-hair-primary" data-contour="primary" d="${hairOuterCompact}"/>
       <path d="M 224 326 C 208 369 216 421 239 456 C 251 475 266 487 282 497 M 480 322 C 486 373 472 432 445 469 C 432 488 414 505 397 515" stroke-width="6.6"/>
     </g>
-    <g id="${id}-hair-front" data-dither-region="hair-front" fill="none" stroke="${ink}" stroke-width="7.0" stroke-linecap="round" stroke-linejoin="round">
+    <g id="${id}-hair-front" data-dither-region="hair-front" fill="none" stroke="${ink}" stroke-width="7.0" stroke-linecap="round" stroke-linejoin="round"${pt.hair_mass ? ` transform="${pt.hair_mass}"` : ''}>
       <path d="M 220 290 C 245 238 290 207 334 199 C 322 218 314 237 313 255 C 344 229 379 218 414 222 C 445 226 465 243 482 264 C 458 259 439 262 417 274 C 384 292 352 287 322 286 C 283 284 250 307 228 355"/>
     </g>
     <g id="${id}-face" data-dither-region="face" fill="none" stroke-linecap="round" stroke-linejoin="round">
@@ -1346,10 +1391,12 @@ function buildCompactPortraitGlyph(model, options = {}, profile = neutralProfile
         <ellipse cx="${414 + cGazeX * .58}" cy="${369 + cGazeY * .4}" rx="3.2" ry="4.4" fill="${ink}" stroke="none"/>
       </g>
       <path d="M 366 359 C 362 389 345 414 348 425 C 356 432 369 430 378 422" stroke="${mid}" stroke-width="4.6"/>
-      <path d="M ${310 - cMouthT} ${466 - cMouthL} C 339 ${463 + cMouthT * .12} 371 ${463 - cMouthT * .10} ${392 + cMouthT} ${460 - cMouthL}" stroke="${ink}" stroke-width="5.2"/>
+      <g id="${id}-jaw" data-part="jaw"${pt.jaw ? ` transform="${pt.jaw}"` : ''}>
+        <path d="M ${310 - cMouthT} ${466 - cMouthL} C 339 ${463 + cMouthT * .12} 371 ${463 - cMouthT * .10} ${392 + cMouthT} ${460 - cMouthL}" stroke="${ink}" stroke-width="5.2"/>
+      </g>
     </g>
   </g>
-  <g id="${id}-shoulder-gesture" data-dither-region="clothing" data-pose="floating-open-shoulders" fill="none" stroke="${ink}" stroke-width="6.2" stroke-linecap="round" stroke-linejoin="round">
+  <g id="${id}-shoulder-gesture" data-dither-region="clothing" data-pose="floating-open-shoulders" fill="none" stroke="${ink}" stroke-width="6.2" stroke-linecap="round" stroke-linejoin="round"${pt.shoulders ? ` transform="${pt.shoulders}"` : ''}>
     <path d="M 316 495 C 318 528 302 550 275 564 M 405 493 C 399 527 421 547 450 557"/>
     <path d="M 275 564 C 236 561 202 572 180 591 C 167 602 161 615 166 604" data-contour="secondary"/>
     <path d="M 450 557 C 493 554 529 566 554 588 C 566 600 572 612 566 600" data-contour="secondary"/>
@@ -1382,6 +1429,11 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
   // Motion-grammar deltas: live displacement on top of the persistent
   // baseline (model.expression); morphology reshapes treatment only.
   const m = movementFor(model, options.template);
+  // Stage 4: the studio renderer consumes the template's part states
+  // (jaw / shoulders / hair groups; the head group stays geometry-driven
+  // in the stock language — its part transform is available if a custom
+  // renderer wants to own head rotation).
+  const pt = partTransforms(model, options.template, Number(options.clock) || 0);
   const cBrow = e.brow + m.brow;
   const cGazeX = e.gazeX + m.gazeDX;
   const cGazeY = e.gazeY + m.gazeDY;
@@ -1468,8 +1520,8 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
   </g>` : ''}
 
   <g id="${id}-figure-attitude" data-pose="floating-open-shoulders" transform="rotate(${f(-2.2 + e.headTilt * .12)} 360 400)">
-  <g id="${id}-head-gesture" transform="rotate(${f(rotation)} 360 360)">
-    <g id="${id}-hair-mass" data-dither-region="hair-back" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <g id="${id}-head-gesture" transform="rotate(${f(rotation)} 360 360)${pt.head ? ` ${pt.head}` : ''}">
+    <g id="${id}-hair-mass" data-dither-region="hair-back" fill="none" stroke-linecap="round" stroke-linejoin="round"${pt.hair_mass ? ` transform="${pt.hair_mass}"` : ''}>
       <path id="${id}-hair-primary" data-contour="primary" d="${hairOuterStudio}" stroke="${ink}" stroke-width="${f((jaw > .5 ? 4.9 : 4.6) * pW)}"/>
       <path d="M 224 326 C 209 369 216 421 239 456 C 251 475 266 487 282 497" stroke="${ink}" stroke-width="3.0"/>
       <path d="M 480 322 C 486 373 472 432 445 469 C 432 488 414 505 397 515" stroke="${ink}" stroke-width="3.1"/>
@@ -1479,7 +1531,7 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
       ${compact ? '' : `<g data-dither-region="hair-detail" stroke="${faint}" stroke-width="1.05" opacity="${f(Math.min(.9, (.25 + Math.abs(c) * .25 + m.lineDensity * .4) * (0.35 + 0.65 * m.continuity)))}"><path d="M 238 250 l 16 -25 M 250 256 l 19 -26 M 264 261 l 22 -26 M 446 210 l 18 22 M 438 222 l 18 25 M 430 236 l 17 26"/></g>`}
     </g>
 
-    <g id="${id}-hair-front" data-dither-region="hair-front" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g id="${id}-hair-front" data-dither-region="hair-front" fill="none" stroke-linecap="round" stroke-linejoin="round"${pt.hair_mass ? ` transform="${pt.hair_mass}"` : ''}>
       <path d="${hairFrontStudio}" stroke="${ink}" stroke-width="3.7"/>
       <path d="M 232 278 C 277 222 333 207 383 211 M 382 215 C 352 231 329 252 312 279" stroke="${mid}" stroke-width="1.45" opacity=".78"/>
       <path d="M 412 263 C 432 246 448 226 458 205" stroke="${faint}" stroke-width="1.15" opacity=".75"/>
@@ -1506,8 +1558,10 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
       </g>
       <path d="M 366 359 C 362 389 345 414 348 425 C 356 432 369 430 378 422" stroke="${mid}" stroke-width="${f(1.8 * pW)}"/>
       <path d="M 338 432 C 348 437 360 437 370 431" stroke="${faint}" stroke-width="1.15"/>
+      <g data-part="jaw"${pt.jaw ? ` transform="${pt.jaw}"` : ''}>
       <path d="M ${310 - cMouthT} ${466 - cMouthL} C 339 ${463 + cMouthT * .12} 371 ${463 - cMouthT * .10} ${392 + cMouthT} ${460 - cMouthL}" stroke="${ink}" stroke-width="${f(2.15 * pW)}"/>
       ${compact ? '' : `<path d="M 333 ${476 - cMouthL * .45} C 353 ${480 + cMouthL * .25} 376 ${474 + cMouthL * .22} 390 ${468 - cMouthL * .4}" stroke="${mid}" stroke-width="1.0" opacity=".72"/>`}
+      </g>
       <path d="M 461 343 C 481 332 495 351 483 379 C 474 398 462 401 451 390" stroke="${mid}" stroke-width="1.55" opacity=".88"/>
     </g>
   </g>
@@ -1517,7 +1571,7 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
     <path d="M 166 489 C 145 539 164 587 210 619 M 555 490 C 575 539 556 588 511 619" opacity="${f(.25 + Math.abs(x) * .25)}"/>
   </g>
 
-  <g id="${id}-clothing" data-dither-region="clothing" data-pose="floating-open-shoulders" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <g id="${id}-clothing" data-dither-region="clothing" data-pose="floating-open-shoulders" fill="none" stroke-linecap="round" stroke-linejoin="round"${pt.shoulders ? ` transform="${pt.shoulders}"` : ''}>
     <path d="M 310 492 C 317 528 299 555 267 579 M 402 492 C 397 526 421 550 454 566" stroke="${ink}" stroke-width="3.3"/>
     <path d="M 267 579 C 224 576 190 590 166 614 C 144 635 137 660 150 681" stroke="${ink}" stroke-width="4.0" data-contour="secondary"/>
     <path d="M 454 566 C 496 562 530 575 556 598 C 580 622 592 650 581 672" stroke="${ink}" stroke-width="3.85" data-contour="secondary"/>
@@ -1660,6 +1714,8 @@ return Object.freeze({
   // Head-movement parts (Stage 3 — template-declared, coordinated):
   partStateFor,
   partSafetyReport,
+  // Template renderers (Stage 4 — the part states, as SVG transforms):
+  partTransforms,
 })
 })()
 // IYH-PORTRAIT-ENGINE-END

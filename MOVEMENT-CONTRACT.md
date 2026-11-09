@@ -1,4 +1,4 @@
-# MOVEMENT-CONTRACT.md — template-owned portrait motion (Stage 3 of 5)
+# MOVEMENT-CONTRACT.md — template-owned portrait motion (Stage 4 of 5)
 
 Owner: lane-d (`desktop/`), settled by the parent run.
 Governing doc: the 5-stage "Portrait Motion System" upgrade design (owner-pasted,
@@ -12,7 +12,7 @@ contract says, and what the remaining stages must do.
 | 1 | Fix the movement contract + widen ranges + 48px visibility measurements | **DONE** |
 | 2 | Alias compiler: engine emits normalized semantic axes; templates declare axis→feature aliases, response curves, sensitivity (no mandatory universal aliases) | **DONE** |
 | 3 | Head-movement parts: template-declared parts, coordinated transforms, trajectories, allowed regions | **DONE** |
-| 4 | Template renderer: each template renders its own visual language at studio AND compact sizes (compact currently shares the studio builder) | pending |
+| 4 | Template renderer: each template renders its own visual language at studio AND compact sizes, consuming the part states | **DONE** |
 | 5 | Tuner upgrade: pixel-level checks (image diff between adjacent steps) in the browser, per-template calibration UI | pending |
 
 ## The contract (Stage 1 shape)
@@ -79,9 +79,10 @@ contract says, and what the remaining stages must do.
 - Tests: `node tests/test_desktop_48px_visibility.mjs` (contract +
   48px), `node tests/test_desktop_alias_compiler.mjs` (alias graph,
   Stage 2), `node tests/test_desktop_head_parts.mjs` (coordinated
-  parts, Stage 3), `node tests/test_desktop_motion_grammar.mjs` (grammar),
-  `node tests/test_desktop_portrait_engine.mjs` (routes/state),
-  `py -3.12 -m pytest tests/ -q` (perception lane).
+  parts, Stage 3), `node tests/test_desktop_template_renderers.mjs`
+  (renderers, Stage 4), `node tests/test_desktop_motion_grammar.mjs`
+  (grammar), `node tests/test_desktop_portrait_engine.mjs`
+  (routes/state), `py -3.12 -m pytest tests/ -q` (perception lane).
 
 ## The alias compiler (Stage 2)
 
@@ -165,3 +166,37 @@ registerPortraitTemplate({
   `soft-flow-study` stays legacy.
 - Renderers CONSUME part states in Stage 4 — until then the part
   layer is machinery + declarations only, and no pixels move.
+
+## Template renderers (Stage 4)
+
+Each template is the author of its own visual language at BOTH
+studio and compact sizes; the part layer is how the language moves:
+
+- `partTransforms(model, templateId, t)` — the renderer-facing view
+  of `partStateFor`: SVG `transform` attribute values per part
+  (`translate(dx dy) rotate(rot cx cy)`, pivot from the part
+  declaration). A neutral part renders as the EMPTY STRING — the
+  renderer omits the attribute, so a rest state is byte-identical
+  to pre-Stage-4 output.
+- Stock renderers:
+  - **compact glyph** (`buildCompactPortraitGlyph`): the head group
+    composes the head part after its expression rotation; hair-back
+    + hair-front groups carry `hair_mass`; the mouth cloud sits in
+    a `data-part="jaw"` wrapper; the shoulder group carries
+    `shoulders`.
+  - **studio builder** (`buildNeutralPencilTemplate`): the same
+    contract — `head-gesture` + `hair-mass` + `hair-front` +
+    `data-part="jaw"` + `clothing` groups.
+  - **legacy** (`buildSoftFlowPortraitSvg`): untouched — the
+    renderer of a no-part template emits no part wrappers and no
+    part transforms.
+- The caller owns `t` (`options.clock`, default 0). The engine
+  owns no clock: a process restart returns every part to neutral.
+- Template sovereignty: `neutral-pencil` and `angular-pencil`
+  declare different part weights/periods, so the same clock and the
+  same model produce different motion in each renderer — motion is
+  authored per template, not shared.
+- Tests: `node tests/test_desktop_template_renderers.mjs` (legacy
+  inert, rest invariance, traversal-driven motion, clock sweep
+  smoothness/determinism, template divergence, no-part empty map,
+  safety reports).
