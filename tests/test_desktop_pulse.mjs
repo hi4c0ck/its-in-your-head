@@ -224,4 +224,51 @@ assert.ok(src.includes('pulseRecency'), 'recency helper wired')
 assert.ok(src.includes("+ ' \u00b7 '"), 'expanded LIVE cell joins count + recency word')
 assert.ok(src.includes('no activity yet'), 'honest absence for unseen tools')
 console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
+
+// 9. Stage 3: four independent lanes (data + first UI pass).
+// The PULSE data seam (STAGE4 block) must prefer the native additive
+// `lanes` API verbatim and only fall back to the legacy-rows mapping
+// for hosts that predate the lanes field.
+{
+  const s4 = src.slice(src.indexOf('// STAGE4-START'), src.indexOf('// STAGE4-END'))
+  assert.ok(s4.length > 0, 'STAGE4 markers found in plugin.js')
+  const seam = new Function(s4 + '\n;return { adaptPulseToLanes };')().adaptPulseToLanes
+  const eq3 = (a, e, label) => eq(a, e, label)
+  const ok3 = (c, label) => { assert.ok(c, label); console.log('ok ' + (++n) + ' - ' + label) }
+  const lanesSrc = src.slice(src.indexOf('function PulseLanes'), src.indexOf('function IoLine'))
+  ok3(lanesSrc.includes("gridTemplateColumns: 'repeat(4, minmax(0, 1fr))'"), 'four equal-width lanes (repeat(4, minmax(0,1fr)))')
+  ok3(lanesSrc.includes('slice(0, 12)'), 'every visible cell owns its truncated tool name')
+  ok3(lanesSrc.includes("'empty-' + i"), 'empty slots stay empty (no neighbor expansion)')
+  ok3(!lanesSrc.includes('lbl-'), 'no separate tool-name rail inside PulseLanes')
+  ok3(lanesSrc.includes('threshold ') && lanesSrc.includes('evidence: ') && lanesSrc.includes('support '),
+    'tooltip/detail carries threshold + evidence source + support_count')
+  ok3(!lanesSrc.includes('destination_slot'), 'no animation fields in the lane UI path')
+  const pulseModuleSrc = src.slice(src.indexOf("'data-module': 'pulse'"), src.indexOf("'data-module': 'portrait'"))
+  ok3(pulseModuleSrc.includes('PulseLanes'), 'compact PULSE renders the lanes surface')
+  // native passthrough: independent ranking preserved verbatim
+  const native = {
+    schema_version: 2, available: true,
+    lanes: {
+      live: [{ tool_id: 12, tool_name: 'terminal', rank: 1, activity: { calls_started: 34, calls_completed: 32, errors: 2, first_seen: 1, last_seen: 2, recent_capsules: 8 }, momentum: { momentum: 0.18, surge: 0.18, value: 0.59, state: 'surging' } }],
+      goal: [{ tool_id: 17, tool_name: 'github', rank: 1, value: 0.9, threshold: 0.8, level: 'strong', state: 'provisional', support: { count: 2, required: 3, ratio: 0.6667 }, evidence: { source: 'prototype_banks', prototype_count: 2, capsule_count: 4 } }],
+      good: [{ tool_id: 12, tool_name: 'terminal', rank: 1, value: 0.8, threshold: 0.6, level: 'strong', state: 'ready', support: { count: 3, required: 3, ratio: 1 }, evidence_source: 'good_prototypes' }],
+      friction: [{ tool_id: 21, tool_name: 'browser', rank: 1, value: 0.91, threshold: 0.4, level: 'strong', state: 'ready', dominant_source: 'objective', user: { value: 0.72, level: 'strong', state: 'provisional', support: { count: 1, required: 3, ratio: 0.3333 } }, objective: { value: 0.91, level: 'strong', state: 'ready', support: { count: 3, required: 3, ratio: 1 } } }],
+    },
+    rows: [], columns: ['goal', 'good', 'friction', 'unlabeled'],
+  }
+  const out = seam(native)
+  eq3(out.lanes, native.lanes, 'native lanes pass through verbatim')
+  eq3(out.lanes.goal[0].tool_name, 'github', 'GOAL ranks github first (independent of LIVE)')
+  eq3(out.schema_version, 2, 'seam emits schema_version 2')
+  eq3(out.lane_order, ['live', 'goal', 'good', 'friction'], 'lane_order verbatim')
+  console.log('ok ' + (++n) + ' - native lanes passthrough')
+  // legacy fallback still maps rows to ALL lanes
+  const fb = seam({ columns: ['goal', 'good', 'friction', 'unlabeled'], rows: [
+    { tool_id: 12, tool_name: 'terminal', live: { calls_started: 34, calls_completed: 32, errors: 2 }, momentum: { value: 0.59, state: 'surging' }, goal: { value: 0.86 }, good: { value: 0.5 }, friction: { value: 0.2, user: 0.1, objective: 0.2 } },
+    { tool_id: 17, tool_name: 'github', live: { calls_started: 5, calls_completed: 5, errors: 0 }, momentum: { value: 0.5, state: 'steady' }, goal: { value: 0.7 }, good: { value: 0.73 }, friction: { value: 0.91, user: 0.72, objective: 0.91 } },
+  ] })
+  eq3(fb.lanes.live.length, 2, 'legacy fallback returns ALL tools per lane')
+  eq3(fb.lanes.friction.find((e) => e.tool_name === 'github').dominant_source, 'objective', 'fallback friction dominant objective')
+  eq3(seam(null).lanes.goal, [], 'null payload -> empty lanes, never omits lanes')
+}
 console.log('PASS pulse: ' + n + ' assertions')

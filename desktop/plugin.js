@@ -2552,6 +2552,24 @@ function stage4Support(count, required) {
 // Input: legacy GET /pulse payload { rows, columns }.
 // Output: PulseResponseV2 (schema_version 2, lanes).
 function adaptPulseToLanes(pulse) {
+  // Stage 3: the backend now serves the additive v2 `lanes` field
+  // directly. Prefer it verbatim (pass through — S4 composition code
+  // only knows this output shape); the legacy-rows mapping below is
+  // ONLY the fallback for hosts that predate the lanes field.
+  if (pulse && typeof pulse === 'object' && pulse.lanes
+      && typeof pulse.lanes === 'object') {
+    var lanesOk = ['live', 'goal', 'good', 'friction'].every(function (k) { return Array.isArray(pulse.lanes[k]); });
+    if (lanesOk) {
+      return {
+        schema_version: 2,
+        available: pulse.available !== false && (pulse.lanes.live.length + pulse.lanes.goal.length + pulse.lanes.good.length + pulse.lanes.friction.length) > 0,
+        lane_order: ['live', 'goal', 'good', 'friction'],
+        lanes: pulse.lanes,
+        rows: Array.isArray(pulse.rows) ? pulse.rows : [],
+        columns: (Array.isArray(pulse.columns) && pulse.columns.length === 4 ? pulse.columns.slice() : ['goal', 'good', 'friction', 'unlabeled']),
+      };
+    }
+  }
   var rows = pulse && Array.isArray(pulse.rows) ? pulse.rows : [];
   var columns = pulse && Array.isArray(pulse.columns) && pulse.columns.length
     ? pulse.columns.slice() : ['goal', 'good', 'friction', 'unlabeled'];
@@ -2906,10 +2924,22 @@ function PulseLanes({ lanes, capacity }) {
             children: entries.map(function (e) {
               var val = e && typeof e.value === 'number' ? e.value
                 : (e && e.momentum && typeof e.momentum.value === 'number' ? e.momentum.value : null);
-              var tip = lane + ' · ' + e.tool_name + ' · '
-                + (val === null ? 'no evidence' : String(Math.round(val * 100) / 100))
-                + (e.state ? ' · ' + e.state : '')
-                + (e.support ? ' · support ' + e.support.count + '/' + e.support.required : '');
+              // Stage 3 detail surface: full canonical name, value,
+              // state, support_count, threshold, evidence source.
+              var evidenceSrc = e.evidence && e.evidence.source
+                ? e.evidence.source
+                : (e.evidence_source || 'none');
+              var parts = [lane, String(e.tool_name || '')];
+              parts.push(val === null ? 'no evidence' : String(Math.round(val * 10000) / 10000));
+              if (e.state) parts.push(String(e.state));
+              if (e.threshold != null) parts.push('threshold ' + String(e.threshold));
+              var supCount = e.support && e.support.count != null
+                ? e.support.count
+                : (e.support_count != null ? e.support_count : null);
+              if (supCount !== null) parts.push('support ' + supCount);
+              if (e.level) parts.push(String(e.level));
+              parts.push('evidence: ' + evidenceSrc);
+              var tip = parts.join(' · ');
               return jsxs('div', {
                 key: e.tool_id + '-' + e.rank,
                 title: tip,

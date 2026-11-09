@@ -542,6 +542,143 @@ def _pulse_momentum(recent_counts: dict, cumulative_counts: dict) -> dict:
     return out
 
 
+# Stage 3 lane ranking — MIRROR of pulse/matrix.py (pure projection,
+# same hysteresis quantization + deterministic tie-breaks). Keep the two
+# in sync; tests/test_pulse_lanes.py pins live == fallback lanes.
+_PULSE_LANE_ORDER = ["live", "goal", "good", "friction"]
+_PULSE_HYSTERESIS = 1e-6
+
+
+def _pulse_q(score) -> int:
+    if score is None:
+        return 0
+    return int(round(float(score) / _PULSE_HYSTERESIS))
+
+
+def _pulse_sem_key(entry: dict):
+    value = entry.get("value")
+    support = entry.get("support")
+    if isinstance(support, dict):
+        ratio = support.get("ratio", 0.0)
+    else:
+        ratio = max(((entry.get(p) or {}).get("support") or {}).get("ratio", 0.0)
+                    for p in ("user", "objective"))
+    return (0 if value is not None else 1, -_pulse_q(value), -ratio,
+            entry.get("tool_name", ""), entry.get("tool_id", -1))
+
+
+def _pulse_live_key(entry: dict):
+    mom = entry.get("momentum") or {}
+    act = entry.get("activity") or {}
+    has = bool(act.get("calls_started") or act.get("calls_completed")
+               or act.get("errors") or act.get("last_seen") is not None)
+    total = (int(act.get("calls_started") or 0)
+             + int(act.get("calls_completed") or 0)
+             + int(act.get("errors") or 0))
+    last = act.get("last_seen")
+    return (0 if has else 1, -_pulse_q(mom.get("value", 0.5)), total * -1,
+            -(float(last) if isinstance(last, (int, float)) else -1.0),
+            entry.get("tool_name", ""), entry.get("tool_id", -1))
+
+
+def _pulse_assign_ranks(entries: list, key_fn) -> list:
+    ordered = sorted(entries, key=key_fn)
+    for index, entry in enumerate(ordered, start=1):
+        entry["rank"] = index
+    return ordered
+
+
+def _pulse_lanes_from_rows(rows, thresholds=None) -> dict:
+    """Mirror of pulse/matrix.py lanes_from_rows (legacy rows -> v2
+    lanes). Used to attach the additive envelope to a live engine view
+    that predates the lanes field."""
+    thr = {**_PULSE_DEFAULT_THRESHOLDS, **(thresholds or {})}
+    live, goal, good, friction = [], [], [], []
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        tool = row.get("tool_name") or row.get("tool") or ""
+        tid = row.get("tool_id", row.get("id", -1))
+        live_row = row.get("live") or {}
+        mom = row.get("momentum") or {"momentum": 0.0, "surge": 0.0,
+                                      "value": 0.5, "state": "steady"}
+        live.append({
+            "tool_id": tid, "tool_name": tool, "rank": 0,
+            "activity": {
+                "calls_started": int(live_row.get("calls_started") or 0),
+                "calls_completed": int(live_row.get("calls_completed") or 0),
+                "errors": int(live_row.get("errors") or 0),
+                "first_seen": live_row.get("first_seen"),
+                "last_seen": live_row.get("last_seen"),
+                "recent_capsules": 0,
+            },
+            "momentum": {"momentum": mom.get("momentum", 0.0),
+                         "surge": mom.get("surge", mom.get("momentum", 0.0)),
+                         "value": mom.get("value", 0.5),
+                         "state": mom.get("state", "steady")},
+        })
+        for lane, col, threshold, is_goal in (
+                (goal, "goal", thr["goal"], True),
+                (good, "good", thr["good"], False)):
+            cell = row.get(col) or {}
+            support = cell.get("support") or _pulse_support(
+                int(cell.get("support_count") or 0),
+                int(cell.get("readiness_threshold") or 3))
+            entry = {
+                "tool_id": tid, "tool_name": tool, "rank": 0,
+                "value": cell.get("value"), "threshold": threshold,
+                "level": cell.get("level") or _pulse_level(cell.get("value"),
+                                                           threshold),
+                "state": cell.get("state") or "learning",
+                "support": support,
+            }
+            if is_goal:
+                entry["evidence"] = {
+                    "source": ("prototype_banks" if support["count"] else "none"),
+                    "prototype_count": support["count"], "capsule_count": 0}
+            else:
+                entry["evidence_source"] = ("good_prototypes"
+                                            if support["count"] else "none")
+            lane.append(entry)
+        fcell = row.get("friction") or {}
+        fthr = thr["friction"]
+        user_support = fcell.get("user_support") or _pulse_support(0, 3)
+        obj_support = fcell.get("objective_support") or _pulse_support(0, 3)
+        friction.append({
+            "tool_id": tid, "tool_name": tool, "rank": 0,
+            "value": fcell.get("value"), "threshold": fthr,
+            "level": fcell.get("level") or _pulse_level(fcell.get("value"), fthr),
+            "state": fcell.get("state") or "learning",
+            "dominant_source": fcell.get("dominant_source"),
+            "user": {"value": fcell.get("user"),
+                     "level": _pulse_level(fcell.get("user"), fthr),
+                     "state": fcell.get("user_state") or "learning",
+                     "support": user_support},
+            "objective": {"value": fcell.get("objective"),
+                          "level": _pulse_level(fcell.get("objective"), fthr),
+                          "state": fcell.get("objective_state") or "learning",
+                          "support": obj_support},
+        })
+    return {
+        "live": _pulse_assign_ranks(live, _pulse_live_key),
+        "goal": _pulse_assign_ranks(goal, _pulse_sem_key),
+        "good": _pulse_assign_ranks(good, _pulse_sem_key),
+        "friction": _pulse_assign_ranks(friction, _pulse_sem_key),
+    }
+
+
+def _pulse_v2_envelope(rows, lanes, available, columns) -> dict:
+    return {
+        "schema_version": 2,
+        "available": bool(available),
+        "lane_order": list(_PULSE_LANE_ORDER),
+        "lanes": lanes if isinstance(lanes, dict) else {
+            "live": [], "goal": [], "good": [], "friction": []},
+        "rows": list(rows or []),
+        "columns": list(columns or _PULSE_COLUMNS),
+    }
+
+
 def _unpack_pulse_vector(blob) -> list[float] | None:
     """float32 LE BLOB -> list[float] (the sketch convention shared with
     events.sketch and the pulse writer's pack_vector); malformed -> None."""
@@ -565,7 +702,10 @@ def _pulse_shape() -> dict:
     live engine's {rows, columns, available} contract. DB unavailable /
     read fault -> documented empty shape, never a 500.
     """
-    shape = {"rows": [], "columns": list(_PULSE_COLUMNS),
+    shape = {"schema_version": 2,
+             "lane_order": list(_PULSE_LANE_ORDER),
+             "lanes": {"live": [], "goal": [], "good": [], "friction": []},
+             "rows": [], "columns": list(_PULSE_COLUMNS),
              "available": False}
     try:
         conn = _connect()
@@ -626,6 +766,7 @@ def _pulse_shape() -> dict:
     obj_fric_req = _required("pulse.objective_friction_min_samples")
 
     rows = []
+    lanes_live, lanes_goal, lanes_good, lanes_fric = [], [], [], []
     # Momentum (Tier-0 positive feedback), mirrored inline: recent capsule
     # feed vs cumulative call count per tool. See _pulse_momentum.
     tool_names = [tr[1] for tr in tool_rows]
@@ -739,6 +880,56 @@ def _pulse_shape() -> dict:
                 "momentum": 0.0, "surge": 0.0, "value": 0.5,
                 "state": "steady"}),
         })
+        # --- Stage 3 lanes: independent rankings over the same cells.
+        mom_entry = momentum_map.get(tool, {
+            "momentum": 0.0, "surge": 0.0, "value": 0.5,
+            "state": "steady"})
+        lanes_live.append({
+            "tool_id": tool_id, "tool_name": tool, "rank": 0,
+            "activity": {
+                "calls_started": started, "calls_completed": completed,
+                "errors": errors, "first_seen": first_seen,
+                "last_seen": last_seen,
+                "recent_capsules": recent_counts.get(tool, 0)},
+            "momentum": mom_entry})
+        ref_bank_count = (len(bank.get("good", []))
+                          + len(bank.get("friction", []))
+                          + len(bank.get("objective_friction", [])))
+        cap_count = len(capsules.get(tool, []))
+        lanes_goal.append({
+            "tool_id": tool_id, "tool_name": tool, "rank": 0,
+            "value": goal_cell["value"], "threshold": thresholds["goal"],
+            "level": goal_cell["level"], "state": goal_cell["state"],
+            "support": goal_cell["support"],
+            "evidence": {
+                "source": ("prototype_banks" if ref_bank_count
+                           else "recent_capsules" if cap_count else "none"),
+                "prototype_count": ref_bank_count,
+                "capsule_count": cap_count}})
+        lanes_good.append({
+            "tool_id": tool_id, "tool_name": tool, "rank": 0,
+            "value": good_cell["value"], "threshold": thresholds["good"],
+            "level": good_cell["level"], "state": good_cell["state"],
+            "support": good_cell["support"],
+            "evidence_source": ("good_prototypes" if good_count else "none")})
+        lanes_fric.append({
+            "tool_id": tool_id, "tool_name": tool, "rank": 0,
+            "value": friction_cell["value"],
+            "threshold": thresholds["friction"],
+            "level": friction_cell["level"], "state": friction_cell["state"],
+            "dominant_source": friction_cell["dominant_source"],
+            "user": {"value": user_value,
+                     "level": _pulse_level(user_value, thresholds["friction"]),
+                     "state": user_state, "support": user_support},
+            "objective": {"value": obj_value,
+                          "level": _pulse_level(obj_value, thresholds["friction"]),
+                          "state": obj_state, "support": obj_support}})
+    shape["lanes"] = {
+        "live": _pulse_assign_ranks(lanes_live, _pulse_live_key),
+        "goal": _pulse_assign_ranks(lanes_goal, _pulse_sem_key),
+        "good": _pulse_assign_ranks(lanes_good, _pulse_sem_key),
+        "friction": _pulse_assign_ranks(lanes_fric, _pulse_sem_key),
+    }
     shape["rows"] = rows
     shape["available"] = True
     return shape
@@ -1188,12 +1379,31 @@ def _reset_dataset() -> dict:
 
 @router.get("/pulse")
 async def pulse():
-    """Pulse matrix (rows x 4 columns): the live in-process engine view
-    when the agent half holds rows; otherwise the profile-DB fallback
-    (isolated dashboard child). Empty banks stay neutral and persisted
-    tool rows are never hidden by an empty engine. Never 500s."""
+    """Pulse matrix (rows x 4 columns) + additive v2 lanes envelope:
+    the live in-process engine view when the agent half holds rows;
+    otherwise the profile-DB fallback (isolated dashboard child).
+    Rows/columns are byte-compatible legacy projections; `lanes` is
+    authoritative for new consumers. Empty banks stay neutral and
+    persisted tool rows are never hidden by an empty engine. Never 500s."""
     view = _pulse_live_view()
     if view is not None:
+        if "lanes" not in view or view.get("schema_version") != 2:
+            thresholds = {}
+            try:
+                cur = _settings_current()
+                for key in ("goal", "good", "friction"):
+                    value = cur.get(f"pulse.thresholds.{key}")
+                    if value is not None:
+                        thresholds[key] = value
+            except Exception:
+                thresholds = {}
+            view = {
+                **view,
+                "schema_version": 2,
+                "lane_order": list(_PULSE_LANE_ORDER),
+                "lanes": _pulse_lanes_from_rows(view.get("rows"),
+                                                thresholds or None),
+            }
         return view
     return _pulse_shape()
 

@@ -226,6 +226,276 @@ def build_matrix(registry, prototypes, session_state=None,
     return rows
 
 
+def required_for(prototypes, category: str, legacy: int) -> int:
+    """Public per-category readiness minimum (legacy fallback)."""
+    attr = {"goal": "goal_min_references", "good": "good_min_samples",
+            "user_friction": "user_friction_min_samples",
+            "objective_friction": "objective_friction_min_samples"}[category]
+    return _required(prototypes, attr, legacy)
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: independent lane selectors (v2 contract).
+#
+# Each lane ranks its OWN tools and returns ALL eligible tools (the
+# desktop picks the visible prefix). Ordering is stable per lane:
+# scores are quantized to HYSTERESIS so float noise below that threshold
+# never reshuffles; remaining ties break deterministically by support
+# ratio, canonical tool name, then tool id. No animation fields anywhere.
+# ---------------------------------------------------------------------------
+
+LANE_ORDER = ["live", "goal", "good", "friction"]
+HYSTERESIS = 1e-6  # minimum meaningful score change for ranking
+
+
+def _q(score) -> int:
+    """Quantized ranking bucket: changes smaller than HYSTERESIS share
+    a bucket, so sub-noise float jitter cannot reshuffle a lane."""
+    if score is None:
+        return 0
+    return int(round(float(score) / HYSTERESIS))
+
+
+def _sem_sort_key(entry: dict):
+    value = entry.get("value")
+    support = entry.get("support")
+    if isinstance(support, dict):
+        ratio = support.get("ratio", 0.0)
+    else:  # FRICTION carries per-part support; use the best part ratio.
+        ratio = max(((entry.get(p) or {}).get("support") or {}).get("ratio", 0.0)
+                    for p in ("user", "objective"))
+    return (0 if value is not None else 1, -_q(value), -ratio,
+            entry.get("tool_name", ""), entry.get("tool_id", -1))
+
+
+def _live_sort_key(entry: dict):
+    mom = entry.get("momentum") or {}
+    act = entry.get("activity") or {}
+    has = bool(act.get("calls_started") or act.get("calls_completed")
+               or act.get("errors") or act.get("last_seen") is not None)
+    total = (int(act.get("calls_started") or 0)
+             + int(act.get("calls_completed") or 0)
+             + int(act.get("errors") or 0))
+    last = act.get("last_seen")
+    return (0 if has else 1, -_q(mom.get("value", 0.5)), total * -1,
+            -(float(last) if isinstance(last, (int, float)) else -1.0),
+            entry.get("tool_name", ""), entry.get("tool_id", -1))
+
+
+def _assign_ranks(entries: list, key_fn) -> list:
+    ordered = sorted(entries, key=key_fn)
+    for index, entry in enumerate(ordered, start=1):
+        entry["rank"] = index
+    return ordered
+
+
+def build_lanes(registry, prototypes, session_state=None,
+                goal_vector=None, goal_text: str | None = None,
+                backend=None, capsules_by_tool: dict | None = None,
+                thresholds: dict | None = None) -> dict:
+    """The four independent lane arrays (v2 contract). Pure projection
+    over the same inputs as build_matrix — no tables, no I/O beyond
+    what build_matrix already does. Returns ALL eligible tools per lane."""
+    thr = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
+    if goal_vector is None and goal_text is not None and backend is not None:
+        from .activity_encoder import encode_goal_text
+        goal_vector = encode_goal_text(goal_text, backend)
+    capsules_by_tool = capsules_by_tool or {}
+    legacy_min = int(getattr(prototypes, "min_labeled", 3) or 3)
+    goal_req = _required(prototypes, "goal_min_references", legacy_min)
+    good_req = _required(prototypes, "good_min_samples", legacy_min)
+    user_fric_req = _required(prototypes, "user_friction_min_samples",
+                              legacy_min)
+    obj_fric_req = _required(prototypes, "objective_friction_min_samples",
+                             legacy_min)
+    has_goal = goal_vector is not None
+    live, goal, good, friction = [], [], [], []
+    for tool_row in registry.list_tools():
+        tool = tool_row["tool_name"]
+        tid = tool_row["id"]
+        bank = prototypes.bank(tool)
+        capsules = [c for c in (capsules_by_tool.get(tool) or [])
+                    if isinstance(c, dict) and c.get("vector")]
+        ref_from_banks = (bank["good"] + bank["friction"]
+                          + bank["objective_friction"])
+        if ref_from_banks:
+            reference = ref_from_banks
+            evidence_source = "prototype_banks"
+            capsule_count = len(capsules)
+        else:
+            reference = [c.get("vector") for c in capsules]
+            evidence_source = "recent_capsules" if reference else "none"
+            capsule_count = len(capsules)
+        goal_value = _floor(strongest_similarity(goal_vector, reference))
+        goal_support = _support(len(reference), goal_req)
+        goal.append({
+            "tool_id": tid, "tool_name": tool, "rank": 0,
+            "value": goal_value, "threshold": thr["goal"],
+            "level": _level(goal_value, thr["goal"]),
+            "state": _state(has_goal, len(reference), goal_req),
+            "support": goal_support,
+            "evidence": {"source": evidence_source,
+                         "prototype_count": len(ref_from_banks),
+                         "capsule_count": capsule_count},
+        })
+        good_count = len(bank["good"])
+        good_value = _floor(strongest_similarity(goal_vector, bank["good"]))
+        good.append({
+            "tool_id": tid, "tool_name": tool, "rank": 0,
+            "value": good_value, "threshold": thr["good"],
+            "level": _level(good_value, thr["good"]),
+            "state": _state(has_goal, good_count, good_req),
+            "support": _support(good_count, good_req),
+            "evidence_source": "good_prototypes" if good_count else "none",
+        })
+        user_count = len(bank["friction"])
+        obj_count = len(bank["objective_friction"])
+        user_value = _floor(strongest_similarity(goal_vector,
+                                                 bank["friction"]))
+        obj_value = _floor(strongest_similarity(
+            goal_vector, bank["objective_friction"]))
+        user_support = _support(user_count, user_fric_req)
+        obj_support = _support(obj_count, obj_fric_req)
+        scored = []
+        if user_value is not None:
+            scored.append(("user", user_value, user_support["ratio"]))
+        if obj_value is not None:
+            scored.append(("objective", obj_value, obj_support["ratio"]))
+        dominant = None
+        friction_value = None
+        friction_state = _state(has_goal, 0, user_fric_req)
+        if scored:
+            dominant, friction_value, _r = max(
+                scored, key=lambda s: (s[1], s[2], s[0] == "user"))
+            friction_state = _state(
+                has_goal,
+                user_count if dominant == "user" else obj_count,
+                user_fric_req if dominant == "user" else obj_fric_req)
+        friction.append({
+            "tool_id": tid, "tool_name": tool, "rank": 0,
+            "value": friction_value, "threshold": thr["friction"],
+            "level": _level(friction_value, thr["friction"]),
+            "state": friction_state, "dominant_source": dominant,
+            "user": {"value": user_value,
+                     "level": _level(user_value, thr["friction"]),
+                     "state": _state(has_goal, user_count, user_fric_req),
+                     "support": user_support},
+            "objective": {"value": obj_value,
+                          "level": _level(obj_value, thr["friction"]),
+                          "state": _state(has_goal, obj_count, obj_fric_req),
+                          "support": obj_support},
+        })
+        live.append({
+            "tool_id": tid, "tool_name": tool, "rank": 0,
+            "activity": {
+                "calls_started": tool_row["calls_started"],
+                "calls_completed": tool_row["calls_completed"],
+                "errors": tool_row["errors"],
+                "first_seen": tool_row["first_seen"],
+                "last_seen": tool_row["last_seen"],
+                "recent_capsules": len(capsules),
+            },
+            "momentum": None,  # filled below (shared momentum pass)
+        })
+    recent_counts = {e["tool_name"]: e["activity"]["recent_capsules"]
+                     for e in live}
+    cum_counts = {e["tool_name"]: int(e["activity"]["calls_completed"])
+                  for e in live}
+    momentum = surge_values(recent_counts, cum_counts)
+    for entry in live:
+        entry["momentum"] = momentum.get(entry["tool_name"],
+                                         empty_momentum())
+    return {
+        "live": _assign_ranks(live, _live_sort_key),
+        "goal": _assign_ranks(goal, _sem_sort_key),
+        "good": _assign_ranks(good, _sem_sort_key),
+        "friction": _assign_ranks(friction, _sem_sort_key),
+    }
+
+
+def lanes_from_rows(rows, thresholds: dict | None = None) -> dict:
+    """Derive the v2 lanes from legacy build_matrix rows (used when the
+    live engine view predates the lanes field). Evidence detail that
+    the legacy projection does not carry collapses honestly:
+    support counts come from the per-cell support, capsule/bank split
+    is unavailable so it reports 0 with source 'none' when empty."""
+    thr = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
+    rows = rows or []
+    live, goal, good, friction = [], [], [], []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        tool = row.get("tool_name") or row.get("tool") or ""
+        tid = row.get("tool_id", row.get("id", -1))
+        live_row = row.get("live") or {}
+        mom = row.get("momentum") or {"momentum": 0.0, "surge": 0.0,
+                                      "value": 0.5, "state": "steady"}
+        live.append({
+            "tool_id": tid, "tool_name": tool, "rank": 0,
+            "activity": {
+                "calls_started": int(live_row.get("calls_started") or 0),
+                "calls_completed": int(live_row.get("calls_completed") or 0),
+                "errors": int(live_row.get("errors") or 0),
+                "first_seen": live_row.get("first_seen"),
+                "last_seen": live_row.get("last_seen"),
+                "recent_capsules": 0,
+            },
+            "momentum": {"momentum": mom.get("momentum", 0.0),
+                         "surge": mom.get("surge", mom.get("momentum", 0.0)),
+                         "value": mom.get("value", 0.5),
+                         "state": mom.get("state", "steady")},
+        })
+        for lane_key, col, threshold, evidence in (
+                (goal, "goal", thr["goal"], "goal"),
+                (good, "good", thr["good"], "good")):
+            cell = row.get(col) or {}
+            support = cell.get("support") or _support(
+                int(cell.get("support_count") or 0),
+                int(cell.get("readiness_threshold") or 3))
+            entry = {
+                "tool_id": tid, "tool_name": tool, "rank": 0,
+                "value": cell.get("value"), "threshold": threshold,
+                "level": cell.get("level") or _level(cell.get("value"),
+                                                     threshold),
+                "state": cell.get("state") or "learning",
+                "support": support,
+            }
+            if evidence == "goal":
+                entry["evidence"] = {
+                    "source": ("prototype_banks" if support["count"] else "none"),
+                    "prototype_count": support["count"], "capsule_count": 0}
+            else:
+                entry["evidence_source"] = ("good_prototypes"
+                                            if support["count"] else "none")
+            lane_key.append(entry)
+        fcell = row.get("friction") or {}
+        fthr = thr["friction"]
+        user_support = fcell.get("user_support") or _support(0, 3)
+        obj_support = fcell.get("objective_support") or _support(0, 3)
+        user_part = {"value": fcell.get("user"),
+                     "level": _level(fcell.get("user"), fthr),
+                     "state": fcell.get("user_state") or "learning",
+                     "support": user_support}
+        obj_part = {"value": fcell.get("objective"),
+                    "level": _level(fcell.get("objective"), fthr),
+                    "state": fcell.get("objective_state") or "learning",
+                    "support": obj_support}
+        friction.append({
+            "tool_id": tid, "tool_name": tool, "rank": 0,
+            "value": fcell.get("value"), "threshold": fthr,
+            "level": fcell.get("level") or _level(fcell.get("value"), fthr),
+            "state": fcell.get("state") or "learning",
+            "dominant_source": fcell.get("dominant_source"),
+            "user": user_part, "objective": obj_part,
+        })
+    return {
+        "live": _assign_ranks(live, _live_sort_key),
+        "goal": _assign_ranks(goal, _sem_sort_key),
+        "good": _assign_ranks(good, _sem_sort_key),
+        "friction": _assign_ranks(friction, _sem_sort_key),
+    }
+
+
 def matrix_for_goal(goal_text, registry, prototypes, backend, **kw):
     """Convenience: encode the goal (worker side) then build the matrix."""
     from .activity_encoder import encode_goal_text

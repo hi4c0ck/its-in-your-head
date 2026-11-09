@@ -177,7 +177,13 @@ def test_pulse_live_view_wins_over_fallback(agent_env, monkeypatch):
 def test_pulse_fallback_empty_db_returns_documented_shape(tmp_path):
     api = _api(tmp_path / "empty.db")
     monkeypatch_free = api._pulse_shape()
-    assert monkeypatch_free == {"rows": [],
+    # Additive v2 envelope: DB-down / no-tools still carries empty lanes.
+    assert monkeypatch_free == {"schema_version": 2,
+                                "lane_order": ["live", "goal", "good",
+                                               "friction"],
+                                "lanes": {"live": [], "goal": [], "good": [],
+                                          "friction": []},
+                                "rows": [],
                                 "columns": ["goal", "good", "friction",
                                             "unlabeled"],
                                 "available": False}
