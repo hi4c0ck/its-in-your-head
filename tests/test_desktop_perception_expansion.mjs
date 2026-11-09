@@ -81,10 +81,11 @@ ok(/percOn\s*&&\s*patterns\.length\s*>\s*0/.test(ep), 'per-pattern grid only whe
 // ONLY when the strip source is intentionally changed.
 const strip = src.slice(src.indexOf('function Strip'), src.indexOf('export default {'))
 assert.ok(strip.length > 0, 'Strip region found')
-// Re-baselined at the S16 live-expression/morphology pass: the strip now
-// threads PORTRAIT_POLL_MS (portrait-only ~0.85s cadence) and the
-// learned-pair readout into the expanded portrait inspection.
-const STRIP_SHA_S16_MOTION = '82b3853915e9aed3c9507ac8a6453b5e26b2e0dbd3a9ab49ac86e235cb41aeca'
+// Re-baselined at the Stage 4 measured-capacity / surface-composition
+// pass: the strip now measures width AND height, selects bottom/sidebar
+// from the measured box, renders PORTRAIT+PULSE coexisting modules,
+// and consumes the v2 lane adapter (DRIFT stays expanded-only).
+const STRIP_SHA_S16_MOTION = 'd1b4acf7c96adae02bb55142f7927359f3f42d5ac08a8bb8121e19ebbab90919'
 assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_S16_MOTION,
   '96px strip source byte-identical to the S16 motion-grammar baseline')
 ok(true, 'strip byte-identity snapshot pinned')

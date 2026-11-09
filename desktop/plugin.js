@@ -2429,6 +2429,269 @@ function pulseRecency(lastSeen, nowSec) {
 }
 // PULSE-END
 
+// STAGE4-START
+// =====================================================================
+// Stage 4 — measured capacity + surface compositions + PULSE data seam.
+// Pure helpers (no DOM / no host / no React): composition selection,
+// visible-capacity calculation, focus/activation, and the injectable
+// PULSE adapter. The desktop consumes the v2 contract below; Stage 3
+// swaps the adapter source to the lanes API without touching the
+// composition code because ALL lane-shape knowledge lives in
+// adaptPulseToLanes.
+//
+// v2 contract (verbatim, owner-specified 2026-11-09):
+//   type PulseState = "empty" | "learning" | "provisional" | "ready";
+//   type PulseLevel = "neutral" | "weak" | "strong";
+//   type PulseMomentumState = "surging" | "steady" | "cooling";
+//   type PulseLaneOrder = ["live", "goal", "good", "friction"];
+//   interface PulseSupport { count: number; required: number; ratio: number; }
+//   interface PulseResponseV2 {
+//     schema_version: 2; available: boolean;
+//     lane_order: PulseLaneOrder;
+//     lanes: { live: PulseLiveEntry[]; goal: PulseGoalEntry[]; good: PulseGoodEntry[]; friction: PulseFrictionEntry[]; };
+//     rows: LegacyPulseRow[]; columns: ["goal","good","friction","unlabeled"];
+//   }
+//   interface PulseEntryBase { tool_id: number; tool_name: string; rank: number; }
+//   interface PulseLiveEntry extends PulseEntryBase {
+//     activity: { calls_started: number; calls_completed: number; errors: number; first_seen: number | null; last_seen: number | null; recent_capsules: number; };
+//     momentum: { momentum: number; surge: number; value: number; state: PulseMomentumState; };
+//   }
+//   interface PulseGoalEntry extends PulseEntryBase {
+//     value: number | null; threshold: number; level: PulseLevel; state: PulseState; support: PulseSupport;
+//     evidence: { source: "prototype_banks" | "recent_capsules" | "none"; prototype_count: number; capsule_count: number; };
+//   }
+//   interface PulseGoodEntry extends PulseEntryBase {
+//     value: number | null; threshold: number; level: PulseLevel; state: PulseState; support: PulseSupport;
+//     evidence_source: "good_prototypes" | "none";
+//   }
+//   interface PulseFrictionPart { value: number | null; level: PulseLevel; state: PulseState; support: PulseSupport; }
+//   interface PulseFrictionEntry extends PulseEntryBase {
+//     value: number | null; threshold: number; level: PulseLevel; state: PulseState;
+//     dominant_source: "user" | "objective" | null; user: PulseFrictionPart; objective: PulseFrictionPart;
+//   }
+//   interface LegacyPulseRow { [key: string]: unknown; }
+
+// Composition: wide-shallow -> bottom, tall-narrow -> sidebar.
+// Orientation comes from the MEASURED pane box (width AND height),
+// never from width alone. A narrow but shallow surface stays bottom
+// (plan section 8.1); a very short allocation always stays bottom and
+// readable. Unknown/zero box defaults to bottom ( Bottom bar is the
+// registered host surface ).
+function chooseComposition(width, height) {
+  var w = Number(width);
+  var h = Number(height);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return 'bottom';
+  if (h <= 140) return 'bottom'; // shallow dock: never a sidebar
+  var tall = h >= w * 1.25;
+  var narrow = w <= 560;
+  return (tall && narrow) ? 'sidebar' : 'bottom';
+}
+
+// Visible capacity: floor((availableHeight + gap) / minCellPitch),
+// clamped to [minCap, maxCap]. All lanes share the SAME capacity.
+// Reduce rows before shrinking text/dots: the cell pitch (the
+// readability floor) is fixed — text and dots never shrink below it.
+function visibleCapacity(availableHeight, opts) {
+  var o = opts || {};
+  var gap = Number(o.gap != null ? o.gap : 2);
+  var pitch = Number(o.minPitch != null ? o.minPitch : 16);
+  var minCap = Math.max(1, Math.floor(Number(o.minCap != null ? o.minCap : 1)) || 1);
+  var maxCap = Math.max(minCap, Math.floor(Number(o.maxCap != null ? o.maxCap : 3)) || 3);
+  var h = Number(availableHeight);
+  if (!Number.isFinite(h) || h <= 0 || !Number.isFinite(pitch) || pitch <= 0) return minCap;
+  var cap = Math.floor((h + gap) / pitch);
+  if (cap < minCap) cap = minCap;
+  if (cap > maxCap) cap = maxCap;
+  return cap;
+}
+
+function capacityForComposition(box, composition) {
+  var w = box && Number.isFinite(Number(box.width)) ? Number(box.width) : 0;
+  var h = box && Number.isFinite(Number(box.height)) ? Number(box.height) : 0;
+  // Reserve header/ticker/padding so the measured pane height maps to
+  // the PULSE module's actual available height. The pixel budget is
+  // layout geometry (not a theme color), consistent with NARROW_W.
+  var chrome = 48;
+  var avail = h - chrome;
+  if (!Number.isFinite(avail) || avail <= 0) avail = 48;
+  if (composition === 'sidebar') {
+    // Sidebar splits PORTRAIT/PULSE ~50/50: PULSE gets roughly half.
+    var half = Math.max(24, Math.floor(avail / 2));
+    return visibleCapacity(half, { minCap: 1, maxCap: 4 });
+  }
+  return visibleCapacity(avail, { minCap: 1, maxCap: 3 });
+}
+
+// Activation/focus: PULSE and PORTRAIT coexist in compact mode.
+// Activating one sets focus; it NEVER hides or nulls the sibling.
+function nextFocusFor(current, next) {
+  return (next === 'pulse' || next === 'portrait') ? next : current;
+}
+
+function stage4Clamp01(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null;
+}
+function stage4Level(value, threshold) {
+  if (value === null) return 'neutral';
+  return value >= threshold ? 'strong' : 'weak';
+}
+function stage4State(value, count, required) {
+  if (value === null) return (count > 0 ? 'learning' : 'learning');
+  return count >= required ? 'ready' : 'provisional';
+}
+function stage4Support(count, required) {
+  var c = Number(count) || 0;
+  var r = Math.max(1, Number(required) || 3);
+  return { count: c, required: r, ratio: Math.min(1, c / r) };
+}
+
+// PULSE DATA SEAM — the ONLY function that knows the lane shape.
+// Today it sources the existing REST response (legacy rows) and maps
+// locally to lane-shaped data. Stage 3 swaps the source to the lanes
+// API here WITHOUT touching the composition/capacity code.
+// Input: legacy GET /pulse payload { rows, columns }.
+// Output: PulseResponseV2 (schema_version 2, lanes).
+function adaptPulseToLanes(pulse) {
+  var rows = pulse && Array.isArray(pulse.rows) ? pulse.rows : [];
+  var columns = pulse && Array.isArray(pulse.columns) && pulse.columns.length
+    ? pulse.columns.slice() : ['goal', 'good', 'friction', 'unlabeled'];
+  var enriched = rows.map(function (row, i) {
+    return { row: row || {}, i: i };
+  });
+  function idOf(r) { var v = r && (r.tool_id != null ? r.tool_id : r.id); return (typeof v === 'number' && Number.isFinite(v)) ? v : -1; }
+  function nameOf(r) { return String((r && r.tool_name) || (r && r.tool) || '').trim(); }
+  function semValue(r, col) {
+    var cell = r ? r[col] : null;
+    var v = cell && typeof cell === 'object' ? cell.value : null;
+    return stage4Clamp01(v);
+  }
+  function liveTotal(r) {
+    var live = r && typeof r.live === 'object' ? r.live : null;
+    if (!live) return 0;
+    return [live.calls_started, live.calls_completed, live.errors].reduce(function (s, v) {
+      return s + (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+    }, 0);
+  }
+  function momVal(r) {
+    var m = r && r.momentum && typeof r.momentum.value === 'number' ? r.momentum.value : null;
+    return m === null ? 0.5 : m;
+  }
+  function makeRanker(scoreFn) {
+    return function (a, b) {
+      var d = scoreFn(b.row) - scoreFn(a.row);
+      if (d !== 0) return d > 0 ? 1 : -1;
+      var na = nameOf(a.row), nb = nameOf(b.row);
+      if (na < nb) return -1;
+      if (na > nb) return 1;
+      return a.i - b.i;
+    };
+  }
+  function ranked(scoreFn) {
+    return enriched.slice().sort(makeRanker(scoreFn));
+  }
+  var liveRows = ranked(function (r) { return liveTotal(r) > 0 ? 1 - 1 / (1 + liveTotal(r)) : -1; });
+  var goalRows = ranked(function (r) { var v = semValue(r, 'goal'); return v === null ? -1 : v; });
+  var goodRows = ranked(function (r) { var v = semValue(r, 'good'); return v === null ? -1 : v; });
+  var fricRows = ranked(function (r) {
+    var f = r && r.friction && typeof r.friction === 'object' ? r.friction : null;
+    var top = null;
+    if (f) {
+      var uv = stage4Clamp01(typeof f.user === 'number' ? f.user : (f.user && f.user.value));
+      var ov = stage4Clamp01(typeof f.objective === 'number' ? f.objective : (f.objective && f.objective.value));
+      top = Math.max(uv === null ? -1 : uv, ov === null ? -1 : ov);
+      if (top === null) top = null;
+    }
+    var sv = semValue(r, 'friction');
+    var cand = [top === undefined ? null : top, sv].filter(function (x) { return x !== null && x !== undefined && x >= 0; });
+    return cand.length ? Math.max.apply(null, cand) : -1;
+  });
+  var live = liveRows.map(function (e, idx) {
+    var r = e.row;
+    var lv = r && typeof r.live === 'object' ? r.live : {};
+    var total = liveTotal(r);
+    var mom = r && r.momentum && typeof r.momentum === 'object' ? r.momentum : {};
+    var mv = typeof mom.value === 'number' && Number.isFinite(mom.value) ? mom.value : 0.5;
+    var mState = mom.state === 'surging' || mom.state === 'cooling' ? mom.state : 'steady';
+    return {
+      tool_id: idOf(r), tool_name: nameOf(r), rank: idx + 1,
+      activity: {
+        calls_started: typeof lv.calls_started === 'number' ? lv.calls_started : 0,
+        calls_completed: typeof lv.calls_completed === 'number' ? lv.calls_completed : 0,
+        errors: typeof lv.errors === 'number' ? lv.errors : 0,
+        first_seen: typeof lv.first_seen === 'number' ? lv.first_seen : null,
+        last_seen: typeof lv.last_seen === 'number' ? lv.last_seen : null,
+        recent_capsules: 0,
+      },
+      momentum: {
+        momentum: typeof mom.momentum === 'number' ? mom.momentum : (mv - 0.5),
+        surge: typeof mom.surge === 'number' ? mom.surge : (mv - 0.5),
+        value: mv, state: mState,
+      },
+    };
+  });
+  function semEntry(e, idx, col, threshold, evidenceKey) {
+    var r = e.row;
+    var v = semValue(r, col);
+    var support = stage4Support(0, 3);
+    var entry = {
+      tool_id: idOf(r), tool_name: nameOf(r), rank: idx + 1,
+      value: v, threshold: threshold,
+      level: stage4Level(v, threshold),
+      state: v === null ? 'learning' : 'provisional',
+      support: support,
+    };
+    if (evidenceKey === 'prototype_banks') {
+      entry.evidence = { source: 'none', prototype_count: 0, capsule_count: 0 };
+    } else {
+      entry.evidence_source = 'none';
+    }
+    return entry;
+  }
+  var goal = goalRows.map(function (e, idx) { return semEntry(e, idx, 'goal', 0.8, 'prototype_banks'); });
+  var good = goodRows.map(function (e, idx) { return semEntry(e, idx, 'good', 0.6, 'good_prototypes'); });
+  var friction = fricRows.map(function (e, idx) {
+    var r = e.row;
+    var f = r && r.friction && typeof r.friction === 'object' ? r.friction : {};
+    function part(p) {
+      var v = p === null || p === undefined ? null : stage4Clamp01(typeof p === 'number' ? p : p.value);
+      return { value: v, level: stage4Level(v, 0.4), state: v === null ? 'learning' : 'provisional', support: stage4Support(0, 3) };
+    }
+    // Legacy shape: friction.user / friction.objective may be numbers OR
+    // per-source cells. The adapter normalises to PulseFrictionPart.
+    var userSrc = (f && (f.user !== undefined ? f.user : undefined));
+    var objSrc = (f && (f.objective !== undefined ? f.objective : undefined));
+    // Top-level friction.value is the legacy combined score fallback.
+    var userPart = part(userSrc);
+    var objPart = part(objSrc);
+    var top = semValue(r, 'friction');
+    if (top === null) {
+      var uv = userPart.value, ov = objPart.value;
+      top = uv === null ? ov : (ov === null ? uv : Math.max(uv, ov));
+    }
+    var dominant_source = null;
+    if (userPart.value !== null || objPart.value !== null) {
+      if (objPart.value !== null && (userPart.value === null || objPart.value > userPart.value)) dominant_source = 'objective';
+      else if (userPart.value !== null) dominant_source = 'user';
+    }
+    return {
+      tool_id: idOf(r), tool_name: nameOf(r), rank: idx + 1,
+      value: top, threshold: 0.4,
+      level: stage4Level(top, 0.4),
+      state: top === null ? 'learning' : 'provisional',
+      dominant_source: dominant_source, user: userPart, objective: objPart,
+    };
+  });
+  return {
+    schema_version: 2,
+    available: rows.length > 0,
+    lane_order: ['live', 'goal', 'good', 'friction'],
+    lanes: { live: live, goal: goal, good: good, friction: friction },
+    rows: rows.slice(),
+    columns: (columns.length === 4 ? columns.slice() : ['goal', 'good', 'friction', 'unlabeled']),
+  };
+}
+// STAGE4-END
+
 // PULSE matrix structure: a real grid of row × column cells (a DOM table,
 // not a painted canvas). The label and its four graphic cells are sibling
 // cells of one grid row, so the layout engine — not pitch arithmetic —
@@ -2593,6 +2856,90 @@ function PulseMatrix({ pulse }) {
       }) : null,
     ],
   })
+}
+
+// Stage 4 lane matrix: four equal independent lanes, each cell owns
+// its tool name + compact dot matrix. Text/dots stay at the readability
+// floor (fontSize 9, fixed dots); capacity shrinks ROW count only.
+// All lanes share the SAME capacity supplied by the parent (measured
+// box). Theme vars only; no hardcoded colors.
+function PulseLanes({ lanes, capacity }) {
+  var order = ['live', 'goal', 'good', 'friction'];
+  var cap = Math.max(1, Math.floor(Number(capacity) || 1));
+  function dotsFor(value) {
+    var v = typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
+    var filled = v === null ? 0 : Math.round(v * 12);
+    var dots = [];
+    for (var i = 0; i < 12; i++) {
+      dots.push(jsx('span', {
+        key: i,
+        style: {
+          width: 4, height: 4, borderRadius: 2, display: 'inline-block',
+          background: 'var(--ui-accent)', opacity: i < filled ? 0.9 : 0.15,
+        },
+      }));
+    }
+    return dots;
+  }
+  return jsxs('div', {
+    role: 'grid',
+    'aria-label': 'pulse lanes',
+    'data-testid': 'pulse-lanes',
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+      gap: '2px 3px',
+      flex: 1, minWidth: 0, minHeight: 0,
+    },
+    children: order.map(function (lane) {
+      var entries = lanes && Array.isArray(lanes[lane]) ? lanes[lane].slice(0, cap) : [];
+      return jsxs('div', {
+        key: lane,
+        'data-lane': lane,
+        style: {
+          display: 'flex', flexDirection: 'column', gap: 2,
+          minWidth: 0, minHeight: 0, overflow: 'hidden',
+        },
+        children: [
+          jsxs('div', {
+            style: { display: 'flex', flexDirection: 'column', gap: 2, minHeight: 0, minWidth: 0 },
+            children: entries.map(function (e) {
+              var val = e && typeof e.value === 'number' ? e.value
+                : (e && e.momentum && typeof e.momentum.value === 'number' ? e.momentum.value : null);
+              var tip = lane + ' · ' + e.tool_name + ' · '
+                + (val === null ? 'no evidence' : String(Math.round(val * 100) / 100))
+                + (e.state ? ' · ' + e.state : '')
+                + (e.support ? ' · support ' + e.support.count + '/' + e.support.required : '');
+              return jsxs('div', {
+                key: e.tool_id + '-' + e.rank,
+                title: tip,
+                style: {
+                  display: 'flex', alignItems: 'center', gap: 4, minHeight: 14, overflow: 'hidden',
+                },
+                children: [
+                  jsxs('span', {
+                    style: {
+                      fontSize: 9, lineHeight: '14px', minWidth: 0, flex: '1 1 auto',
+                      fontFamily: 'var(--ui-font-mono, monospace)',
+                      color: 'var(--ui-text-secondary)',
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    },
+                    children: String(e.tool_name || '').slice(0, 12),
+                  }),
+                  jsxs('span', {
+                    style: { display: 'inline-grid', gridTemplateColumns: 'repeat(4, 4px)', gap: 1, flexShrink: 0 },
+                    children: dotsFor(val),
+                  }),
+                ],
+              });
+            }.concat(Array.from({ length: Math.max(0, cap - entries.length) }).map(function (_, i) {
+              return jsx('div', { key: 'empty-' + i, style: { minHeight: 14 } });
+            }))),
+          }),
+        ],
+      });
+    }),
+  });
 }
 
 function IoLine({ ev }) {
@@ -3672,36 +4019,43 @@ function EncoderSwitcher({ settings, rest, onApplied }) {
 }
 
 function Strip({ source, rest, portraitPreferences }) {
-  const [tab, setTab] = useState('pulse')
+  const [tab, setTab] = useState('pulse') // focus (activation), never exclusive
   const [panel, setPanel] = useState(null) // null | 'settings' | 'help' | 'mirror'
   const rootRef = useRef(null)
   const [narrow, setNarrow] = useState(false)
   const [tiny, setTiny] = useState(false)
-  // Frame orientation: the layout engine hands us the box (wide bottom
-  // lane or narrow sidebar column) — we only READ its width, via the one
-  // ResizeObserver on the root. The fixed-size glyph/canvas contract is
-  // untouched: nothing here re-sizes a drawing surface, it just picks
-  // which elements earn a 300px-wide frame.
+  const [box, setBox] = useState({ width: 0, height: 0 })
+  // Frame orientation + measured composition: the layout engine hands
+  // us the box (wide bottom lane or narrow sidebar column) — we READ
+  // width AND height from the single observer on the actual surface.
+  // Composition/capacity derive from that measured box every resize.
+  // The fixed-size glyph/canvas contract is untouched.
   useEffect(() => {
     const el = rootRef.current
     if (!el) return undefined
     let ro = null
-    const update = (w) => {
+    const update = (w, h) => {
       const n = w < NARROW_W
       setNarrow((p) => (p === n ? p : n))
       const t = w < TINY_W
       setTiny((p) => (p === t ? p : t))
+      setBox((p) => (p.width === w && p.height === h ? p : { width: w, height: h }))
     }
-    update(el.clientWidth)
+    update(el.clientWidth, el.clientHeight)
     if (typeof ResizeObserver !== 'undefined') {
       ro = new ResizeObserver((entries) => {
         const e = entries[entries.length - 1]
-        update((e && e.contentRect && e.contentRect.width) || el.clientWidth)
+        const w = (e && e.contentRect && e.contentRect.width) || el.clientWidth
+        const h = (e && e.contentRect && e.contentRect.height) || el.clientHeight
+        update(w, h)
       })
       ro.observe(el)
     }
     return () => { if (ro) ro.disconnect() }
   }, [])
+  const composition = chooseComposition(box.width, box.height)
+  const capacity = capacityForComposition(box, composition)
+  const activateFocus = (id) => setTab((cur) => nextFocusFor(cur, id))
 
   const metricsQ = useQuery({
     queryKey: [source, 'iyh-metrics'],
@@ -3858,42 +4212,72 @@ function Strip({ source, rest, portraitPreferences }) {
     children: [q.data ? '[+] ' + label + ' live' : '[ . ] ' + label + ' · no data yet'],
   })
 
-  const main =
-    tab === 'pulse'
-      ? jsxs('div', {
-          className: 'flex flex-1 items-stretch',
-          style: { gap: 8, minHeight: 0 },
-          children: [
-            jsx(PulseMatrix, { pulse: pulseQ.data }),
-            // The fixed I/O-frame column only earns a wide frame: in a
-            // narrow dock the matrix takes the full width instead.
-            ...(!narrow
-              ? [jsxs('div', {
-                  className: 'flex flex-col justify-end overflow-hidden',
-                  style: { width: IO_WIDTH, gap: 2 },
-                  children: [
-                    recent.length > 0
-                      ? recent.map((ev, i) => jsx(IoLine, { key: i, ev }))
-                      : jsx('span', {
-                          style: { fontSize: 10, color: 'var(--ui-text-quaternary)' },
-                          children: metrics && metrics.events > 0
-                            ? 'I/O frames arrive with each agent call'
-                            : 'no events yet — ticks on your next agent turn',
-                        }),
-                  ],
-                })]
-              : []),
-          ],
-        })
-      : tab === 'portrait'
-        ? jsx(PortraitView, {
-            data: portraitQ.data,
-            drift: driftQ.data,
-            narrow,
-            canExpand: wsCan,
-            preferences: portraitPreferences,
-          })
-        : jsx(DriftView, { data: driftQ.data, narrow })
+  // Compact composition (Stage 4): PORTRAIT and PULSE coexist.
+  // Controls below only move focus (activateFocus) — activating one
+  // never hides the other. DRIFT stays in the expanded workspace only
+  // (its query/cache above is untouched; no DriftView here).
+  // Bottom: PORTRAIT left module, PULSE (four lanes) right module.
+  // Sidebar: PORTRAIT top ~50/50, PULSE bottom, flex + minHeight 0.
+  const pulseModule = jsxs('div', {
+    'data-module': 'pulse',
+    'data-focus': tab === 'pulse' ? 'active' : 'inactive',
+    className: 'flex flex-1',
+    style: {
+      flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden',
+      outline: tab === 'pulse' ? '1px solid var(--ui-accent)' : '1px solid transparent',
+      outlineOffset: -1,
+    },
+    children: [
+      jsx(PulseLanes, { lanes: adaptPulseToLanes(pulseQ.data).lanes, capacity }),
+      ...(!narrow
+        ? [jsxs('div', {
+            className: 'flex flex-col justify-end overflow-hidden',
+            style: { width: IO_WIDTH, gap: 2, flexShrink: 0 },
+            children: [
+              recent.length > 0
+                ? recent.map((ev, i) => jsx(IoLine, { key: i, ev }))
+                : jsx('span', {
+                    style: { fontSize: 10, color: 'var(--ui-text-quaternary)' },
+                    children: metrics && metrics.events > 0
+                      ? 'I/O frames arrive with each agent call'
+                      : 'no events yet — ticks on your next agent turn',
+                  }),
+            ],
+          })]
+        : []),
+    ],
+  })
+  const portraitModule = jsx('div', {
+    'data-module': 'portrait',
+    'data-focus': tab === 'portrait' ? 'active' : 'inactive',
+    className: 'flex items-center',
+    style: {
+      flex: composition === 'sidebar' ? '1 1 50%' : '0 0 auto',
+      minHeight: 0, minWidth: 0, overflow: 'hidden',
+      outline: tab === 'portrait' ? '1px solid var(--ui-accent)' : '1px solid transparent',
+      outlineOffset: -1,
+    },
+    children: jsx(PortraitView, {
+      data: portraitQ.data,
+      drift: driftQ.data,
+      narrow: narrow || composition === 'sidebar',
+      canExpand: wsCan,
+      preferences: portraitPreferences,
+    }),
+  })
+  const main = composition === 'sidebar'
+    ? jsxs('div', {
+        'data-composition': 'sidebar',
+        className: 'flex flex-1 flex-col',
+        style: { gap: 4, minHeight: 0, overflow: 'hidden' },
+        children: [portraitModule, pulseModule],
+      })
+    : jsxs('div', {
+        'data-composition': 'bottom',
+        className: 'flex flex-1 items-stretch',
+        style: { gap: 8, minHeight: 0 },
+        children: [portraitModule, pulseModule],
+      })
 
   const popover = panel && jsxs('div', {
     style: {
@@ -4073,12 +4457,16 @@ function Strip({ source, rest, portraitPreferences }) {
     onClick: openWs,
     disabled: !wsCan,
   })
+  // Compact controls are activation/focus (never exclusive): PULSE and
+  // PORTRAIT stay mounted; clicking one only moves the focus outline.
+  // DRIFT is not a compact control — it lives in the expanded workspace.
+  const compactTabs = TABS.filter((t) => t.id !== 'drift')
   const tabsRow = jsxs('div', {
     className: 'flex items-center',
     style: { gap: 2, flexShrink: 0 },
-    children: TABS.map((t) => jsx(TabButton, {
+    children: compactTabs.map((t) => jsx(TabButton, {
       key: t.id, tab: t, active: tab === t.id,
-      onClick: () => setTab(t.id),
+      onClick: () => activateFocus(t.id),
       words: !tiny,
     })),
   })
@@ -4261,6 +4649,24 @@ export default {
       },
       render: () => jsx(Strip, { source: ctx.source, rest: ctx.rest, portraitPreferences }),
     })
+
+    // Right-zone pane (Stage 4 sidebar surface, Stage 0 verdict):
+    // placement 'right' + width (the verified host path). The SAME
+    // measured Strip renders here as a tall pane, so the 50/50
+    // sidebar composition appears automatically. Gated on host
+    // signals so older hosts degrade to bottom-only.
+    var viewportSignal = typeof host.state === 'object' && host.state != null
+      && typeof host.state.viewport !== 'undefined'
+    var paneVisibilitySignal = typeof host.paneVisibility === 'function'
+    if (viewportSignal && paneVisibilitySignal) {
+      ctx.register({
+        id: 'its-in-your-head-sidebar',
+        area: 'panes',
+        title: "It's in Your Head",
+        data: { placement: 'right', width: '400px' },
+        render: () => jsx(Strip, { source: ctx.source, rest: ctx.rest, portraitPreferences }),
+      })
+    }
 
     // Live accelerator (optional): backend tick -> invalidate the polling
     // queries. The polling fallback above stays mandatory — ctx.socket is a
