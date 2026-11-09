@@ -32,7 +32,8 @@ OWNERSHIP = {                                                 # C7
                "dashboard/plugin_api.py", "tests/test_s4_", "tests/test_s5_",
                "tests/test_s7_"},
     "lane-d": {"desktop/", "tests/test_desktop_"},
-    "parent": {"plugin.yaml", "CONTRACTS.md", "tools/check_contracts.py",
+    "parent": {"plugin.yaml", "CONTRACTS.md", "MOVEMENT-CONTRACT.md",
+               "tools/check_contracts.py", "tools/build-inline-engine.mjs",
                "tests/test_structure.py", "tests/acceptance/"},
 }
 PARENT_OWNED_FILES = {p for f in OWNERSHIP["parent"] for p in [f]}

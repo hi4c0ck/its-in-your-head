@@ -42,6 +42,7 @@ its-in-your-head/               # unified package = one installable folder = OSS
 +-- pytest.ini                  # importlib import mode + pythonpath + repo-local basetemp + temp-budget retention
 +-- README.md / LICENSE (MIT) / .gitignore
 +-- ARCHITECTURE.md             # this file
++-- MOVEMENT-CONTRACT.md        # portrait motion: template-owned movement contract + 5-stage tracker
 ```
 
 ## Locked decisions (from owner — do not re-litigate)

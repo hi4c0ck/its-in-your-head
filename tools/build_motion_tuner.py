@@ -161,6 +161,7 @@ details.baseline summary { font-size: 9px; letter-spacing: 1.5px; color: var(--m
         <div class="mini"><div class="box b96" id="mini96"></div>
           <div class="cap">DOCK 96PX</div></div>
       </div>
+      <div class="cap" id="vis48" style="margin-top:6px">48PX VISIBILITY — measuring…</div>
     </div>
 
     <div class="logbox">
@@ -247,6 +248,7 @@ let template = IYH.DEFAULT_PORTRAIT_TEMPLATE;
 // No Math.random anywhere: identical base sliders + identical tick
 // sequence -> identical renders.
 let tick = 0;
+const visCache = Object.create(null); // template → 48px visibility report
 let playId = null;
 const POLL_MS = 850;
 const script = (k) => ({
@@ -339,7 +341,9 @@ function drawLog() {
 function render() {
   const data = payload(tick);
   const model = IYH.buildPortraitModel(data);
-  const m = model.motion;
+  // Template-owned movement contract: the deltas this template actually
+  // renders with (feature-relative travel, region-clamped).
+  const m = IYH.movementFor(model, template);
 
   // Main stage: crop-to-fit the studio portrait, then zoom the face.
   // Gaze markers are drawn INSIDE the svg (viewBox units) so the slice
@@ -385,6 +389,19 @@ function render() {
     { template, rendering: 'compact', id: 'tuner-m48' });
   $('mini96').innerHTML = IYH.buildPortraitSvg(data,
     { template, rendering: 'compact', id: 'tuner-m96' });
+
+  // 48px visibility measurement (deterministic; cached per template).
+  visCache[template] = visCache[template] || IYH.visibilityReport(template);
+  const rep = visCache[template];
+  const f2 = (v) => (v == null ? '–' : Number(v).toFixed(2));
+  $('vis48').innerHTML = rep.minVisibleAt48 > 0
+    ? '<span class="k">48PX VISIBILITY</span> <span class="v big">'
+      + (rep.pass ? 'PASS' : 'FAIL') + '</span> <span class="v">worst gated step '
+      + f2(rep.worst && rep.worst.coordinatedPx) + 'px (min '
+      + (rep.minVisibleCoordinated48 || rep.minVisibleAt48) + ') · full travel '
+      + f2(rep.fullTravel && rep.fullTravel.coordinatedPx) + 'px</span>'
+    : '<span class="k">48PX VISIBILITY</span> <span class="v">legacy travel · full '
+      + f2(rep.fullTravel && rep.fullTravel.coordinatedPx) + 'px (reported only)</span>';
 
   pushLog(m);
   drawLog();

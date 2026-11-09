@@ -105,7 +105,7 @@ details.baseline summary { font-size: 9px; letter-spacing: 1.5px; color: var(--m
 <body>
 <div class="top">
   <span class="ttl">IYH PORTRAIT · MOTION GRAMMAR TUNER</span>
-  <span class="sha">engine sha 5ce8027dc770 · deterministic · 0.85s poll cadence</span>
+  <span class="sha">engine sha f44fc72ed627 · deterministic · 0.85s poll cadence</span>
   <span class="sp"></span>
   <button class="btn" id="b-reset" title="back to tick 0">t = 0</button>
   <button class="btn" id="b-step">STEP &#9654;</button>
@@ -130,6 +130,7 @@ details.baseline summary { font-size: 9px; letter-spacing: 1.5px; color: var(--m
         <div class="mini"><div class="box b96" id="mini96"></div>
           <div class="cap">DOCK 96PX</div></div>
       </div>
+      <div class="cap" id="vis48" style="margin-top:6px">48PX VISIBILITY — measuring…</div>
     </div>
 
     <div class="logbox">
@@ -284,8 +285,13 @@ const MOTION_ENVELOPE = Object.freeze({
   contour: 6.0,   // px of secondary-contour travel
   pressure: 0.25, // bounded stroke-width modulation
 });
-const MOTION_GAIN = 2.6;
-const _sat = (x) => Math.tanh(MOTION_GAIN * x); // high-gain saturator
+// Gain 4.0 (up from 2.6): small control changes traverse most of a feature's
+// travel band, but the saturation still bounds everything.
+const MOTION_GAIN = 4.0;
+// Normalized response: r = tanh(g·u)/tanh(g) — u=±1 maps to exactly ±1, so
+// template travel bands are used at their declared extent instead of a
+// 1.2%-short one.
+const _sat = (x) => Math.tanh(MOTION_GAIN * x) / Math.tanh(MOTION_GAIN); // high-gain saturator
 // Gaze travel is bounded by the EYE REGION the pupil lives in (motion
 // contract: every generated point stays inside its permitted region).
 // Resting pupils sit left-of-center in each eye, so the left travel is
@@ -300,6 +306,284 @@ function _fnv1a(str) {
     h = Math.imul(h, 0x01000193);
   }
   return h >>> 0;
+}
+
+// ------------------------------------------------------------------------
+// Movement contract (template-owned, feature-relative)
+//
+// The shared motion layer above emits deltas in the SHARED travel bands
+// (MOTION_ENVELOPE semantics). Templates do not consume those units
+// directly: each template declares its OWN travel bands (how far each
+// feature may move at |signal| = 1, in its own viewBox units) and its OWN
+// safe regions (the geometry each feature may occupy). movementFor()
+// remaps the shared signals into the template's bands and clamps every
+// coordinate inside its regions — generated geometry never leaves the
+// region the template declared, and a resting poll moves nothing.
+//
+// Travel bands are feature-relative, not fixed global units:
+//   - gaze:  35-60% of the safe eye-interior region
+//   - brow:  30-50% of the brow band
+//   - eye:   20-30% of the full aperture range
+//   - mouth: 55-70% of the safe-region cloud
+//   - head:  5-7 degrees of additional rotation
+//   - contour: ~30% of the local secondary-contour clearance
+//
+// The compact rendering draws the 570-wide viewBox at 48px, i.e.
+// pxPerUnit = 48/570 ≈ 0.0842. Templates that commit to 48px visibility
+// declare minVisibleAt48 (px per 0.1 control step on the primary feature)
+// and minVisibleCoordinated48 (px of combined feature travel that still
+// counts as one perceptible change). visibilityReport() measures both,
+// deterministically, without rasterization.
+// ------------------------------------------------------------------------
+
+const COMPACT_PX_PER_UNIT = 48 / 570; // 570-unit compact viewBox at 48px
+
+// Shared (legacy) travel bands — the pre-migration behaviour, kept as the
+// fallback and as the soft-flow template's own declaration so that
+// template keeps its restrained look during the migration.
+const SHARED_TRAVEL = Object.freeze({
+  gazeX: MOTION_ENVELOPE.gaze,
+  gazeY: MOTION_ENVELOPE.gaze * 0.25,
+  brow: MOTION_ENVELOPE.brow,
+  aperture: MOTION_ENVELOPE.eyeOpen,
+  mouthY: MOTION_ENVELOPE.mouth,
+  mouthX: MOTION_ENVELOPE.mouth,
+  head: MOTION_ENVELOPE.headTilt,
+  contour: MOTION_ENVELOPE.contour,
+  pressure: MOTION_ENVELOPE.pressure,
+});
+const WIDE_REGIONS = Object.freeze({
+  gaze: { dxMin: -30, dxMax: 50, dyMin: -14, dyMax: 14 },
+  brow: { min: -14, max: 14 },
+  aperture: { min: -0.4, max: 0.4 },
+  mouth: { xMin: -30, xMax: 30, yMin: -30, yMax: 30 },
+  head: { min: -9, max: 9 },
+  contour: { min: -14, max: 14 },
+  // Pupil boxes (near eye in viewBox units; far eye in EFFECTIVE
+  // coordinates after its plane group's translate(88 0) scale(.74 1)).
+  pupil: { x0: 272, x1: 340, y0: 358, y1: 377 },
+  farPupil: { x0: 380, x1: 418, y0: 363, y1: 375 },
+});
+const SHARED_MOVEMENT = Object.freeze({
+  pxPerUnit: COMPACT_PX_PER_UNIT,
+  minVisibleAt48: 0, // legacy template: no 48px commitment
+  minVisibleCoordinated48: 0,
+  responsiveBand: 0,
+  regions: WIDE_REGIONS,
+  travel: SHARED_TRAVEL,
+});
+
+// The studio templates (neutral-pencil / angular-pencil) share one face
+// construction, so they share one widened movement declaration: travel
+// bands sized for 48px visibility, safe regions derived from the eye
+// interior, brow band, mouth cloud, head rotation and secondary-contour
+// clearance of that construction.
+const STUDIO_MOVEMENT = Object.freeze({
+  pxPerUnit: COMPACT_PX_PER_UNIT,
+  minVisibleAt48: 0.5,
+  minVisibleCoordinated48: 1.0,
+  // A 0.1 control step must clear the 48px thresholds while the response
+  // is in its responsive regime — the band where a 0.1 change traverses
+  // ≥25% of a travel band (steps 0.0-0.1 at gain 4.0, the doc's own
+  // "~25% of its one-sided envelope" benchmark). Beyond that the curve
+  // saturates by design: features park at their band ends (still inside
+  // the declared regions), so higher steps are reported, not gated.
+  // Measurements run at full amplitude (intensity 1.0, confidence 1.0):
+  // a low-confidence poll moving less is designed reliability behaviour,
+  // not a visibility failure.
+  responsiveBand: 0.1,
+  regions: Object.freeze({
+    // Pupil rest (309, 367); interior x 267-345, y 352-383; pupil radii
+    // 4.8/6.0 leave the safe travel below. Gaze travel ≈ 45% of the
+    // interior width, asymmetric (rest sits left-of-center in the eye).
+    gaze: { dxMin: -28, dxMax: 31, dyMin: -9, dyMax: 8 },
+    brow: { min: -16, max: 18 }, // brow band around the resting brow line
+    aperture: { min: -0.4, max: 0.44 },
+    mouth: { xMin: -24, xMax: 24, yMin: -20, yMax: 18 }, // mouth-corner cloud
+    head: { min: -7, max: 7 },
+    contour: { min: -14, max: 14 },
+    pupil: WIDE_REGIONS.pupil,
+    farPupil: WIDE_REGIONS.farPupil,
+  }),
+  travel: Object.freeze({
+    gazeX: 40,   // ~50% of the 78-unit eye interior (region-capped)
+    gazeY: 12,
+    brow: 16,    // ~half of the brow band
+    aperture: 0.4, // 20-30%+ of the full aperture range
+    mouthY: 24,  // ~60-70% of the mouth cloud's vertical extent
+    mouthX: 24,
+    head: 7,     // 5-7° band, at its wide end
+    contour: 14, // ~30% of the local secondary-contour clearance
+    pressure: 0.4,
+  }),
+});
+
+function normalizeMovement(movement, fallback) {
+  if (!movement || typeof movement !== 'object') return fallback;
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const t = movement.travel || {};
+  const r = movement.regions || {};
+  const travel = Object.freeze({
+    gazeX: num(t.gazeX) || fallback.travel.gazeX,
+    gazeY: num(t.gazeY) || fallback.travel.gazeY,
+    brow: num(t.brow) || fallback.travel.brow,
+    aperture: num(t.aperture) || fallback.travel.aperture,
+    mouthY: num(t.mouthY) || fallback.travel.mouthY,
+    mouthX: num(t.mouthX) || fallback.travel.mouthX,
+    head: num(t.head) || fallback.travel.head,
+    contour: num(t.contour) || fallback.travel.contour,
+    pressure: num(t.pressure) || fallback.travel.pressure,
+  });
+  const g = r.gaze && typeof r.gaze === 'object' ? r.gaze : {};
+  const gaze = Object.freeze({
+    dxMin: num(g.dxMin) || fallback.regions.gaze.dxMin,
+    dxMax: num(g.dxMax) || fallback.regions.gaze.dxMax,
+    dyMin: num(g.dyMin) || fallback.regions.gaze.dyMin,
+    dyMax: num(g.dyMax) || fallback.regions.gaze.dyMax,
+  });
+  const regions = Object.freeze({
+    gaze,
+    brow: Object.freeze({ min: num(r.brow && r.brow.min) || fallback.regions.brow.min, max: num(r.brow && r.brow.max) || fallback.regions.brow.max }),
+    aperture: Object.freeze({ min: num(r.aperture && r.aperture.min) || fallback.regions.aperture.min, max: num(r.aperture && r.aperture.max) || fallback.regions.aperture.max }),
+    mouth: Object.freeze({ xMin: num(r.mouth && r.mouth.xMin) || fallback.regions.mouth.xMin, xMax: num(r.mouth && r.mouth.xMax) || fallback.regions.mouth.xMax, yMin: num(r.mouth && r.mouth.yMin) || fallback.regions.mouth.yMin, yMax: num(r.mouth && r.mouth.yMax) || fallback.regions.mouth.yMax }),
+    head: Object.freeze({ min: num(r.head && r.head.min) || fallback.regions.head.min, max: num(r.head && r.head.max) || fallback.regions.head.max }),
+    contour: Object.freeze({ min: num(r.contour && r.contour.min) || fallback.regions.contour.min, max: num(r.contour && r.contour.max) || fallback.regions.contour.max }),
+    pupil: r.pupil && typeof r.pupil === 'object' ? Object.freeze({ x0: num(r.pupil.x0) || fallback.regions.pupil.x0, x1: num(r.pupil.x1) || fallback.regions.pupil.x1, y0: num(r.pupil.y0) || fallback.regions.pupil.y0, y1: num(r.pupil.y1) || fallback.regions.pupil.y1 }) : fallback.regions.pupil,
+    farPupil: r.farPupil && typeof r.farPupil === 'object' ? Object.freeze({ x0: num(r.farPupil.x0) || fallback.regions.farPupil.x0, x1: num(r.farPupil.x1) || fallback.regions.farPupil.x1, y0: num(r.farPupil.y0) || fallback.regions.farPupil.y0, y1: num(r.farPupil.y1) || fallback.regions.farPupil.y1 }) : fallback.regions.farPupil,
+  });
+  return Object.freeze({
+    pxPerUnit: num(movement.pxPerUnit) || fallback.pxPerUnit,
+    minVisibleAt48: num(movement.minVisibleAt48),
+    minVisibleCoordinated48: num(movement.minVisibleCoordinated48),
+    responsiveBand: num(movement.responsiveBand) || fallback.responsiveBand,
+    regions,
+    travel,
+  });
+}
+
+// Remap the shared motion signals into the template's own travel bands,
+// clamped inside its declared regions. Same shape as model.motion, so
+// existing builders keep their interface during the migration.
+function movementFor(model, templateId) {
+  const t = portraitTemplates.get(safeTemplateId(String(templateId || DEFAULT_PORTRAIT_TEMPLATE)));
+  const mv = (t && t.movement) || SHARED_MOVEMENT;
+  const m = model.motion;
+  const s = (sharedDelta, feature) => (sharedDelta / SHARED_TRAVEL[feature]) * mv.travel[feature];
+  const c = (v, min, max) => Math.max(min, Math.min(max, v));
+  const R = mv.regions;
+  const pressureDelta = c((m.pressure - 1) / SHARED_TRAVEL.pressure, 0, 1) * mv.travel.pressure;
+  return Object.freeze({
+    ...m,
+    gazeDX: c(s(m.gazeDX, 'gazeX'), R.gaze.dxMin, R.gaze.dxMax),
+    gazeDY: c(s(m.gazeDY, 'gazeY'), R.gaze.dyMin, R.gaze.dyMax),
+    gazeTerritory: c(s(m.gazeTerritory, 'gazeX'), 0, mv.travel.gazeX),
+    gazeCenter: c(s(m.gazeCenter, 'gazeX'), R.gaze.dxMin, R.gaze.dxMax),
+    brow: c(s(m.brow, 'brow'), R.brow.min, R.brow.max),
+    eyeOpen: c(s(m.eyeOpen, 'aperture'), R.aperture.min, R.aperture.max),
+    mouthLift: c(s(m.mouthLift, 'mouthY'), R.mouth.yMin, R.mouth.yMax),
+    mouthTension: c(s(m.mouthTension, 'mouthX'), R.mouth.xMin, R.mouth.xMax),
+    headTilt: c(s(m.headTilt, 'head'), R.head.min, R.head.max),
+    contourDrift: c(s(m.contourDrift, 'contour'), R.contour.min, R.contour.max),
+    pressure: 1 + pressureDelta,
+  });
+}
+
+/**
+ * Deterministic 48px visibility measurement for one template.
+ *
+ * Steps the two live controls (openness / focus) across 0.1 increments,
+ * measures each feature's displacement through movementFor at the
+ * compact pxPerUnit scale, and checks:
+ *   - primary: the single largest feature travel ≥ minVisibleAt48
+ *   - coordinated: the combined feature travel ≥ minVisibleCoordinated48
+ *   - region safety: every pupil position stays inside its declared box
+ * No rasterization — feature coordinates in viewBox units are exact.
+ */
+function visibilityReport(templateId) {
+  const tid = safeTemplateId(String(templateId || DEFAULT_PORTRAIT_TEMPLATE));
+  const t = portraitTemplates.get(tid);
+  if (!t) {
+    const available = listPortraitTemplates().map((entry) => entry.id).join(', ');
+    throw new RangeError(`Unknown portrait template "${tid}". Available: ${available}`);
+  }
+  const mv = t.movement || SHARED_MOVEMENT;
+  const px = mv.pxPerUnit;
+  const base = (openness, focus) => ({
+    available: true,
+    user: Object.fromEntries(PORTRAIT_DIMENSIONS.map((k) => [k, 0.5])),
+    confidence: Object.fromEntries(PORTRAIT_DIMENSIONS.map((k) => [k, 1])),
+    live_expression: {
+      stage: 'paired', openness, focus,
+      intensity: 1.0, confidence: 1.0, resonance: 0.5, tension: 0.5,
+      updated_at: 1,
+    },
+  });
+  const deltaFeatures = (a, b) => {
+    const feats = {
+      gaze: Math.abs(a.gazeDX - b.gazeDX) + Math.abs(a.gazeDY - b.gazeDY),
+      brow: Math.abs(a.brow - b.brow),
+      aperture: Math.abs(a.eyeOpen - b.eyeOpen) * 20, // builders scale aperture ×20 in the lid curves
+      mouth: Math.abs(a.mouthLift - b.mouthLift) + Math.abs(a.mouthTension - b.mouthTension),
+      head: Math.abs(a.headTilt - b.headTilt),
+      contour: Math.abs(a.contourDrift - b.contourDrift),
+    };
+    const primary = Math.max(...Object.values(feats));
+    const coordinated = Object.values(feats).reduce((sum, v) => sum + v, 0);
+    return { feats, primaryPx: primary * px, coordinatedPx: coordinated * px };
+  };
+  const pupilInside = (m) => {
+    const near = { x: 309 + m.gazeDX, y: 367 + m.gazeDY * 0.4 };
+    const farX = 88 + 0.74 * (414 + m.gazeDX * 0.58);
+    const farY = 369 + m.gazeDY * 0.4;
+    const in_ = (p, b) => p.x >= b.x0 && p.x <= b.x1 && p.y >= b.y0 && p.y <= b.y1;
+    return in_(near, mv.regions.pupil) && in_({ x: farX, y: farY }, mv.regions.farPupil);
+  };
+  const steps = [];
+  let pass = true;
+  let worst = null;
+  let fullTravel = null;
+  const band = mv.responsiveBand || 0;
+  for (const control of ['openness', 'focus']) {
+    const m0 = movementFor(buildPortraitModel(base(control === 'openness' ? 0 : 0.5, control === 'openness' ? 0.5 : 0)), tid);
+    for (let v = 0; v <= 10; v++) {
+      const step = v / 10;
+      const a = control === 'openness' ? [step, 0.5] : [0.5, step];
+      const b = control === 'openness' ? [Math.min(1, step + 0.1), 0.5] : [0.5, Math.min(1, step + 0.1)];
+      const ma = movementFor(buildPortraitModel(base(a[0], a[1])), tid);
+      const mb = movementFor(buildPortraitModel(base(b[0], b[1])), tid);
+      const d = deltaFeatures(ma, mb);
+      const safe = pupilInside(ma) && pupilInside(mb);
+      // Gated checks: per-step visibility while the response is in its
+      // responsive regime (the band the doc quantifies: a 0.1 change
+      // traverses a large fraction of the bands), and the full-travel
+      // 0→1 check. Saturated-tail steps are reported, not gated — the
+      // bands end by construction, inside the regions.
+      const gated = safe && step <= band;
+      const ok = gated
+        ? d.primaryPx >= mv.minVisibleAt48 || d.coordinatedPx >= mv.minVisibleCoordinated48
+        : safe;
+      if (mv.minVisibleAt48 > 0 && step <= band && !ok) pass = false;
+      const row = Object.freeze({ control, step, gated, ...d, safe, ok });
+      steps.push(row);
+      if (gated && (!worst || d.coordinatedPx < worst.coordinatedPx)) worst = row;
+      if (step === 1 && !fullTravel) {
+        const df = deltaFeatures(ma, m0); // full 0→1 travel for this control
+        fullTravel = Object.freeze({ control, step: 1, ...df, safe: pupilInside(ma), ok: true });
+      }
+    }
+  }
+  if (mv.minVisibleAt48 > 0 && fullTravel && fullTravel.coordinatedPx < mv.minVisibleCoordinated48) pass = false;
+  return Object.freeze({
+    template: tid,
+    pxPerUnit: px,
+    minVisibleAt48: mv.minVisibleAt48,
+    minVisibleCoordinated48: mv.minVisibleCoordinated48,
+    responsiveBand: band,
+    steps: Object.freeze(steps),
+    worst: Object.freeze(worst || null),
+    fullTravel: Object.freeze(fullTravel || null),
+    pass,
+  });
 }
 
 function liveControls(data = {}) {
@@ -473,7 +757,7 @@ function buildSoftFlowPortraitSvg(data = {}, options = {}) {
   // shape controls, not emotion labels or claims about the person.
   // The motion-grammar layer (shared by all three templates) adds the
   // transient live gesture and the slow morphology treatment on top.
-  const m = motionLayer(data);
+  const m = movementFor(buildPortraitModel(data), 'soft-flow-study');
   const openness = d * 0.45 + e * 0.35 + s * 0.20;
   const focus = aDepth * 0.65 + d * 0.20 - e * 0.15;
   const warmth = c * 0.55 + e * 0.45;
@@ -699,6 +983,10 @@ function registerPortraitTemplate(definition, { replace = false } = {}) {
     label: String(definition.label || id),
     description: String(definition.description || ''),
     render: definition.render,
+    // Template-owned movement declaration (feature-relative travel bands +
+    // safe regions). Absent means the shared legacy travel, which keeps
+    // the pre-migration look for that template.
+    movement: normalizeMovement(definition.movement, SHARED_MOVEMENT),
   });
   portraitTemplates.set(id, entry);
   return () => {
@@ -733,10 +1021,27 @@ function buildPortraitModel(data = {}) {
   const live = liveControls(data);
   const morphology = morphologyControls(data);
   const motion = motionLayer(data);
+  // Layer 1 — normalized semantic axes (a_i = 2·v_i − 1) with confidence
+  // carried as METADATA, never multiplied into the value: missing input
+  // means no signal (axis rests at 0, source 'absent'); confidence may
+  // inform reliability decisions downstream but must not suppress a valid
+  // movement to imperceptibility. The three temporal sources — observed
+  // (persistent), live (transient gesture), morphology (slow treatment) —
+  // stay separate: axes are the observed source only.
+  const axes = {};
+  for (const key of PORTRAIT_DIMENSIONS) {
+    const o = observed[key];
+    axes[key] = Object.freeze({
+      value: o.present ? 2 * o.value - 1 : 0,
+      confidence: o.strength,
+      source: o.present ? 'observed' : 'absent',
+    });
+  }
   return Object.freeze({
     available: !!data?.available,
     observed,
     interpreted,
+    axes: Object.freeze(axes),
     interpretedPresent,
     signalStrength,
     interpretedStrength: Math.max(...PORTRAIT_DIMENSIONS.map((dim) => Math.abs(interpreted[dim].deviation))),
@@ -801,7 +1106,7 @@ function buildCompactPortraitGlyph(model, options = {}, profile = neutralProfile
   // Motion-grammar deltas: the live layer adds displacement on top of the
   // persistent baseline (model.expression) without overwriting it; the
   // morphology layer reshapes treatment (density/echo) within its bounds.
-  const m = model.motion;
+  const m = movementFor(model, options.template);
   const cBrow = e.brow + m.brow;
   const cGazeX = e.gazeX + m.gazeDX;
   const cGazeY = e.gazeY + m.gazeDY;
@@ -896,7 +1201,7 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
   const browWeight = profile.brow || 0;
   // Motion-grammar deltas: live displacement on top of the persistent
   // baseline (model.expression); morphology reshapes treatment only.
-  const m = model.motion;
+  const m = movementFor(model, options.template);
   const cBrow = e.brow + m.brow;
   const cGazeX = e.gazeX + m.gazeDX;
   const cGazeY = e.gazeY + m.gazeDY;
@@ -1094,12 +1399,16 @@ registerPortraitTemplate({
   label: 'Neutral pencil',
   description: 'Balanced, androgynous human study; the default starting point.',
   render: renderNeutral,
+  // Template-owned movement: feature-relative travel bands sized for 48px
+  // visibility, safe regions bound to this face construction.
+  movement: STUDIO_MOVEMENT,
 });
 registerPortraitTemplate({
   id: 'angular-pencil',
   label: 'Angular pencil',
   description: 'A more angular jaw and stronger brow construction; an artistic style, not a gender label.',
   render: renderAngular,
+  movement: STUDIO_MOVEMENT,
 });
 registerPortraitTemplate({
   id: 'soft-flow-study',
@@ -1112,6 +1421,9 @@ registerPortraitTemplate({
       .replace('viewBox="0 0 720 760"', 'viewBox="80 65 570 570"')
       .replace(/stroke-width="([0-9.]+)"/g, (_, width) => `stroke-width="${f(Number(width) * 2.7)}"`);
   },
+  // The legacy look, declared explicitly: the shared travel bands and wide
+  // regions reproduce today's restrained motion exactly.
+  movement: SHARED_MOVEMENT,
 });
 
 /** Render a portrait using a selected registered template. */
@@ -1149,6 +1461,12 @@ return Object.freeze({
   portraitDataUrl,
   listPortraitTemplates,
   registerPortraitTemplate,
+  // Movement contract (template-owned, feature-relative):
+  SHARED_TRAVEL,
+  SHARED_MOVEMENT,
+  STUDIO_MOVEMENT,
+  movementFor,
+  visibilityReport,
 })
 })()
 
@@ -1174,6 +1492,7 @@ let template = IYH.DEFAULT_PORTRAIT_TEMPLATE;
 // No Math.random anywhere: identical base sliders + identical tick
 // sequence -> identical renders.
 let tick = 0;
+const visCache = Object.create(null); // template → 48px visibility report
 let playId = null;
 const POLL_MS = 850;
 const script = (k) => ({
@@ -1266,7 +1585,9 @@ function drawLog() {
 function render() {
   const data = payload(tick);
   const model = IYH.buildPortraitModel(data);
-  const m = model.motion;
+  // Template-owned movement contract: the deltas this template actually
+  // renders with (feature-relative travel, region-clamped).
+  const m = IYH.movementFor(model, template);
 
   // Main stage: crop-to-fit the studio portrait, then zoom the face.
   // Gaze markers are drawn INSIDE the svg (viewBox units) so the slice
@@ -1312,6 +1633,19 @@ function render() {
     { template, rendering: 'compact', id: 'tuner-m48' });
   $('mini96').innerHTML = IYH.buildPortraitSvg(data,
     { template, rendering: 'compact', id: 'tuner-m96' });
+
+  // 48px visibility measurement (deterministic; cached per template).
+  visCache[template] = visCache[template] || IYH.visibilityReport(template);
+  const rep = visCache[template];
+  const f2 = (v) => (v == null ? '–' : Number(v).toFixed(2));
+  $('vis48').innerHTML = rep.minVisibleAt48 > 0
+    ? '<span class="k">48PX VISIBILITY</span> <span class="v big">'
+      + (rep.pass ? 'PASS' : 'FAIL') + '</span> <span class="v">worst gated step '
+      + f2(rep.worst && rep.worst.coordinatedPx) + 'px (min '
+      + (rep.minVisibleCoordinated48 || rep.minVisibleAt48) + ') · full travel '
+      + f2(rep.fullTravel && rep.fullTravel.coordinatedPx) + 'px</span>'
+    : '<span class="k">48PX VISIBILITY</span> <span class="v">legacy travel · full '
+      + f2(rep.fullTravel && rep.fullTravel.coordinatedPx) + 'px (reported only)</span>';
 
   pushLog(m);
   drawLog();
