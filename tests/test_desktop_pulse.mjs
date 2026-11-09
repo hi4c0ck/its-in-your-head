@@ -67,25 +67,28 @@ eq(pulseCellValue({}), null, 'cell without value -> null')
 eq(pulseCellValue(null), null, 'null cell -> null')
 eq(pulseCellValue({ value: 'x' }), null, 'non-numeric cell -> null')
 
-// 4. PULSE matrix structure (DOM table, not a painted canvas).
-assert.ok(src.includes('function PulseMatrix'), 'PulseMatrix DOM component present')
+// 4. PULSE matrix structure (Stage 6: pre-lane table retired, lanes live).
+// The old compact table-layout renderer PulseMatrix (label rail + four
+// graphic columns + global row ordering) is dead code after S3 — the
+// compact surface is PulseLanes. ExpandedPulse keeps the row helpers.
+assert.ok(!src.includes('function PulseMatrix'), 'Stage 6: dead PulseMatrix table renderer removed')
+assert.ok(src.includes('function PulseLanes'), 'live lane renderer PulseLanes present')
 assert.ok(src.includes("role: 'grid'"), 'matrix root carries role="grid"')
-assert.ok(src.includes("gridTemplateColumns: 'minmax(56px, 34%) repeat("),
-  'matrix columns: label track + one 1fr track per semantic column')
-assert.ok(src.includes("gridTemplateRows: 'repeat(' + PULSE_MAX_ROWS + ', 1fr)'"),
-  'row count is a fixed track structure (no pitch arithmetic)')
+assert.ok(!src.includes("gridTemplateColumns: 'minmax(56px, 34%) repeat("),
+  'no separate tool-name rail (56px label track removed)')
+assert.ok(!src.includes("gridTemplateRows: 'repeat(' + PULSE_MAX_ROWS + ', 1fr)'"),
+  'fixed row-track table structure removed (capacity now from measured box)')
 assert.ok(src.includes('selectPulseRows(rows, PULSE_MAX_ROWS)'),
   'row selection is deterministic (momentum surge, then live activity, then semantic, then server order)')
-assert.ok(src.includes("col === 'friction' ? V_DANGER : V_ACCENT"),
+assert.ok(src.includes("c === 'friction' ? V_DANGER : V_ACCENT"),
   'friction cells take the danger token, others the accent (theme vars only)')
-assert.ok(src.includes('(0.12 + 0.88 * v)'),
+assert.ok(src.includes('0.12 + 0.88 * v'),
   'LIVE column keeps the count-squash alpha (semantic cols use pulseBand discrete bands)')
-assert.ok(src.includes('isLive ? 1 : 0.45'), 'non-live rows muted on their cells')
-assert.ok(src.includes('Math.min(0.55'), 'LIVE activity capped below the strong-similarity ceiling')
-assert.ok(src.includes("borderLeft: '1px solid ' + V_STROKE"), 'activity/similarity group separator present')
+assert.ok(!src.includes('isLive ? 1 : 0.45'), 'compact-table live-row muting retired with PulseMatrix')
+assert.ok(!src.includes('Math.min(0.55'), 'compact-table LIVE cap retired with PulseMatrix')
+assert.ok(!src.includes("borderLeft: '1px solid ' + V_STROKE"), 'compact-table group separator retired with PulseMatrix')
 assert.ok(src.includes('LIVE\u00b7CALLS'), 'expanded LIVE header reads as activity (calls), not similarity')
 assert.ok(src.includes('pulseBand'), 'semantic cells use the discrete 3-band encoding (pulseBand)')
-assert.ok(src.includes('strong: 0.85'), 'discrete band opacity steps pinned (empty/weak/strong)')
 assert.ok(src.includes('buildPulseVerdict'), 'worded verdict helper is wired into the pane')
 assert.ok(src.includes('color: isLive ? V_SEC : V_QUAT'),
   'live rows highlighted vs muted tool labels (no new colors)')
@@ -99,9 +102,10 @@ assert.equal((src.match(/useEffect\(/g) || []).length, 4,
 assert.ok(src.includes('pulse.columns'), 'server columns still consumed (via pulseColumns)')
 assert.ok(src.includes('tool_name'), 'pulse rows stay dynamic (tool_name)')
 assert.ok(src.includes('NARROW_W'), 'narrow-dock threshold defined (sidebar frame)')
-assert.ok(src.includes('PULSE_GLOW_CSS'), 'live-glow keyframes: theme-var box-shadow pulse on value change')
-assert.ok(src.includes('iyh-glow-warn'), 'friction cells glow on the destructive token (value cells on accent)')
-assert.ok(src.includes("className: g ? 'iyh-glow'"), 'changed cells carry the one-shot glow class (key counter restarts the keyframe)')
+assert.ok(src.includes('PULSE_GLOW_CSS'), 'bubble keyframes: theme-var rise on value change (Stage 6: glow retired with PulseMatrix, bubble rise kept for PulseLanes)')
+assert.ok(!src.includes('iyh-glow-warn'), 'Stage 6: friction glow keyframe retired with dead PulseMatrix')
+assert.ok(!src.includes("className: g ? 'iyh-glow'"), 'Stage 6: changed-cell glow class retired with dead PulseMatrix')
+assert.ok(src.includes('iyh-bubble-rise'), 'bubble keyframes still present for PulseLanes')
 assert.ok(src.includes("flex: narrow ? '1 1 30%' : undefined"),
   'drift wraps 3x2 in the narrow dock (labels to tooltip, numbers stay)')
 assert.ok(src.indexOf('...(!narrow') > -1,

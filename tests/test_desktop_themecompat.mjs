@@ -86,7 +86,7 @@ for (const [fg, label] of [['#0053fd', 'hottest cell (accent)'], ['#cf2d56', 'da
 
 // Alpha encoding stays surface-relative (DOM opacity on theme-token
 // backgrounds — same 0.12..1.0 scale, host surface is the blend base).
-assert.ok(src.includes('(0.12 + 0.88 * v)'), 'heat cells use accent alpha over the host surface')
+assert.ok(src.includes('0.12 + 0.88 * v'), 'heat cells use accent alpha over the host surface')
 
 // 3. Semantic rendering (P1 lane 3): the pane is driven by the semantic
 // routes, not by the legacy hourly lane; it never invents values.
@@ -107,8 +107,8 @@ assert.ok(src.includes('evidence empty'), 'portrait renders the honest placehold
 assert.ok(src.includes('data.series'), 'drift consumes per-axis series')
 assert.ok(src.includes('driftDelta'), 'drift renders per-axis deltas vs last snapshot')
 assert.ok(src.includes('V_DANGER'), 'danger token (V_DANGER) still governs negative drift + friction cells')
-assert.ok(src.includes('gridTemplateRows'),
-  'PULSE lane is a CSS-grid matrix structure (layout engine sizes it; the one root ResizeObserver only reads frame orientation)')
+assert.ok(src.includes('gridTemplateColumns: \'repeat(4, minmax(0, 1fr))\'' ),
+  'PULSE lanes are a CSS-grid structure (layout engine sizes it; the one root ResizeObserver only reads frame orientation)')
 assert.ok(src.includes('refetchInterval: PULSE_POLL_MS'), 'polling fallback stays mandatory')
 assert.ok(src.includes('refetchInterval: POLL_MS'), 'polling fallback stays on every route')
 

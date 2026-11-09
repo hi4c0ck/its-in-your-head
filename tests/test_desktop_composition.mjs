@@ -117,4 +117,14 @@ eq(fr.dominant_source, 'objective', 'dominant_source = objective (0.91 > 0.72)')
 ok(fr.user && fr.objective && typeof fr.user.value === 'number' && typeof fr.objective.value === 'number', 'friction keeps user/objective separate')
 eq(adaptPulseToLanes({ rows: [], columns: [] }).available, false, 'no tools -> available false')
 eq(adaptPulseToLanes(null).lanes.goal, [], 'null payload -> empty lanes, never omits lanes')
+
+// 6. Stage 6 gap-fill (§15 criterion 11): sidebar proportional shrink.
+// Sidebar PORTRAIT/PULSE share ~50/50 via flex and shrink together.
+ok(src.includes("flex: composition === 'sidebar' ? '1 1 50%' : '0 0 auto'"),
+  'sidebar portrait module is flex 1 1 50% (proportional share)')
+ok(src.includes("'data-composition': 'sidebar'"), 'sidebar composition hook present')
+ok(src.includes('className: \'flex flex-1 flex-col\'') && src.includes("gap: 4, minHeight: 0, overflow: 'hidden'"),
+  'sidebar column flexes vertically with minHeight 0 (no large min-heights pushing other plugins out)')
+ok(src.includes("'data-composition': 'bottom'"), 'bottom composition hook present')
+
 console.log('PASS composition: ' + n + ' assertions')

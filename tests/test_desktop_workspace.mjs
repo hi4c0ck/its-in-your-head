@@ -97,10 +97,23 @@ ok(!src.includes("rest('/pulse?'"), 'no invented route variants')
 ok(src.includes('selectPulseRows(rows, PULSE_MAX_ROWS)'), 'compact PULSE still caps at PULSE_MAX_ROWS')
 ok(src.includes('const PULSE_MAX_ROWS = 4'), 'compact lane still shows up to 4 tool rows')
 ok(src.includes('rows.map((row, ri)'), 'expanded PULSE walks ALL tool rows (uncapped)')
-ok(src.includes("gridTemplateRows: 'repeat(' + PULSE_MAX_ROWS + ', 1fr)'"),
-  'compact matrix keeps its fixed track structure')
+ok(src.includes("gridTemplateColumns: 'repeat(4, minmax(0, 1fr))'"),
+  'compact lanes keep equal-width 4-column tracks (PulseLanes; old row-table removed)')
 ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48 })'), 'compact PORTRAIT renders the engine compact view at 48px')
 ok(src.includes("'PORTRAIT · no data yet — evidence empty'"),
   'honest compact empty-state placeholder retained (the studio view carries its own)')
+
+// 6. Stage 6 gap-fill (§15 criterion 13): DRIFT + expanded inspection remain.
+// ExpandedWorkspace still mounts ExpandedPulse / ExpandedPortrait /
+// ExpandedDrift with their shared query data (not dead, not removed).
+ok(src.includes('function ExpandedPulse'), 'ExpandedPulse (full tool matrix) still present')
+ok(src.includes('function ExpandedDrift'), 'ExpandedDrift (history) still present')
+ok(src.includes('function ExpandedWorkspace'), 'ExpandedWorkspace surface still present')
+ok(src.includes('jsx(ExpandedPulse, { pulse: pulseQ.data })'), 'workspace PULSE tab renders ExpandedPulse from the shared pulse query')
+ok(src.includes('jsx(ExpandedDrift, { data: driftQ.data })'), 'workspace DRIFT tab renders ExpandedDrift from the shared drift query')
+ok(src.includes('jsx(ExpandedPortrait, { data: portraitQ.data, drift: driftQ.data, preferences: portraitPreferences })'),
+  'workspace PORTRAIT tab renders ExpandedPortrait with drift + preferences')
+ok(src.includes("{ id: 'drift', label: 'DRIFT' }"), 'DRIFT tab entry retained in expanded TABS')
+ok(!src.includes('jsx(PulseMatrix'), 'pre-lane compact table renderer is gone (expanded inspection is ExpandedPulse, compact is PulseLanes)')
 
 console.log('PASS workspace: ' + n + ' assertions')
