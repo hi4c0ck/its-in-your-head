@@ -134,14 +134,14 @@ def test_concurrent_first_reads_do_not_double_load(env, monkeypatch):
     _feed(eng, time.time())
     fresh = Engine()
     calls = []
-    orig = persistence.load_pulse_state
+    orig = persistence.load_pulse_state_checked
 
     def counting():
         calls.append(1)
         time.sleep(0.05)  # widen the race window
         return orig()
 
-    monkeypatch.setattr(persistence, "load_pulse_state", counting)
+    monkeypatch.setattr(persistence, "load_pulse_state_checked", counting)
     threads = [threading.Thread(target=fresh.ensure_pulse_hydrated)
                for _ in range(8)]
     for t in threads:
@@ -154,7 +154,8 @@ def test_concurrent_first_reads_do_not_double_load(env, monkeypatch):
         t.start()
     for t in threads:
         t.join()
-    assert len(calls) == 1, f"load_pulse_state called {len(calls)} times"
+    assert len(calls) == 1, (
+        f"load_pulse_state_checked called {len(calls)} times")
 
 
 def test_reset_stays_empty(env, monkeypatch):

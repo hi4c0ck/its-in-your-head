@@ -122,7 +122,7 @@ def test_v6_to_v7_alter_preserves_rows(tmp_path):
     conn = sqlite3.connect(str(db))
     try:
         assert migration.schema_bootstrap(conn) is True
-        assert migration.get_schema_version(conn) == 7
+        assert migration.get_schema_version(conn) == migration.CURRENT_SCHEMA_VERSION
         cols = {r[1] for r in conn.execute(
             "PRAGMA table_info(pattern_affinity_history)")}
         assert {"rank", "turn_key"} <= cols

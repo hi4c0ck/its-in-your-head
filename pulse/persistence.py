@@ -66,10 +66,15 @@ def _ensure_schema(conn) -> None:
     conn.commit()
 
 
-def persist_tool_banks(store, tool: str) -> None:
+def persist_tool_banks(store, tool: str, backend: str | None = None,
+                       model_version: str | None = None) -> None:
     """Re-sync one tool's persisted banks to the in-memory store state
     (delete + insert the current capped banks; converged because the
     engine worker is the single writer per profile DB).
+
+    ``backend``/``model_version`` tag the vector-space identity of the
+    encoder that produced the bank's vectors (v8); omitted -> NULL
+    (unknown provenance). The engine passes its active encoder.
 
     Best effort: logs and never raises.
     """
@@ -77,10 +82,13 @@ def persist_tool_banks(store, tool: str) -> None:
         banks = store.bank(str(tool))
         vectors = []
         for label in _BANKS:
-            for vec in banks.get(label, ()):
+            for vec in banks.get(label, ()) or []:
                 packed = pack_vector(vec)
                 if packed is not None:
-                    vectors.append((str(tool), label, packed))
+                    vectors.append(
+                        (str(tool), label, packed,
+                         str(backend) if backend else None,
+                         str(model_version) if model_version else None))
         conn = _database.connect()
         try:
             _ensure_schema(conn)
@@ -91,8 +99,10 @@ def persist_tool_banks(store, tool: str) -> None:
                 now = time.time()
                 conn.executemany(
                     "INSERT INTO pulse_prototypes"
-                    " (tool_name, bank, ts, vector) VALUES (?, ?, ?, ?)",
-                    [(t, b, now, v) for t, b, v in vectors])
+                    " (tool_name, bank, ts, vector, backend,"
+                    " model_version) VALUES (?, ?, ?, ?, ?, ?)",
+                    [(t, b, now, v, bk, mv)
+                     for t, b, v, bk, mv in vectors])
             conn.commit()
         finally:
             conn.close()
@@ -114,14 +124,21 @@ def persist_capsule(capsule: dict, cap: int) -> None:
     blob = pack_vector(capsule["vector"])
     if blob is None:
         return
+    # v8 vector-space provenance: the encoder identity attached by the
+    # engine at capsule build time (None pre-v8 / never attached =
+    # unknown space).
+    backend = capsule.get("backend")
+    model_version = capsule.get("model_version")
     try:
         conn = _database.connect()
         try:
             _ensure_schema(conn)
             conn.execute(
-                "INSERT INTO pulse_capsules (tool_name, ts, vector)"
-                " VALUES (?, ?, ?)",
-                (tool, ts, blob))
+                "INSERT INTO pulse_capsules (tool_name, ts, vector,"
+                " backend, model_version) VALUES (?, ?, ?, ?, ?)",
+                (tool, ts, blob,
+                 str(backend) if backend else None,
+                 str(model_version) if model_version else None))
             conn.execute(
                 "DELETE FROM pulse_capsules WHERE tool_name = ? AND id"
                 " NOT IN (SELECT id FROM pulse_capsules WHERE tool_name = ?"
@@ -161,24 +178,42 @@ def persist_goal_vector(vector, ts: float | None = None,
 
 
 def load_pulse_state() -> dict:
+    """Legacy fault-isolated load (pre-v0.1.10 signature): returns the
+    empty shape on any failure, never raises. New code uses
+    :func:`load_pulse_state_checked` (success flag, retry-capable)."""
+    state, _ok = load_pulse_state_checked()
+    return state
+
+
+def load_pulse_state_checked() -> tuple[dict, bool]:
     """Load persisted PULSE state for hydration (profile-scoped DB).
 
-    Returns {"banks": {tool: {"good":[...], "friction":[...],
-    "objective_friction":[...]}}, "capsules": {tool: [{"vector":...,
-    "ts":...}]}, "goal_vector": [...|None], "goal_ts": float|None,
-    "goal_backend": str|None}. Derived vectors only — no raw text is
-    read (none is stored). Fault-isolated: logs and returns the empty
-    shape on any failure, never raises.
+    Returns ``(state, ok)``: ``state`` has the shape
+    {"banks": {tool: {"good":[...], "friction":[...],
+    "objective_friction":[...]}}, "banks_meta": {tool: {label:
+    {"backend": str|None, "model_version": str|None}}},
+    "capsules": {tool: [{"vector":..., "ts":..., "tool_name":...,
+    "backend": str|None, "model_version": str|None}]},
+    "goal_vector": [...|None], "goal_ts": float|None,
+    "goal_backend": str|None} and ``ok`` tells whether the database
+    read actually succeeded (v0.1.10: the legacy wrapper could not
+    distinguish a failed read from an empty database — a failed load
+    must leave the engine un-hydrated for a later retry, not mark it
+    hydrated with nothing loaded). Derived vectors only — no raw text
+    is read (none is stored). Fault-isolated: logs and returns the
+    empty shape with ``ok=False`` on failure, never raises.
     """
-    empty = {"banks": {}, "capsules": {}, "goal_vector": None,
-             "goal_ts": None, "goal_backend": None}
+    empty = {"banks": {}, "banks_meta": {}, "capsules": {},
+             "goal_vector": None, "goal_ts": None, "goal_backend": None}
     try:
         conn = _database.connect()
         try:
             _migration.schema_bootstrap(conn)
             banks: dict = {}
-            for tool, bank, blob in conn.execute(
-                    "SELECT tool_name, bank, vector FROM pulse_prototypes"
+            banks_meta: dict = {}
+            for tool, bank, blob, backend, model_version in conn.execute(
+                    "SELECT tool_name, bank, vector, backend,"
+                    " model_version FROM pulse_prototypes"
                     " ORDER BY tool_name, bank, id"):
                 if bank not in _BANKS:
                     continue
@@ -188,15 +223,22 @@ def load_pulse_state() -> dict:
                 banks.setdefault(str(tool), {
                     "good": [], "friction": [],
                     "objective_friction": []})[bank].append(vec)
+                # The writer delete+inserts a tool's whole bank under
+                # one active encoder, so the LAST row's tags cover the
+                # bank (newest rows carry the current space).
+                banks_meta.setdefault(str(tool), {})[bank] = {
+                    "backend": backend, "model_version": model_version}
             capsules: dict = {}
-            for tool, ts, blob in conn.execute(
-                    "SELECT tool_name, ts, vector FROM pulse_capsules"
+            for tool, ts, blob, backend, model_version in conn.execute(
+                    "SELECT tool_name, ts, vector, backend,"
+                    " model_version FROM pulse_capsules"
                     " ORDER BY tool_name, ts, id"):
                 vec = unpack_vector(blob)
                 if vec is None:
                     continue
                 capsules.setdefault(str(tool), []).append(
-                    {"vector": vec, "ts": ts, "tool_name": str(tool)})
+                    {"vector": vec, "ts": ts, "tool_name": str(tool),
+                     "backend": backend, "model_version": model_version})
             goal_vector = None
             goal_ts = None
             goal_backend = None
@@ -207,11 +249,12 @@ def load_pulse_state() -> dict:
                 goal_ts = row[0]
                 goal_backend = row[2]
                 goal_vector = unpack_vector(row[1])
-            return {"banks": banks, "capsules": capsules,
-                    "goal_vector": goal_vector, "goal_ts": goal_ts,
-                    "goal_backend": goal_backend}
+            return {"banks": banks, "banks_meta": banks_meta,
+                    "capsules": capsules, "goal_vector": goal_vector,
+                    "goal_ts": goal_ts, "goal_backend": goal_backend,
+                    }, True
         finally:
             conn.close()
     except Exception:
         logger.exception("its-in-your-head: pulse state load failed")
-        return empty
+        return dict(empty), False

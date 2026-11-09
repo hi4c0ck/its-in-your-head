@@ -75,14 +75,128 @@ def _state(has_context: bool, count: int, required: int) -> str:
 def _required(prototypes, attr: str, legacy: int) -> int:
     """Per-category readiness minimum from the store, legacy fallback."""
     value = getattr(prototypes, attr, None)
-    return max(1, int(value if value is not None else legacy))
+    try:
+        candidate = value if value is not None else legacy
+        return max(1, int(candidate))
+    except (TypeError, ValueError):
+        return max(1, int(legacy))
+
+
+# -- v8 vector-space compatibility gate (single authoritative path) ---- #
+# Two embedding spaces never compare: a goal vector from encoder A
+# scored against capsule vectors from encoder B is a meaningless number
+# that can still satisfy a readiness threshold through support counts.
+# Rules (review 2026-11-10):
+#   * scoring candidates — dimension match with the active space (a
+#     mismatched vector is EXCLUDED, not scored 0.0 into the pool);
+#   * readiness support — dimension match AND known provenance equal to
+#     the active space; unknown provenance (pre-v8 rows, untagged
+#     capsules) is unknown evidence: it can still be scored when the
+#     dimension matches, but is never counted toward readiness;
+#   * no active-space identity supplied (legacy test call sites) ->
+#     legacy behavior (dimension gate only, everything counts), so old
+#     consumers keep working unchanged.
+def _space_dim(space) -> int | None:
+    if not isinstance(space, dict):
+        return None
+    try:
+        dim = int(space.get("dim"))
+    except (TypeError, ValueError):
+        return None
+    return dim if dim > 0 else None
+
+
+def _space_ids(space) -> tuple | None:
+    """The (id, model_version) identity of the active space, or None
+    when the engine did not report one (legacy callers)."""
+    if not isinstance(space, dict):
+        return None
+    ident = (space.get("id"), space.get("model_version"))
+    if ident[0] is None and ident[1] is None:
+        return None
+    return ident
+
+
+def _vec_scores(vec, space) -> bool:
+    """May ``vec`` be scored in the active space (dimension gate)."""
+    if vec is None:
+        return False
+    dim = _space_dim(space)
+    return dim is None or len(vec) == dim
+
+
+def _vec_supports(vec, meta, space) -> bool:
+    """May ``vec`` count toward readiness support? Known provenance
+    equal to the active space; unknown provenance never counts. With no
+    active-space identity (legacy path) the dimension gate is the only
+    gate, so legacy counts are preserved."""
+    if not _vec_scores(vec, space):
+        return False
+    active = _space_ids(space)
+    if active is None:
+        return True  # legacy: unknown provenance still supported
+    if meta is None:
+        return False  # unknown evidence — never auto-compatible
+    return meta[0] == active[0] and meta[1] == active[1]
+
+
+def _goal_gate(goal_vector, goal_backend, space):
+    """A goal vector whose KNOWN encoder space differs from the active
+    space is not comparable: gate it out (returns None). Unknown goal
+    provenance (pre-v8 row) stays in play (legacy behavior)."""
+    if goal_vector is None:
+        return None
+    active = _space_ids(space)
+    if active is None or not active[0]:
+        return goal_vector
+    if goal_backend is not None and goal_backend != active[0]:
+        return None
+    return goal_vector
+
+
+def _gated_bank(tool, prototypes, label, space):
+    """(score_candidates, support_candidates) for one bank label."""
+    vectors = list(prototypes.bank(tool).get(label) or [])
+    try:
+        meta = prototypes.bank_meta(tool).get(label)  # (id, mv) | None
+    except AttributeError:  # pre-v8 store (test fakes)
+        meta = None
+    scored = [v for v in vectors if _vec_scores(v, space)]
+    supported = [v for v in scored if _vec_supports(v, meta, space)]
+    return scored, supported
+
+
+def _gated_capsules(capsules, space):
+    """(score_candidates, support_candidates) over capsule dicts;
+    per-capsule provenance from the engine-attached tags."""
+    scored, supported = [], []
+    for c in capsules:
+        if not isinstance(c, dict):
+            continue
+        vec = c.get("vector")
+        if not _vec_scores(vec, space):
+            continue
+        scored.append(vec)
+        meta = None
+        if c.get("backend") is not None or c.get("model_version") is not None:
+            meta = (c.get("backend"), c.get("model_version"))
+        if _vec_supports(vec, meta, space):
+            supported.append(vec)
+    return scored, supported
 
 
 def build_matrix(registry, prototypes, session_state=None,
                  goal_vector=None, goal_text: str | None = None,
                  backend=None, capsules_by_tool: dict | None = None,
-                 thresholds: dict | None = None) -> list[dict]:
-    """Build one row per registry tool (dynamic — no hardcoded list)."""
+                 thresholds: dict | None = None, vector_space=None,
+                 goal_backend=None) -> list[dict]:
+    """Build one row per registry tool (dynamic — no hardcoded list).
+
+    v0.1.10: ``vector_space`` ({"id", "model_version", "dim"}) +
+    ``goal_backend`` activate the compatibility gate — scoring and
+    readiness support only use vectors comparable in the active
+    embedding space (see the gate block above). Omitted -> legacy
+    behavior (everything scores, everything counts)."""
     thr = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     if goal_vector is None and goal_text is not None and backend is not None:
         from .activity_encoder import encode_goal_text
@@ -103,10 +217,10 @@ def build_matrix(registry, prototypes, session_state=None,
                               legacy_min)
     obj_fric_req = _required(prototypes, "objective_friction_min_samples",
                              legacy_min)
+    goal_vector = _goal_gate(goal_vector, goal_backend, vector_space)
     has_goal = goal_vector is not None
     for tool_row in registry.list_tools():
         tool = tool_row["tool_name"]
-        bank = prototypes.bank(tool)
         # Legacy row projection (pre-Stage-2 semantics for old
         # consumers; new consumers read per-cell state below).
         state = prototypes.state(tool)
@@ -115,30 +229,43 @@ def build_matrix(registry, prototypes, session_state=None,
         # GOAL: goal capsule vs row prototypes (+ recent capsules when
         # prototypes are still empty, so a relevant goal still scores).
         # Support counts REFERENCE VECTORS, not feedback labels.
-        reference = (bank["good"] + bank["friction"]
-                     + bank["objective_friction"])
-        if not reference:
-            reference = [c.get("vector") for c in
-                         capsules_by_tool.get(tool, [])
-                         if isinstance(c, dict) and c.get("vector")]
+        # v0.1.10: gate — score candidates (dimension-comparable) vs
+        # support candidates (dimension-comparable AND known provenance
+        # in the active space); unknown-provenance vectors can still be
+        # scored but never satisfy readiness.
+        ref_scored: list = []
+        ref_supported: list = []
+        for _label in ("good", "friction", "objective_friction"):
+            _scored, _supported = _gated_bank(tool, prototypes, _label,
+                                               vector_space)
+            ref_scored.extend(_scored)
+            ref_supported.extend(_supported)
+        capsule_scored, capsule_supported = _gated_capsules(
+            capsules_by_tool.get(tool, []), vector_space)
+        if ref_scored:
+            reference, reference_support = ref_scored, ref_supported
+        else:
+            reference, reference_support = capsule_scored, capsule_supported
         goal_raw = strongest_similarity(goal_vector, reference)
         goal_value = _floor(goal_raw)
-        goal_support = _support(len(reference), goal_req)
+        goal_support = _support(len(reference_support), goal_req)
         goal_cell = {"value": goal_value,
-                     "state": _state(has_goal, len(reference), goal_req),
+                     "state": _state(has_goal, len(reference_support),
+                                      goal_req),
                      "level": _level(goal_value, thr["goal"]),
                      "support": goal_support,
                      "support_count": goal_support["count"],
                      "readiness_threshold": goal_support["required"]}
 
         # GOOD: strongest similarity to the GOOD bank only; support is
-        # the GOOD-bank count alone.
-        good_count = len(bank["good"])
-        good_raw = strongest_similarity(goal_vector, bank["good"])
-        good_value = _floor(good_raw)
-        good_support = _support(good_count, good_req)
+        # the GOOD-bank count alone (v0.1.10: gated counts).
+        good_scored, good_supported = _gated_bank(tool, prototypes, "good",
+                                                   vector_space)
+        good_value = _floor(strongest_similarity(goal_vector, good_scored))
+        good_support = _support(len(good_supported), good_req)
         good_cell = {"value": good_value,
-                     "state": _state(has_goal, good_count, good_req),
+                     "state": _state(has_goal, len(good_supported),
+                                      good_req),
                      "level": _level(good_value, thr["good"]),
                      "support": good_support,
                      "support_count": good_support["count"],
@@ -147,11 +274,14 @@ def build_matrix(registry, prototypes, session_state=None,
         # FRICTION: user and objective sources evaluated independently
         # (never summed); the combined cell follows the DOMINANT
         # source. "user"/"objective" stay numeric-or-None (legacy).
-        user_count = len(bank["friction"])
-        obj_count = len(bank["objective_friction"])
-        friction_user = strongest_similarity(goal_vector, bank["friction"])
-        friction_obj = strongest_similarity(
-            goal_vector, bank["objective_friction"])
+        user_scored, user_supported = _gated_bank(
+            tool, prototypes, "friction", vector_space)
+        obj_scored, obj_supported = _gated_bank(
+            tool, prototypes, "objective_friction", vector_space)
+        user_count = len(user_supported)
+        obj_count = len(obj_supported)
+        friction_user = strongest_similarity(goal_vector, user_scored)
+        friction_obj = strongest_similarity(goal_vector, obj_scored)
         user_value = _floor(friction_user)
         obj_value = _floor(friction_obj)
         user_state = _state(has_goal, user_count, user_fric_req)
@@ -292,10 +422,15 @@ def _assign_ranks(entries: list, key_fn) -> list:
 def build_lanes(registry, prototypes, session_state=None,
                 goal_vector=None, goal_text: str | None = None,
                 backend=None, capsules_by_tool: dict | None = None,
-                thresholds: dict | None = None) -> dict:
+                thresholds: dict | None = None, vector_space=None,
+                goal_backend=None) -> dict:
     """The four independent lane arrays (v2 contract). Pure projection
     over the same inputs as build_matrix — no tables, no I/O beyond
-    what build_matrix already does. Returns ALL eligible tools per lane."""
+    what build_matrix already does. Returns ALL eligible tools per
+    lane. v0.1.10: the v8 compatibility gate (``vector_space`` +
+    ``goal_backend``) splits score candidates (dimension-comparable)
+    from support candidates (dimension-comparable AND known provenance
+    in the active space); evidence counts stay the RAW stored facts."""
     thr = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     if goal_vector is None and goal_text is not None and backend is not None:
         from .activity_encoder import encode_goal_text
@@ -308,6 +443,7 @@ def build_lanes(registry, prototypes, session_state=None,
                               legacy_min)
     obj_fric_req = _required(prototypes, "objective_friction_min_samples",
                              legacy_min)
+    goal_vector = _goal_gate(goal_vector, goal_backend, vector_space)
     has_goal = goal_vector is not None
     live, goal, good, friction = [], [], [], []
     for tool_row in registry.list_tools():
@@ -318,42 +454,59 @@ def build_lanes(registry, prototypes, session_state=None,
                     if isinstance(c, dict) and c.get("vector")]
         ref_from_banks = (bank["good"] + bank["friction"]
                           + bank["objective_friction"])
+        # v0.1.10 gate: scored vs support-eligible candidates; the RAW
+        # counts stay the evidence facts below.
+        ref_scored: list = []
+        ref_supported: list = []
+        for _label in ("good", "friction", "objective_friction"):
+            _scored, _supported = _gated_bank(tool, prototypes, _label,
+                                               vector_space)
+            ref_scored.extend(_scored)
+            ref_supported.extend(_supported)
+        capsule_scored, capsule_supported = _gated_capsules(capsules,
+                                                             vector_space)
         if ref_from_banks:
-            reference = ref_from_banks
+            reference, reference_support = ref_scored, ref_supported
             evidence_source = "prototype_banks"
             capsule_count = len(capsules)
         else:
-            reference = [c.get("vector") for c in capsules]
-            evidence_source = "recent_capsules" if reference else "none"
+            reference, reference_support = capsule_scored, capsule_supported
+            evidence_source = "recent_capsules" if capsules else "none"
             capsule_count = len(capsules)
         goal_value = _floor(strongest_similarity(goal_vector, reference))
-        goal_support = _support(len(reference), goal_req)
+        goal_support = _support(len(reference_support), goal_req)
         goal.append({
             "tool_id": tid, "tool_name": tool, "rank": 0,
             "value": goal_value, "threshold": thr["goal"],
             "level": _level(goal_value, thr["goal"]),
-            "state": _state(has_goal, len(reference), goal_req),
+            "state": _state(has_goal, len(reference_support), goal_req),
             "support": goal_support,
             "evidence": {"source": evidence_source,
                          "prototype_count": len(ref_from_banks),
                          "capsule_count": capsule_count},
         })
-        good_count = len(bank["good"])
-        good_value = _floor(strongest_similarity(goal_vector, bank["good"]))
+        good_scored, good_supported = _gated_bank(tool, prototypes, "good",
+                                                   vector_space)
+        good_count = len(bank["good"])  # raw evidence fact
+        good_value = _floor(strongest_similarity(goal_vector, good_scored))
         good.append({
             "tool_id": tid, "tool_name": tool, "rank": 0,
             "value": good_value, "threshold": thr["good"],
             "level": _level(good_value, thr["good"]),
-            "state": _state(has_goal, good_count, good_req),
-            "support": _support(good_count, good_req),
+            "state": _state(has_goal, len(good_supported), good_req),
+            "support": _support(len(good_supported), good_req),
             "evidence_source": "good_prototypes" if good_count else "none",
         })
-        user_count = len(bank["friction"])
-        obj_count = len(bank["objective_friction"])
+        user_scored, user_supported = _gated_bank(
+            tool, prototypes, "friction", vector_space)
+        obj_scored, obj_supported = _gated_bank(
+            tool, prototypes, "objective_friction", vector_space)
+        user_count = len(user_supported)
+        obj_count = len(obj_supported)
         user_value = _floor(strongest_similarity(goal_vector,
-                                                 bank["friction"]))
+                                                 user_scored))
         obj_value = _floor(strongest_similarity(
-            goal_vector, bank["objective_friction"]))
+            goal_vector, obj_scored))
         user_support = _support(user_count, user_fric_req)
         obj_support = _support(obj_count, obj_fric_req)
         scored = []

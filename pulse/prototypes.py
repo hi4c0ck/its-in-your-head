@@ -79,6 +79,12 @@ class PrototypeStore:
             objective_friction_min_samples)
         self._lock = threading.Lock()
         self._banks: dict[str, dict[str, list]] = {}
+        # v8 vector-space provenance, kept in lockstep with the banks:
+        # one (backend, model_version) tag per (tool, label) — the
+        # writer persists a tool's whole bank under one active encoder,
+        # so a single tag covers the FIFO window. None = unknown space
+        # (pre-v8 rows / no encoder identity available).
+        self._bank_meta: dict[str, dict[str, tuple | None]] = {}
         # Cross-process bridge: tools whose banks changed since the last
         # persisted sync. The collector's hot-path feedback labels touch
         # only this in-memory set (no I/O); the metrics worker persists
@@ -96,20 +102,45 @@ class PrototypeStore:
             return capsule_or_vector.get("vector")
         return capsule_or_vector
 
+    @staticmethod
+    def _provenance_of(capsule_or_vector):
+        """v8: the (backend, model_version) encoder space of the input.
+        A dict capsule carries the tags the engine attached at capsule
+        build time; a bare vector (or an untagged capsule) is unknown
+        provenance (None) — scored on dimension match, never counted
+        toward readiness support."""
+        if isinstance(capsule_or_vector, dict):
+            backend = capsule_or_vector.get("backend")
+            model_version = capsule_or_vector.get("model_version")
+            if backend is not None or model_version is not None:
+                return (backend, model_version)
+        return None
+
     # -- ingestion ---------------------------------------------------------
-    def add(self, tool: str, capsule_or_vector, label: str):
+    def add(self, tool: str, capsule_or_vector, label: str,
+            provenance: tuple | None = None):
         """Add a prototype; oldest evicted past ``cap``. Only the vector
-        is stored — never the capsule text payload fields beyond it."""
+        is stored — never the capsule text payload fields beyond it.
+
+        ``provenance`` (v8) is a ``(backend, model_version)`` pair for
+        the encoder space the vector came from; passed as None (or
+        omitted) the bank's provenance stays unknown (legacy rows).
+        """
         if label not in ("good", "friction", "objective_friction"):
             raise ValueError(f"unknown prototype label {label!r}")
         vec = self._vector_of(capsule_or_vector)
         if vec is None:
             return None
         vec = list(vec)
+        if provenance is None:
+            provenance = self._provenance_of(capsule_or_vector)
         with self._lock:
             bank = self._bank(str(tool))
             bank[label].append(vec)
             del bank[label][:-self.cap]  # FIFO eviction, keeps newest cap
+            if provenance is not None:
+                meta = self._bank_meta.setdefault(str(tool), {})
+                meta[label] = tuple(provenance)
             self._dirty.add(str(tool))
             return vec
 
@@ -151,6 +182,16 @@ class PrototypeStore:
             if not stored:
                 return {"good": [], "friction": [], "objective_friction": []}
             return {k: list(v) for k, v in stored.items()}
+
+    def bank_meta(self, tool: str) -> dict:
+        """v8: provenance per bank label — {label: (backend,
+        model_version) or None}. None = unknown space (legacy vectors);
+        the matrix's compatibility gate reads this before scoring and
+        readiness support counts."""
+        with self._lock:
+            meta = self._bank_meta.get(str(tool), {})
+            return {label: (tuple(value) if value is not None else None)
+                    for label, value in meta.items()}
 
     def labeled_count(self, tool: str) -> int:
         """User-labeled examples (GOOD + FRICTION); objective-friction is

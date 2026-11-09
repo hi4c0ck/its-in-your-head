@@ -126,6 +126,10 @@ class Engine:
         # _pulse_hydration_lock serializes concurrent first reads.
         self._pulse_hydrated = False
         self._pulse_hydration_lock = threading.Lock()
+        # v0.1.10 (review fix 1): monotonic deadline of the next
+        # hydration retry after a FAILED load (bounded backoff — a
+        # broken DB read must not be hammered on every /pulse poll).
+        self._pulse_retry_at = 0.0
         # Interpreted-track (agent/reasoning) evidence bookkeeping:
         # counts reasoning_seg updates that actually landed, so
         # /portrait can evidence-gate the agent track separately from
@@ -212,6 +216,8 @@ class Engine:
             return self._backend
 
     # -- PULSE lazy hydration (Stage 1) ------------------------------------ #
+    PULSE_HYDRATION_RETRY_SECONDS = 30.0
+
     def ensure_pulse_hydrated(self) -> None:
         """Lazy ONE-TIME hydration of PULSE learning state from the
         active profile's DB: prototype banks (good / friction /
@@ -223,30 +229,53 @@ class Engine:
         Explicit reset sets _pulse_hydrated=True so post-reset state
         stays empty. Never raises; never called from on_tool_start
         (sync tool-start hot path stays I/O-free).
+
+        v0.1.10 (review fix 1): the hydrated flag is set ONLY after a
+        successful load AND merge; a failed database read leaves the
+        engine un-hydrated and arms a bounded retry backoff instead of
+        permanently marking an empty engine as hydrated. Load success
+        is reported by persistence (a failed read no longer masquerades
+        as an empty database).
         """
         if self._pulse_hydrated:
             return
         with self._pulse_hydration_lock:
             if self._pulse_hydrated:
                 return
-            self._pulse_hydrated = True  # guard first: no retry loops
-            try:
-                state = _pulse_persist.load_pulse_state()
-            except Exception:
-                logger.exception(
-                    "its-in-your-head: pulse hydration failed")
+            now = time.monotonic()
+            if now < self._pulse_retry_at:
+                return  # inside the backoff window after a failed load
+            state, ok = _pulse_persist.load_pulse_state_checked()
+            if not ok:
+                # The database read itself failed: stay UN-hydrated so a
+                # later call retries, with a bounded backoff.
+                self._pulse_retry_at = (
+                    now + self.PULSE_HYDRATION_RETRY_SECONDS)
                 return
             try:
                 # Banks: merge, skipping vectors already present (a
-                # tool_end persisted before hydration must not duplicate).
+                # tool_end persisted before hydration must not
+                # duplicate). v0.1.10: preserve the persisted
+                # vector-space provenance (bank_meta) so the
+                # compatibility gate can tell encoder spaces apart.
                 for tool, banks in (state.get("banks") or {}).items():
+                    meta = (state.get("banks_meta") or {}).get(tool) or {}
                     existing = self.protos.bank(tool)
                     for label, vecs in banks.items():
+                        label_meta = meta.get(label) or {}
+                        provenance = None
+                        if (label_meta.get("backend") is not None
+                                or label_meta.get("model_version")
+                                is not None):
+                            provenance = (label_meta.get("backend"),
+                                          label_meta.get("model_version"))
                         for vec in vecs or []:
                             if vec not in existing.get(label, []):
-                                self.protos.add(tool, vec, label)
+                                self.protos.add(tool, vec, label,
+                                                provenance=provenance)
                     self.protos.mark_clean(tool)
                 # Capsules: merge, skipping (tool, ts, vector) duplicates.
+                # v0.1.10: keep the persisted provenance tags.
                 with self._lock:
                     for tool, caps in (state.get("capsules") or {}).items():
                         dq = self._capsules.setdefault(
@@ -263,7 +292,10 @@ class Engine:
                             seen.add(key)
                             dq.append({"vector": list(vec),
                                        "ts": cap.get("ts"),
-                                       "tool_name": str(tool)})
+                                       "tool_name": str(tool),
+                                       "backend": cap.get("backend"),
+                                       "model_version":
+                                           cap.get("model_version")})
                 if self._goal_vector is None and \
                         state.get("goal_vector") is not None:
                     self._goal_vector = list(state["goal_vector"])
@@ -272,6 +304,12 @@ class Engine:
             except Exception:
                 logger.exception(
                     "its-in-your-head: pulse hydration merge failed")
+                # Merge fault: keep the engine un-hydrated so the next
+                # poll retries (bounded backoff), same as a load fault.
+                self._pulse_retry_at = (
+                    now + self.PULSE_HYDRATION_RETRY_SECONDS)
+                return
+            self._pulse_hydrated = True
 
     def ensure_restored(self) -> None:
         """Alias of ensure_pulse_hydrated (public restore entry)."""
@@ -314,10 +352,18 @@ class Engine:
         Persist functions are fault-isolated (never raise), so marking
         clean is unconditional: a failed persist retries on the next
         change to that tool, never wedging the dirty set.
+
+        v0.1.10 (review fix 3): persist the active encoder's
+        vector-space identity with the bank rows, so a later encoder
+        switch cannot score new vectors against an old space.
         """
         dirty = self.protos.dirty_tools()
+        space = self._pulse_vector_space()
         for tool in dirty:
-            _pulse_persist.persist_tool_banks(self.protos, tool)
+            _pulse_persist.persist_tool_banks(
+                self.protos, tool,
+                backend=space["id"],
+                model_version=space["model_version"])
             self.protos.mark_clean(tool)
         return sorted(dirty)
 
@@ -804,6 +850,14 @@ class Engine:
             capsule = pulse.handle_post_tool_call(
                 ev, self.registry, backend=self._get_backend(), args=None)
             tool = str(ev.get("tool_name") or "unknown")
+            # v0.1.10 (review fix 3): tag the capsule's vector-space
+            # identity (the encoder name; model_version was attached by
+            # encode_capsule when a backend was used) BEFORE the bank
+            # label and the in-memory store see the capsule, so
+            # objective-friction prototypes, the capsule store and the
+            # persisted row all carry the same provenance.
+            if isinstance(capsule, dict):
+                capsule["backend"] = self._backend_name
             self._store_capsule(tool, capsule)
             label = None
             if isinstance(capsule, dict):
@@ -815,7 +869,11 @@ class Engine:
             if isinstance(capsule, dict) and capsule.get("vector") is not None:
                 _pulse_persist.persist_capsule(capsule, CAPSULES_PER_TOOL)
             if label:
-                _pulse_persist.persist_tool_banks(self.protos, tool)
+                _pulse_persist.persist_tool_banks(
+                    self.protos, tool,
+                    backend=self._backend_name,
+                    model_version=self._pulse_vector_space()
+                    ["model_version"])
         except Exception:
             logger.exception("its-in-your-head: engine tool_end feed failed")
 
@@ -1130,6 +1188,26 @@ class Engine:
         with self._lock:
             return {t: list(dq) for t, dq in self._capsules.items()}
 
+    # -- PULSE live view (S4) --------------------------------------------- #
+    def _pulse_vector_space(self) -> dict:
+        """v0.1.10 (review fix 3): the ACTIVE embedding-space identity
+        for the matrix's compatibility gate — {"id": encoder name,
+        "model_version": encoder model tag (or None), "dim": vector
+        length (from the live goal vector when present, else None —
+        the gate then applies the provenance rules without a
+        dimension gate)}."""
+        space = {"id": self._backend_name, "model_version": None,
+                 "dim": None}
+        try:
+            backend = self._get_backend()
+            space["model_version"] = getattr(backend, "model_version",
+                                             None)
+        except Exception:
+            backend = None
+        if self._goal_vector:
+            space["dim"] = len(self._goal_vector)
+        return space
+
     def pulse_view(self) -> dict:
         self.ensure_pulse_hydrated()
         thr = {k: v for k, v in self._thresholds.items() if v is not None}
@@ -1137,17 +1215,33 @@ class Engine:
         with self._lock:
             if self._capsules:
                 capsules = {t: list(dq) for t, dq in self._capsules.items()}
-        rows = _pulse_matrix.build_matrix(
-            self.registry, self.protos,
+        space = self._pulse_vector_space()
+        common = dict(
+            registry=self.registry, prototypes=self.protos,
             session_state=self._session_state(),
             goal_vector=self._goal_vector,
             goal_text=self.goal_text,
             backend=self._get_backend(),
             capsules_by_tool=capsules,
-            thresholds=thr or None)
+            thresholds=thr or None,
+            # v0.1.10: the compatibility gate (unknown-provenance
+            # vectors score but never satisfy readiness; a goal whose
+            # known encoder space differs from the active one is
+            # gated out).
+            vector_space=space,
+            goal_backend=self._goal_backend)
+        rows = _pulse_matrix.build_matrix(**common)
+        # v0.1.10 (review fix 2): the authoritative lane calculation
+        # comes from the SAME inputs (one scoring path — the
+        # dashboard's rows->lanes mirror stays a compatibility
+        # fallback for pre-v0.1.10 engine responses only).
+        lanes = _pulse_matrix.build_lanes(**common)
         return {"rows": list(rows),
                 "columns": ["goal", "good", "friction", "unlabeled"],
-                "available": bool(rows)}
+                "available": bool(rows),
+                "schema_version": 2,
+                "lane_order": ["live", "goal", "good", "friction"],
+                "lanes": lanes}
 
     def _perception_view(self, dims, full, values, agent) -> dict:
         """Additive ``perception`` key (C1 adjudication).
@@ -1261,6 +1355,44 @@ class Engine:
         if isinstance(settings, dict):
             merged.update({k: v for k, v in settings.items()
                            if k in _settings.DEFAULTS})
+        # v0.1.10 (review fix 1): reset synchronizes with the HYDRATION
+        # lock (outermost — the same order ensure_pulse_hydrated uses:
+        # hydration lock, then data lock), so an in-flight hydration
+        # merge cannot repopulate the state being wiped below.
+        with self._pulse_hydration_lock:
+            self._reset_body(merged)
+        # Re-bootstrap the reinforced cache from the DB (fault-isolated:
+        # failure degrades to {} via _load_reinforced_bank's discipline).
+        try:
+            try:
+                from .perception import patterns as _patterns
+            except ImportError:
+                from perception import patterns as _patterns
+            self._reinforced_bank(_patterns)
+        except Exception:
+            logger.exception(
+                "its-in-your-head: reinforced cache re-bootstrap failed")
+        # Registry rows live in the DB; the route's _reset_dataset()
+        # wipes those — the registry re-reads lazily on the next observe.
+        # v0.1.10 (review fix 1): with no live provider, reset() itself
+        # is the explicit wipe, so mark the PULSE state empty and load
+        # nothing; an in-flight restore cannot repopulate state after a
+        # reset. With a live provider, the next natural read re-hydrates
+        # from the DB; clear any pending retry so it is not blocked by
+        # an earlier failure backoff.
+        if self._settings_provider is None:
+            try:
+                self.ensure_pulse_hydrated()
+            except Exception:
+                logger.exception(
+                    "its-in-your-head: pulse hydrate after reset failed")
+        else:
+            self._pulse_retry_at = 0.0
+
+    def _reset_body(self, merged) -> None:
+        """The explicit-wipe body under the data lock, called from
+        reset() while it holds the hydration lock (no deadlock: the
+        hydration path takes the locks in the same order)."""
         with self._lock:
             self._settings = dict(merged)
             self._capsules.clear()
@@ -1310,19 +1442,6 @@ class Engine:
                     "pulse.objective_friction_min_samples"))
             self.portrait = _portrait_mod.Portrait(
                 retain_days=int(merged.get("observation.retain_days", 90)))
-        # Re-bootstrap the reinforced cache from the DB (fault-isolated:
-        # failure degrades to {} via _load_reinforced_bank's discipline).
-        try:
-            try:
-                from .perception import patterns as _patterns
-            except ImportError:
-                from perception import patterns as _patterns
-            self._reinforced_bank(_patterns)
-        except Exception:
-            logger.exception(
-                "its-in-your-head: reinforced cache re-bootstrap failed")
-        # Registry rows live in the DB; the route's _reset_dataset() wipes
-        # those — the registry re-reads lazily on the next observe.
 
 
 # -- process singleton ------------------------------------------------------

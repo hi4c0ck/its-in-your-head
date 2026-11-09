@@ -720,27 +720,40 @@ def _pulse_shape() -> dict:
             " FROM pulse_tools ORDER BY first_seen, id").fetchall()
         if not tool_rows:
             return shape
-        for tool, bank, blob in conn.execute(
-                "SELECT tool_name, bank, vector FROM pulse_prototypes"
+        bank_meta: dict = {}
+        for tool, bank, blob, backend, model_version in conn.execute(
+                "SELECT tool_name, bank, vector, backend, model_version"
+                " FROM pulse_prototypes"
                 " ORDER BY tool_name, bank, id"):
+            if bank not in ("good", "friction", "objective_friction"):
+                continue
             vec = _unpack_pulse_vector(blob)
             if vec is None:
                 continue
             banks.setdefault(tool, {"good": [], "friction": [],
                                     "objective_friction": []}) \
                 .setdefault(bank, []).append(vec)
+            # v8: the writer delete+inserts a tool's whole bank
+            # under one encoder, so the newest row's tags cover
+            # the bank.
+            bank_meta.setdefault(tool, {})[bank] = {
+                "backend": backend,
+                "model_version": model_version}
         goal_row = conn.execute(
             "SELECT ts, vector, backend FROM pulse_goal WHERE id = 1"
         ).fetchone()
         if goal_row is not None:
             goal_vector = _unpack_pulse_vector(goal_row[1])
-        for tool, ts, blob in conn.execute(
-                "SELECT tool_name, ts, vector FROM pulse_capsules"
+        for tool, ts, blob, backend, model_version in conn.execute(
+                "SELECT tool_name, ts, vector, backend, model_version"
+                " FROM pulse_capsules"
                 " ORDER BY tool_name, ts, id"):
             vec = _unpack_pulse_vector(blob)
             if vec is not None:
-                capsules.setdefault(tool, []).append({"vector": vec,
-                                                      "ts": ts})
+                capsules.setdefault(tool, []).append(
+                    {"vector": vec, "ts": ts, "tool_name": str(tool),
+                     "backend": backend,
+                     "model_version": model_version})
     except Exception:
         return shape
     finally:
@@ -767,169 +780,77 @@ def _pulse_shape() -> dict:
 
     rows = []
     lanes_live, lanes_goal, lanes_good, lanes_fric = [], [], [], []
-    # Momentum (Tier-0 positive feedback), mirrored inline: recent capsule
-    # feed vs cumulative call count per tool. See _pulse_momentum.
-    tool_names = [tr[1] for tr in tool_rows]
-    recent_counts = {
-        t: sum(1 for c in (capsules.get(t) or []) if c.get("vector") is not None)
-        for t in tool_names
-    }
-    cum_counts = {tr[1]: int(tr[5]) for tr in tool_rows}
-    momentum_map = _pulse_momentum(recent_counts, cum_counts)
-    for (tool_id, tool, first_seen, last_seen, started, completed,
-         errors) in tool_rows:
-        bank = banks.get(tool, {"good": [], "friction": [],
-                                "objective_friction": []})
-        labeled = len(bank.get("good", ())) + len(bank.get("friction", ()))
-        # Legacy row projection (pre-Stage-2 semantics).
-        state = "ready" if labeled >= min_labeled else "learning"
-        has_goal = goal_vector is not None
-        reference = (bank.get("good", []) + bank.get("friction", [])
-                     + bank.get("objective_friction", []))
-        if not reference:
-            reference = [c["vector"] for c in
-                         capsules.get(tool, [])[-_PULSE_CAPSULE_DISPLAY_CAP:]
-                         if c.get("vector") is not None]
-        goal_raw = _pulse_strongest(goal_vector, reference)
-        goal_value = _pulse_floor(goal_raw)
-        goal_support = _pulse_support(len(reference), goal_req)
-        goal_cell = {"value": goal_value,
-                     "state": _pulse_state(has_goal, len(reference),
-                                          goal_req),
-                     "level": _pulse_level(goal_value, thresholds["goal"]),
-                     "support": goal_support,
-                     "support_count": goal_support["count"],
-                     "readiness_threshold": goal_support["required"]}
+    # v0.1.10 (review fix 2): ONE authoritative computation path — the
+    # fallback feeds the profile-DB state through pulse.matrix.build_
+    # matrix / build_lanes (the exact scoring, support and ranking the
+    # live engine uses) instead of re-deriving it inline. The legacy row
+    # projection and the v2 lanes envelope stay byte-compatible; the
+    # rows->lanes mirror (_pulse_lanes_from_rows) remains a
+    # compatibility path for pre-v0.1.10 engine responses only.
+    from pulse import matrix as _pulse_matrix
+    from pulse import prototypes as _pulse_protos
 
-        good_count = len(bank.get("good", []))
-        good_raw = _pulse_strongest(goal_vector, bank.get("good", []))
-        good_value = _pulse_floor(good_raw)
-        good_support = _pulse_support(good_count, good_req)
-        good_cell = {"value": good_value,
-                     "state": _pulse_state(has_goal, good_count, good_req),
-                     "level": _pulse_level(good_value, thresholds["good"]),
-                     "support": good_support,
-                     "support_count": good_support["count"],
-                     "readiness_threshold": good_support["required"]}
+    class _DbRegistry:
+        """pulse_tools rows as the matrix's registry projection."""
 
-        user_count = len(bank.get("friction", []))
-        obj_count = len(bank.get("objective_friction", []))
-        friction_user = _pulse_strongest(goal_vector,
-                                         bank.get("friction", []))
-        friction_obj = _pulse_strongest(goal_vector,
-                                        bank.get("objective_friction", []))
-        user_value = _pulse_floor(friction_user)
-        obj_value = _pulse_floor(friction_obj)
-        user_state = _pulse_state(has_goal, user_count, user_fric_req)
-        obj_state = _pulse_state(has_goal, obj_count, obj_fric_req)
-        user_support = _pulse_support(user_count, user_fric_req)
-        obj_support = _pulse_support(obj_count, obj_fric_req)
-        scored = []
-        if user_value is not None:
-            scored.append(("user", user_value, user_support["ratio"]))
-        if obj_value is not None:
-            scored.append(("objective", obj_value, obj_support["ratio"]))
-        dominant = None
-        friction_value = None
-        friction_state = _pulse_state(has_goal, 0, user_fric_req)
-        friction_support = _pulse_support(0, user_fric_req)
-        if scored:
-            # Greater score wins; tie -> greater support ratio;
-            # both equal -> user.
-            dominant, friction_value, _ratio = max(
-                scored, key=lambda s: (s[1], s[2], s[0] == "user"))
-            if dominant == "user":
-                friction_state, friction_support = user_state, user_support
-            else:
-                friction_state, friction_support = obj_state, obj_support
-        friction_cell = {
-            "value": friction_value,
-            "state": friction_state,
-            "level": _pulse_level(friction_value, thresholds["friction"]),
-            "user": user_value,
-            "objective": obj_value,
-            "dominant_source": dominant,
-            "user_state": user_state,
-            "objective_state": obj_state,
-            "user_support": user_support,
-            "objective_support": obj_support,
-            "support": friction_support,
-            "support_count": friction_support["count"],
-            "readiness_threshold": friction_support["required"],
-        }
+        def __init__(self, rows_):
+            self._rows = rows_
 
-        rows.append({
-            "tool_name": tool,
-            "tool_id": tool_id,
-            "state": state,
-            "labeled": labeled,
-            "live": {
-                "calls_started": started,
-                "calls_completed": completed,
-                "errors": errors,
-                "last_seen": last_seen,
-                "first_seen": first_seen,
-                # No in-process session state in the isolated child: the
-                # global snapshot is reported empty, never guessed.
-                "global": {},
-            },
-            "goal": goal_cell,
-            "good": good_cell,
-            "friction": friction_cell,
-            "momentum": momentum_map.get(tool, {
-                "momentum": 0.0, "surge": 0.0, "value": 0.5,
-                "state": "steady"}),
-        })
-        # --- Stage 3 lanes: independent rankings over the same cells.
-        mom_entry = momentum_map.get(tool, {
-            "momentum": 0.0, "surge": 0.0, "value": 0.5,
-            "state": "steady"})
-        lanes_live.append({
-            "tool_id": tool_id, "tool_name": tool, "rank": 0,
-            "activity": {
-                "calls_started": started, "calls_completed": completed,
-                "errors": errors, "first_seen": first_seen,
-                "last_seen": last_seen,
-                "recent_capsules": recent_counts.get(tool, 0)},
-            "momentum": mom_entry})
-        ref_bank_count = (len(bank.get("good", []))
-                          + len(bank.get("friction", []))
-                          + len(bank.get("objective_friction", [])))
-        cap_count = len(capsules.get(tool, []))
-        lanes_goal.append({
-            "tool_id": tool_id, "tool_name": tool, "rank": 0,
-            "value": goal_cell["value"], "threshold": thresholds["goal"],
-            "level": goal_cell["level"], "state": goal_cell["state"],
-            "support": goal_cell["support"],
-            "evidence": {
-                "source": ("prototype_banks" if ref_bank_count
-                           else "recent_capsules" if cap_count else "none"),
-                "prototype_count": ref_bank_count,
-                "capsule_count": cap_count}})
-        lanes_good.append({
-            "tool_id": tool_id, "tool_name": tool, "rank": 0,
-            "value": good_cell["value"], "threshold": thresholds["good"],
-            "level": good_cell["level"], "state": good_cell["state"],
-            "support": good_cell["support"],
-            "evidence_source": ("good_prototypes" if good_count else "none")})
-        lanes_fric.append({
-            "tool_id": tool_id, "tool_name": tool, "rank": 0,
-            "value": friction_cell["value"],
-            "threshold": thresholds["friction"],
-            "level": friction_cell["level"], "state": friction_cell["state"],
-            "dominant_source": friction_cell["dominant_source"],
-            "user": {"value": user_value,
-                     "level": _pulse_level(user_value, thresholds["friction"]),
-                     "state": user_state, "support": user_support},
-            "objective": {"value": obj_value,
-                          "level": _pulse_level(obj_value, thresholds["friction"]),
-                          "state": obj_state, "support": obj_support}})
-    shape["lanes"] = {
-        "live": _pulse_assign_ranks(lanes_live, _pulse_live_key),
-        "goal": _pulse_assign_ranks(lanes_goal, _pulse_sem_key),
-        "good": _pulse_assign_ranks(lanes_good, _pulse_sem_key),
-        "friction": _pulse_assign_ranks(lanes_fric, _pulse_sem_key),
-    }
+        def list_tools(self):
+            return list(self._rows)
+
+    registry_rows = [{"tool_name": tr[1], "id": tr[0],
+                      "calls_started": int(tr[4]),
+                      "calls_completed": int(tr[5]),
+                      "errors": int(tr[6]),
+                      "first_seen": tr[2], "last_seen": tr[3]}
+                     for tr in tool_rows]
+    store = _pulse_protos.PrototypeStore(
+        cap=64, min_labeled=min_labeled,
+        goal_min_references=goal_req,
+        good_min_samples=good_req,
+        user_friction_min_samples=user_fric_req,
+        objective_friction_min_samples=obj_fric_req)
+    for tool, bank_labels in banks.items():
+        for blabel, vecs in bank_labels.items():
+            meta = bank_meta.get(tool, {}).get(blabel) or {}
+            provenance = None
+            if meta.get("backend") is not None or \
+                    meta.get("model_version") is not None:
+                provenance = (meta.get("backend"),
+                              meta.get("model_version"))
+            for vec in vecs:
+                store.add(tool, vec, blabel, provenance=provenance)
+        store.mark_clean(str(tool))
+    # Active embedding-space identity for the compatibility gate: the
+    # settings encoder is the active space; the persisted goal row's
+    # backend is checked against it (a goal from another space is
+    # gated out by the matrix, never scored into the pool). The
+    # isolated child creates the backend locally when it can (the
+    # tier-0 sketch is pure python) to report its model_version.
+    active_encoder = cur.get("perception.encoder")
+    model_version = None
+    try:
+        from perception import encoder as _active_encoder
+        _active_backend = _active_encoder.create_backend(
+            None, str(active_encoder) if active_encoder else None)
+        model_version = getattr(_active_backend, "model_version", None)
+    except Exception:
+        pass
+    vector_space = {"id": str(active_encoder) if active_encoder else None,
+                    "model_version": model_version,
+                    "dim": len(goal_vector) if goal_vector else None}
+    goal_backend = goal_row[2] if goal_row is not None else None
+    common = dict(
+        registry=_DbRegistry(registry_rows), prototypes=store,
+        session_state=None,
+        goal_vector=goal_vector, goal_text=None, backend=None,
+        capsules_by_tool=capsules,
+        thresholds=thresholds,
+        vector_space=vector_space, goal_backend=goal_backend)
+    rows = _pulse_matrix.build_matrix(**common)
+    lanes = _pulse_matrix.build_lanes(**common)
+    shape["lanes"] = lanes
     shape["rows"] = rows
     shape["available"] = True
     return shape

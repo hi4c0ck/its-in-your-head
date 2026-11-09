@@ -56,7 +56,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION  # alias
 
 _logger = logging.getLogger(__name__)
@@ -181,12 +181,18 @@ PULSE_TOOLS_DDL = (
 
 # Bounded prototype banks (FIFO-capped per tool+bank by the writer).
 # `vector` is a derived embedding (float32 BLOB) — never raw text.
+# v8: `backend`/`model_version` carry the vector-space identity of the
+# encoder that produced the bank's vectors (NULL pre-v8 = unknown
+# provenance — scored on dimension match, but never counted toward
+# readiness support; see pulse/matrix.py gate + ARCHITECTURE.md).
 _CREATE_PULSE_PROTOTYPES_TABLE = """CREATE TABLE IF NOT EXISTS pulse_prototypes (
     id           INTEGER PRIMARY KEY,
     tool_name    TEXT NOT NULL,
     bank         TEXT NOT NULL,
     ts           REAL NOT NULL,
-    vector       BLOB NOT NULL
+    vector       BLOB NOT NULL,
+    backend      TEXT,
+    model_version TEXT
 )"""
 
 _CREATE_PULSE_PROTOTYPES_INDEX = (
@@ -213,11 +219,15 @@ PULSE_GOAL_DDL = _CREATE_PULSE_GOAL_TABLE + ";\n"
 # Recent per-tool activity-capsule vectors (the GOAL column's fallback
 # reference when a tool's banks are still empty), pruned to the newest
 # per-tool bound by the writer.
+# v8: `backend`/`model_version` tag the encoder space of each capsule
+# vector (NULL pre-v8 = unknown provenance).
 _CREATE_PULSE_CAPSULES_TABLE = """CREATE TABLE IF NOT EXISTS pulse_capsules (
     id           INTEGER PRIMARY KEY,
     tool_name    TEXT NOT NULL,
     ts           REAL NOT NULL,
-    vector       BLOB NOT NULL
+    vector       BLOB NOT NULL,
+    backend      TEXT,
+    model_version TEXT
 )"""
 
 _CREATE_PULSE_CAPSULES_INDEX = (
@@ -458,6 +468,17 @@ def _create_pulse_tables(conn: sqlite3.Connection) -> None:
         _CREATE_PULSE_CAPSULES_INDEX,
     ):
         conn.execute(stmt)
+    # v8: add the vector-space provenance columns to pre-v8 tables
+    # (existing rows keep NULL = unknown provenance; portrait_history
+    # upgrade pattern — CREATE covers the fresh case, ALTER covers the
+    # existing-table case).
+    for table in ("pulse_prototypes", "pulse_capsules"):
+        existing = _table_columns(conn, table)
+        if existing:
+            for col in ("backend", "model_version"):
+                if col not in existing:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
 
 
 def migrate(conn: sqlite3.Connection,
@@ -475,7 +496,10 @@ def migrate(conn: sqlite3.Connection,
     preserved), and v5 -> v6 gains ``pattern_bank`` (empty; existing rows
     preserved), and v6 -> v7 adds ``rank``/``turn_key`` to
     ``pattern_affinity_history`` (existing rows keep rank 1 by column
-    default, turn_key NULL).
+    default, turn_key NULL), and v7 -> v8 adds ``backend``/
+    ``model_version`` (vector-space provenance, NULL on existing rows)
+    to ``pulse_prototypes`` and ``pulse_capsules`` (existing vectors
+    keep unknown provenance — see the v8 note in the DDL above).
     All steps run in a single transaction when the caller has not already
     opened one; any failure rolls the whole migration back (no partial
     column/index/version state). Returns True if work was done.
