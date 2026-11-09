@@ -15,6 +15,12 @@ DEFAULTS = {
     "observation.retain_days": 90,
     "pulse.prototype_cap": 8,
     "pulse.min_labeled": 3,
+    # Per-category readiness minimums (PULSE Stage 2). None = unset;
+    # each falls back to pulse.min_labeled (backwards compat).
+    "pulse.goal_min_references": None,
+    "pulse.good_min_samples": None,
+    "pulse.user_friction_min_samples": None,
+    "pulse.objective_friction_min_samples": None,
     "pulse.thresholds.goal": 0.8,
     "pulse.thresholds.good": 0.6,
     "pulse.thresholds.friction": 0.4,
@@ -49,3 +55,30 @@ def load(ctx) -> dict:
 
 def get(snapshot: dict, key: str):
     return snapshot.get(key, DEFAULTS.get(key))
+
+
+_READINESS_KEYS = (("pulse.goal_min_references", "goal"),
+                   ("pulse.good_min_samples", "good"),
+                   ("pulse.user_friction_min_samples", "user_friction"),
+                   ("pulse.objective_friction_min_samples",
+                    "objective_friction"))
+
+
+def readiness_thresholds(snapshot: dict | None) -> dict:
+    """Resolved per-category readiness minimums.
+
+    Each of pulse.goal_min_references / pulse.good_min_samples /
+    pulse.user_friction_min_samples /
+    pulse.objective_friction_min_samples falls back to the legacy
+    pulse.min_labeled when unset (None/absent), preserving backwards
+    compatibility for snapshots taken before Stage 2 keys existed.
+    """
+    s = snapshot or {}
+    legacy = s.get("pulse.min_labeled")
+    legacy = int(legacy) if legacy is not None else int(
+        DEFAULTS["pulse.min_labeled"])
+    out = {}
+    for key, name in _READINESS_KEYS:
+        value = s.get(key)
+        out[name] = int(value) if value is not None else legacy
+    return out

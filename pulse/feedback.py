@@ -13,6 +13,11 @@ Strict guardrails, no LLM, no I/O:
   recent capsules across tools. Older history is never relabeled.
 - fault isolation: callers wrap detection/association in try/except;
   :func:`apply_feedback` itself never raises and never logs raw text.
+
+This module is the SINGLE SOURCE for the explicit-feedback phrase table:
+``PrototypeStore.classify_feedback`` (pulse/prototypes.py) and the
+hot-path detector both consume ``FEEDBACK_RULES`` through
+:func:`detect_feedback`.
 """
 from __future__ import annotations
 
@@ -44,9 +49,33 @@ FEEDBACK_RULES: list[tuple[str, str]] = [
     ("friction", "that's wrong"),
     ("friction", "that is incorrect"),
     ("friction", "not fixed"),
+    # Explicit-complaint stems merged from the former prototypes table;
+    # the "frustrat" stem is expanded to full word forms so word-boundary
+    # matching keeps its coverage without mid-word hits.
+    ("friction", "wrong"),
+    ("friction", "terrible"),
+    ("friction", "horrible"),
+    ("friction", "useless"),
+    ("friction", "stupid"),
+    ("friction", "poor"),
+    ("friction", "annoying"),
+    ("friction", "waste"),
+    ("friction", "broken"),
+    ("friction", "bad"),
+    ("friction", "hate"),
+    ("friction", "redo"),
+    ("friction", "do it again"),
+    ("friction", "do not"),
+    ("friction", "don't"),
+    ("friction", "stop"),
+    ("friction", "failed"),
+    ("friction", "frustrated"),
+    ("friction", "frustrating"),
+    ("friction", "frustration"),
     # POSITIVE family.
     ("good", "thank you"),
     ("good", "thanks"),
+    ("good", "thank"),
     ("good", "that worked"),
     ("good", "it worked"),
     ("good", "that fixed it"),
@@ -62,6 +91,18 @@ FEEDBACK_RULES: list[tuple[str, str]] = [
     ("good", "spot on"),
     ("good", "perfect work"),
     ("good", "perfect job"),
+    # Standalone positives (formerly prototypes-only substrings).
+    ("good", "great"),
+    ("good", "perfect"),
+    ("good", "excellent"),
+    ("good", "brilliant"),
+    ("good", "awesome"),
+    ("good", "fantastic"),
+    ("good", "nice"),
+    ("good", "works great"),
+    ("good", "exactly what"),
+    ("good", "love it"),
+    ("good", "keep going"),
 ]
 
 # Pre-compiled word-boundary patterns, negative (friction) first.

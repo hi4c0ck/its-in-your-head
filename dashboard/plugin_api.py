@@ -372,6 +372,12 @@ def _settings_defaults():
             "observation.retain_days": 90,
             "pulse.prototype_cap": 8,
             "pulse.min_labeled": 3,
+            # Per-category readiness minimums (Stage 2 mirror of
+            # core.settings.DEFAULTS — None = fall back to min_labeled).
+            "pulse.goal_min_references": None,
+            "pulse.good_min_samples": None,
+            "pulse.user_friction_min_samples": None,
+            "pulse.objective_friction_min_samples": None,
             "pulse.thresholds.goal": 0.8,
             "pulse.thresholds.good": 0.6,
             "pulse.thresholds.friction": 0.4,
@@ -472,12 +478,29 @@ def _pulse_floor(value):
     return max(0.0, min(1.0, float(value)))
 
 
-def _pulse_level(value, threshold, state) -> str:
-    """matrix._level (mirror): a value never renders strong/weak for a
-    'learning' tool or a missing value."""
-    if value is None or state != "ready":
+def _pulse_level(value, threshold) -> str:
+    """matrix._level (mirror): score classification only — a computable
+    score keeps strong/weak even while provisional; only a missing
+    score is neutral (level is never forced neutral by state)."""
+    if value is None:
         return "neutral"
     return "strong" if value >= threshold else "weak"
+
+
+def _pulse_support(count, required) -> dict:
+    """matrix._support (mirror): evidence indicator (not a CI)."""
+    req = max(1, int(required))
+    ratio = min(1.0, int(count) / req)
+    return {"count": int(count), "required": req, "ratio": round(ratio, 4)}
+
+
+def _pulse_state(has_context, count, required) -> str:
+    """matrix._state (mirror): empty / learning / provisional / ready."""
+    if not has_context:
+        return "empty"
+    if not count:
+        return "learning"
+    return "ready" if count >= max(1, int(required)) else "provisional"
 
 
 # Momentum knobs — MIRROR of pulse/momentum.py (the child has the plugin
@@ -592,6 +615,15 @@ def _pulse_shape() -> dict:
     min_labeled = cur.get("pulse.min_labeled")
     min_labeled = int(min_labeled) if min_labeled is not None \
         else _PULSE_DEFAULT_MIN_LABELED
+    # Per-category readiness minimums: each falls back to the legacy
+    # pulse.min_labeled when unset (core.settings.readiness_thresholds).
+    def _required(key):
+        value = cur.get(key)
+        return int(value) if value is not None else min_labeled
+    goal_req = _required("pulse.goal_min_references")
+    good_req = _required("pulse.good_min_samples")
+    user_fric_req = _required("pulse.user_friction_min_samples")
+    obj_fric_req = _required("pulse.objective_friction_min_samples")
 
     rows = []
     # Momentum (Tier-0 positive feedback), mirrored inline: recent capsule
@@ -608,7 +640,9 @@ def _pulse_shape() -> dict:
         bank = banks.get(tool, {"good": [], "friction": [],
                                 "objective_friction": []})
         labeled = len(bank.get("good", ())) + len(bank.get("friction", ()))
+        # Legacy row projection (pre-Stage-2 semantics).
         state = "ready" if labeled >= min_labeled else "learning"
+        has_goal = goal_vector is not None
         reference = (bank.get("good", []) + bank.get("friction", [])
                      + bank.get("objective_friction", []))
         if not reference:
@@ -617,33 +651,70 @@ def _pulse_shape() -> dict:
                          if c.get("vector") is not None]
         goal_raw = _pulse_strongest(goal_vector, reference)
         goal_value = _pulse_floor(goal_raw)
+        goal_support = _pulse_support(len(reference), goal_req)
         goal_cell = {"value": goal_value,
-                     "state": "neutral" if goal_raw is None else state,
-                     "level": _pulse_level(goal_value,
-                                            thresholds["goal"], state)}
+                     "state": _pulse_state(has_goal, len(reference),
+                                          goal_req),
+                     "level": _pulse_level(goal_value, thresholds["goal"]),
+                     "support": goal_support,
+                     "support_count": goal_support["count"],
+                     "readiness_threshold": goal_support["required"]}
 
+        good_count = len(bank.get("good", []))
         good_raw = _pulse_strongest(goal_vector, bank.get("good", []))
         good_value = _pulse_floor(good_raw)
+        good_support = _pulse_support(good_count, good_req)
         good_cell = {"value": good_value,
-                     "state": "neutral" if good_raw is None else state,
-                     "level": _pulse_level(good_value,
-                                            thresholds["good"], state)}
+                     "state": _pulse_state(has_goal, good_count, good_req),
+                     "level": _pulse_level(good_value, thresholds["good"]),
+                     "support": good_support,
+                     "support_count": good_support["count"],
+                     "readiness_threshold": good_support["required"]}
 
+        user_count = len(bank.get("friction", []))
+        obj_count = len(bank.get("objective_friction", []))
         friction_user = _pulse_strongest(goal_vector,
                                          bank.get("friction", []))
         friction_obj = _pulse_strongest(goal_vector,
                                         bank.get("objective_friction", []))
-        friction_parts = [v for v in (friction_user, friction_obj)
-                          if v is not None]
-        friction_raw = max(friction_parts) if friction_parts else None
-        friction_value = _pulse_floor(friction_raw)
+        user_value = _pulse_floor(friction_user)
+        obj_value = _pulse_floor(friction_obj)
+        user_state = _pulse_state(has_goal, user_count, user_fric_req)
+        obj_state = _pulse_state(has_goal, obj_count, obj_fric_req)
+        user_support = _pulse_support(user_count, user_fric_req)
+        obj_support = _pulse_support(obj_count, obj_fric_req)
+        scored = []
+        if user_value is not None:
+            scored.append(("user", user_value, user_support["ratio"]))
+        if obj_value is not None:
+            scored.append(("objective", obj_value, obj_support["ratio"]))
+        dominant = None
+        friction_value = None
+        friction_state = _pulse_state(has_goal, 0, user_fric_req)
+        friction_support = _pulse_support(0, user_fric_req)
+        if scored:
+            # Greater score wins; tie -> greater support ratio;
+            # both equal -> user.
+            dominant, friction_value, _ratio = max(
+                scored, key=lambda s: (s[1], s[2], s[0] == "user"))
+            if dominant == "user":
+                friction_state, friction_support = user_state, user_support
+            else:
+                friction_state, friction_support = obj_state, obj_support
         friction_cell = {
             "value": friction_value,
-            "state": "neutral" if friction_raw is None else state,
-            "level": _pulse_level(friction_value,
-                                   thresholds["friction"], state),
-            "user": _pulse_floor(friction_user),
-            "objective": _pulse_floor(friction_obj),
+            "state": friction_state,
+            "level": _pulse_level(friction_value, thresholds["friction"]),
+            "user": user_value,
+            "objective": obj_value,
+            "dominant_source": dominant,
+            "user_state": user_state,
+            "objective_state": obj_state,
+            "user_support": user_support,
+            "objective_support": obj_support,
+            "support": friction_support,
+            "support_count": friction_support["count"],
+            "readiness_threshold": friction_support["required"],
         }
 
         rows.append({

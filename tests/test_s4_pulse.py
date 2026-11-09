@@ -151,9 +151,14 @@ def test_empty_good_bank_is_neutral_not_negative(registry, backend):
     rows = build_matrix(registry, PrototypeStore(),
                         goal_text="hello there", backend=backend)
     good = rows[0]["good"]
+    # Stage 2 per-cell readiness: goal context present, no GOOD evidence
+    # -> learning (value None, level neutral); never negative/red.
     assert good["value"] is None
-    assert good["state"] == "neutral"
+    assert good["state"] == "learning"
     assert good["level"] == "neutral"
+    assert good["support"] == {"count": 0, "required": 3, "ratio": 0.0}
+    assert good["support_count"] == 0
+    assert good["readiness_threshold"] == 3
 
 
 def test_friction_only_from_labeled_or_objective(registry, backend):
@@ -189,6 +194,16 @@ def test_positive_feedback_labels_good(backend):
     assert classify_feedback("Thanks, perfect work!") == "good"
     assert classify_feedback("that was wrong and broken") == "friction"
     assert classify_feedback("hmm, interesting") is None
+    # Unified table (pulse.feedback.FEEDBACK_RULES is single source):
+    # standalone positives match through the detector's word boundaries.
+    assert classify_feedback("great") == "good"
+    assert classify_feedback("perfect") == "good"
+    assert classify_feedback("excellent") == "good"
+    # Negative precedence across the merged table.
+    assert classify_feedback("good job but still broken") == "friction"
+    assert classify_feedback("brilliant, totally useless") == "friction"
+    # Long utterances (>12 words) are never labeled.
+    assert classify_feedback("thank you " + "please " * 12) is None
     assert store.record_feedback("read_file", cap, "great job, thank you") == "good"
     assert len(store.bank("read_file")["good"]) == 1
 
@@ -219,9 +234,14 @@ def test_unlabeled_stays_learning_until_min_labeled(registry, backend):
 def test_goal_neutral_without_goal_vector(registry):
     registry.observe_start("terminal")
     rows = build_matrix(registry, PrototypeStore())
+    # No evaluation context (no goal vector) -> empty, value None.
     assert rows[0]["goal"]["value"] is None
+    assert rows[0]["goal"]["state"] == "empty"
     assert rows[0]["goal"]["level"] == "neutral"
+    assert rows[0]["good"]["state"] == "empty"
     assert rows[0]["friction"]["value"] is None
+    assert rows[0]["friction"]["state"] == "empty"
+    assert rows[0]["friction"]["dominant_source"] is None
 
 
 def test_live_merges_session_state_snapshot(registry):

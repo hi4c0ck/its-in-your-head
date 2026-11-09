@@ -137,9 +137,17 @@ def test_pulse_fallback_serves_db_rows_when_engine_unavailable(agent_env,
     # never render as USER friction.
     assert rows["terminal"]["friction"]["objective"] is not None
     assert rows["terminal"]["friction"]["user"] is None
-    # Empty-bank neutral rule: no labelled friction on read_file.
+    # Empty-bank readiness: no labelled friction on read_file -> the
+    # friction cell is learning (goal context present, no evidence),
+    # value None, level neutral.
     assert rows["read_file"]["friction"]["value"] is None
-    assert rows["read_file"]["friction"]["state"] == "neutral"
+    assert rows["read_file"]["friction"]["state"] == "learning"
+    assert rows["read_file"]["friction"]["user_state"] == "learning"
+    assert rows["read_file"]["friction"]["objective_state"] == "learning"
+    # GOOD per-cell: one labelled sample -> provisional, level visible.
+    assert rows["read_file"]["good"]["support"]["count"] == 1
+    assert rows["read_file"]["good"]["state"] == "provisional"
+    assert rows["read_file"]["good"]["level"] in ("weak", "strong")
 
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

@@ -24,34 +24,18 @@ DEFAULT_MIN_LABELED = 3
 
 OBJECTIVE_STATUSES = frozenset({"error", "timeout", "failed", "failure"})
 
-_POSITIVE = (
-    "thank", "great", "perfect", "good job", "well done", "nice",
-    "excellent", "brilliant", "exactly what", "works great",
-    "love it", "awesome", "fantastic", "keep going", "spot on",
-    "thanks", "that worked", "it worked", "fixed it", "that fixed it",
-    "that did it", "that did the trick", "great work", "great job",
-    "nice work", "nice job", "perfect work", "perfect job",
-)
-_NEGATIVE = (
-    "wrong", "bad", "terrible", "broken", "useless", "horrible",
-    "stupid", "hate", "poor", "redo", "do it again", "don't",
-    "do not", "stop", "failed", "doesn't work", "not working",
-    "waste", "annoying", "frustrat",
-    "still broken", "still failing", "still not working",
-    "did not work", "does not work", "it failed", "not fixed",
-)
-
 
 def classify_feedback(text) -> str | None:
-    """Explicit feedback only. Returns 'good' | 'friction' | None."""
-    if not isinstance(text, str):
-        return None
-    t = text.casefold()
-    if any(p in t for p in _NEGATIVE):
-        return "friction"
-    if any(p in t for p in _POSITIVE):
-        return "good"
-    return None
+    """Explicit feedback only. Returns 'good' | 'friction' | None.
+
+    The phrase table lives in ``pulse.feedback.FEEDBACK_RULES`` (single
+    source): this delegates to ``detect_feedback`` so both the hot-path
+    detector and this classifier share one table and one set of
+    guardrails (12-word max, negative precedence, word boundaries).
+    """
+    from .feedback import detect_feedback
+
+    return detect_feedback(text)
 
 
 def cosine(a, b) -> float:
@@ -75,9 +59,24 @@ def strongest_similarity(vector, bank) -> float | None:
 
 class PrototypeStore:
     def __init__(self, cap: int = DEFAULT_PROTOTYPE_CAP,
-                 min_labeled: int = DEFAULT_MIN_LABELED):
+                 min_labeled: int = DEFAULT_MIN_LABELED,
+                 goal_min_references=None,
+                 good_min_samples=None,
+                 user_friction_min_samples=None,
+                 objective_friction_min_samples=None):
         self.cap = max(1, int(cap))
         self.min_labeled = max(1, int(min_labeled))
+        # Per-category readiness minimums (PULSE Stage 2). Each falls
+        # back to the legacy min_labeled when unset (None), so old
+        # call sites (engine, tests) keep working unchanged.
+        def _resolve(value):
+            return max(1, int(value if value is not None
+                              else self.min_labeled))
+        self.goal_min_references = _resolve(goal_min_references)
+        self.good_min_samples = _resolve(good_min_samples)
+        self.user_friction_min_samples = _resolve(user_friction_min_samples)
+        self.objective_friction_min_samples = _resolve(
+            objective_friction_min_samples)
         self._lock = threading.Lock()
         self._banks: dict[str, dict[str, list]] = {}
         # Cross-process bridge: tools whose banks changed since the last
@@ -158,6 +157,24 @@ class PrototypeStore:
         tracked separately and does not count toward min_labeled."""
         bank = self.bank(tool)
         return len(bank["good"]) + len(bank["friction"])
+
+    def bank_counts(self, tool: str) -> dict:
+        """Independent per-bank evidence counts (never summed across
+        sources: user FRICTION and objective FRICTION are separate)."""
+        bank = self.bank(tool)
+        return {"good": len(bank["good"]),
+                "friction": len(bank["friction"]),
+                "objective_friction": len(bank["objective_friction"])}
+
+    def readiness_required(self, category: str) -> int:
+        """Required evidence count for one readiness category."""
+        table = {"goal": self.goal_min_references,
+                 "good": self.good_min_samples,
+                 "user_friction": self.user_friction_min_samples,
+                 "objective_friction": self.objective_friction_min_samples}
+        if category not in table:
+            raise ValueError(f"unknown readiness category {category!r}")
+        return table[category]
 
     def state(self, tool: str) -> str:
         return "ready" if self.labeled_count(tool) >= self.min_labeled \
