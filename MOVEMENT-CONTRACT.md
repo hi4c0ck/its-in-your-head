@@ -1,4 +1,4 @@
-# MOVEMENT-CONTRACT.md — template-owned portrait motion (Stage 2 of 5)
+# MOVEMENT-CONTRACT.md — template-owned portrait motion (Stage 3 of 5)
 
 Owner: lane-d (`desktop/`), settled by the parent run.
 Governing doc: the 5-stage "Portrait Motion System" upgrade design (owner-pasted,
@@ -11,7 +11,7 @@ contract says, and what the remaining stages must do.
 |-------|-------|-------|
 | 1 | Fix the movement contract + widen ranges + 48px visibility measurements | **DONE** |
 | 2 | Alias compiler: engine emits normalized semantic axes; templates declare axis→feature aliases, response curves, sensitivity (no mandatory universal aliases) | **DONE** |
-| 3 | Head-movement parts: template-declared parts, coordinated transforms, trajectories, allowed regions | pending |
+| 3 | Head-movement parts: template-declared parts, coordinated transforms, trajectories, allowed regions | **DONE** |
 | 4 | Template renderer: each template renders its own visual language at studio AND compact sizes (compact currently shares the studio builder) | pending |
 | 5 | Tuner upgrade: pixel-level checks (image diff between adjacent steps) in the browser, per-template calibration UI | pending |
 
@@ -78,7 +78,8 @@ contract says, and what the remaining stages must do.
   and prints the engine sha; a stale HTML prints an old one).
 - Tests: `node tests/test_desktop_48px_visibility.mjs` (contract +
   48px), `node tests/test_desktop_alias_compiler.mjs` (alias graph,
-  Stage 2), `node tests/test_desktop_motion_grammar.mjs` (grammar),
+  Stage 2), `node tests/test_desktop_head_parts.mjs` (coordinated
+  parts, Stage 3), `node tests/test_desktop_motion_grammar.mjs` (grammar),
   `node tests/test_desktop_portrait_engine.mjs` (routes/state),
   `py -3.12 -m pytest tests/ -q` (perception lane).
 
@@ -119,3 +120,48 @@ Templates may now author their own **axis → group → feature** graph:
 - Both glyph and studio builders now read `expressionFor(model,
   template)` instead of `model.expression`; `model.expression` stays
   available for legacy consumers.
+
+## Head-movement parts (Stage 3)
+
+Templates declare **coordinated parts** — head, jaw, shoulders, hair
+mass — that move as transforms, not isolated vertex nudges:
+
+```js
+registerPortraitTemplate({
+  ...,
+  parts: {
+    jaw: {
+      tx: { mouthTension: 0.5 },        // feature-motion channel weights
+      ty: { mouthLift: 0.6 },           // (movementFor output)
+      region:  { x, y, w, h, clearance }, // safe box in template space,
+                                          // stroke clearance respected
+      envelope: { x: 0.6, y: 0.7, r: 7 },// fractions of the
+                                          // clearance-reduced half-extents
+      traverse: { period: 3.2, phase: 0.4, amplitude: 1.5,
+                  alias: { warmth: 0.5 } }, // Stage 2 alias groups bias
+                                          // the traversal cloud spread
+    },
+  },
+})
+```
+
+- `partStateFor(model, templateId, t)` — pure, deterministic part
+  states at local clock time `t` (the caller owns the clock; the engine
+  owns none — a process restart returns to neutral). Part state =
+  Σ channel weights × feature motion + traversal term
+  `amp·(sin(θ) − sin(φ))` (exactly 0 at t = 0), clamped into
+  region × envelope.
+- **Coordination:** one channel drives several parts at their own
+  weights (headTilt → head 1.0, shoulders 0.3, hair 0.4); parts
+  respond to multiple channels. Different parts run different tempos.
+- **Safety:** `partSafetyReport(templateId)` sweeps every axis
+  extreme × the full traversal period and verifies all sampled states
+  stay inside the declared region × envelope (the clamp guarantees
+  this by construction; the audit is the regression check).
+- **Migration safety:** a template that declares no parts gets an
+  EMPTY part layer — renderers stay byte-identical to pre-Stage-3.
+  `neutral-pencil` and `angular-pencil` now declare head/jaw/
+  shoulders/hair_mass (angular gives the jaw more of the cloud);
+  `soft-flow-study` stays legacy.
+- Renderers CONSUME part states in Stage 4 — until then the part
+  layer is machinery + declarations only, and no pixels move.

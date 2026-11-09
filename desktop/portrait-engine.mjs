@@ -220,6 +220,67 @@ const STUDIO_MOVEMENT = Object.freeze({
   }),
 });
 
+// Stage 3 — template-declared head-movement parts for the two studio
+// constructions. Coordinates: the face is built in the 720×760 space
+// (head pivot 360/350, mouth cloud ~330–400/455–480, shoulders below
+// the crop); regions are safe boxes in that space, envelopes are
+// fractions of the clearance-reduced half-extents. Traversal tempos
+// differ per part — coordinated, not synchronized.
+const NEUTRAL_PARTS = Object.freeze({
+  head: {
+    rot: { headTilt: 1.0 },                     // reference frame: tilt only
+    region: { x: 260, y: 250, w: 200, h: 200, clearance: 8 },
+    envelope: { x: 0, y: 0, r: 7 },
+  },
+  jaw: {
+    tx: { mouthTension: 0.5 },                  // coordinated: tension drags corners
+    ty: { mouthLift: 0.6 },                     // and lift carries the cloud
+    region: { x: 300, y: 430, w: 120, h: 70, clearance: 6 },
+    envelope: { x: 0.6, y: 0.7 },
+    traverse: { period: 3.2, phase: 0.4, amplitude: 1.5, alias: { warmth: 0.5 } },
+  },
+  shoulders: {
+    rot: { headTilt: 0.3 },                     // counter-tilt, restrained
+    region: { x: 200, y: 540, w: 320, h: 110, clearance: 10 },
+    envelope: { x: 0.3, y: 0.25, r: 3 },
+    traverse: { period: 4.6, phase: 2.1, amplitude: 2.0 },
+  },
+  hair_mass: {
+    tx: { contourDrift: 0.5 },
+    rot: { headTilt: 0.4 },
+    region: { x: 240, y: 90, w: 240, h: 150, clearance: 6 },
+    envelope: { x: 0.5, y: 0.4, r: 4 },
+    traverse: { period: 5.2, phase: 4.0, amplitude: 2.5, alias: { focus: -0.4 } },
+  },
+});
+const ANGULAR_PARTS = Object.freeze({
+  head: {
+    rot: { headTilt: 1.0 },
+    region: { x: 260, y: 250, w: 200, h: 200, clearance: 8 },
+    envelope: { x: 0, y: 0, r: 7 },
+  },
+  jaw: {
+    tx: { mouthTension: 0.8 },                  // angular style: the jaw
+    ty: { mouthLift: 0.8 },                     // owns more of the cloud
+    region: { x: 300, y: 430, w: 120, h: 70, clearance: 6 },
+    envelope: { x: 0.75, y: 0.75 },
+    traverse: { period: 2.8, phase: 1.1, amplitude: 1.8, alias: { focus: 0.6 } },
+  },
+  shoulders: {
+    rot: { headTilt: 0.25 },
+    region: { x: 200, y: 540, w: 320, h: 110, clearance: 10 },
+    envelope: { x: 0.3, y: 0.25, r: 3 },
+    traverse: { period: 5.0, phase: 0.2, amplitude: 1.8 },
+  },
+  hair_mass: {
+    tx: { contourDrift: 0.4 },
+    rot: { headTilt: 0.5 },
+    region: { x: 240, y: 90, w: 240, h: 150, clearance: 6 },
+    envelope: { x: 0.4, y: 0.35, r: 4 },
+    traverse: { period: 4.2, phase: 3.3, amplitude: 2.2 },
+  },
+});
+
 function normalizeMovement(movement, fallback) {
   if (!movement || typeof movement !== 'object') return fallback;
   const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -513,6 +574,172 @@ function expressionFor(model, templateId) {
     out[feat] = v;
   }
   return Object.freeze(out);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Stage 3 — Head-movement parts (template-declared, coordinated)
+//
+// A template declares NAMED PARTS (head, jaw, shoulders, hair mass, a
+// mouth cloud, …) that move as coordinated transforms rather than
+// isolated vertex nudges. Each part's state at local clock time `t`
+// (seconds, caller-supplied — the engine owns no clock, so a process
+// restart returns to neutral) is:
+//
+//   Σ (channel weight × feature-motion value)     — movementFor output
+//   + deterministic TRAVERSAL term                — local idle rhythm
+//       amplitude × sin/cos(2π·t/period + phase)
+//       where the cloud's spread is biased by the template's alias
+//       groups (Stage 2): amp × (1 + Σ w·alias), clamped ≥ 0
+//
+// and the result is clamped into the part's declared SAFE REGION ×
+// envelope fraction (clearance stroke-aware). Legacy templates
+// declare no parts → partStateFor returns {} → renderers are
+// byte-identical to pre-Stage-3.
+// ─────────────────────────────────────────────────────────────────────
+const EMPTY_PARTS = Object.freeze({});
+
+function normalizeParts(decl) {
+  if (!decl || typeof decl !== 'object') return EMPTY_PARTS;
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const weights = (spec) => Object.freeze(Object.fromEntries(
+    Object.entries(spec && typeof spec === 'object' ? spec : {})
+      .map(([k, w]) => [String(k), num(w)])));
+  const out = {};
+  for (const pid of Object.keys(decl)) {
+    const p = decl[pid] && typeof decl[pid] === 'object' ? decl[pid] : {};
+    const trav = p.traverse && typeof p.traverse === 'object' ? p.traverse : {};
+    const reg = p.region && typeof p.region === 'object' ? p.region : {};
+    const env = p.envelope && typeof p.envelope === 'object' ? p.envelope : {};
+    out[pid] = Object.freeze({
+      // feature-motion channel weight maps (keys are movementFor channels:
+      // gazeDX/gazeDY/brow/eyeOpen/mouthLift/mouthTension/headTilt/
+      // contourDrift/pressure)
+      tx: weights(p.tx),
+      ty: weights(p.ty),
+      rot: weights(p.rot),
+      // alias-group spread bias for the traversal cloud (Stage 2 graph):
+      // { <alias-or-group>: weight } — scales the cloud, never the region
+      spread: weights(trav.alias),
+      traverse: Object.freeze({
+        period: num(trav.period) > 0 ? num(trav.period) : 0,
+        phase: num(trav.phase),
+        amplitude: num(trav.amplitude),
+      }),
+      // safe region in the template's own coordinate space:
+      region: Object.freeze({
+        x: num(reg.x), y: num(reg.y),
+        w: num(reg.w) > 0 ? num(reg.w) : 0,
+        h: num(reg.h) > 0 ? num(reg.h) : 0,
+        clearance: num(reg.clearance),
+      }),
+      // envelope: fractions of the (region − 2·clearance) half-extents;
+      // r = max rotation in degrees
+      envelope: Object.freeze({
+        x: num(env.x) > 0 ? num(env.x) : 0,
+        y: num(env.y) > 0 ? num(env.y) : 0,
+        r: Math.abs(num(env.r)),
+      }),
+    });
+  }
+  return Object.freeze(out);
+}
+
+function _partSum(weights, m) {
+  let v = 0;
+  for (const [ch, w] of Object.entries(weights)) v += (Number(m[ch]) || 0) * w;
+  return v;
+}
+
+function _travTerm(spec, e, ts, phaseOffset) {
+  const { period, phase, amplitude } = spec.traverse;
+  if (!period || !amplitude || ts <= 0) return 0;
+  // Cloud spread biased by the template's alias groups (Stage 2): the
+  // bias scales the traversal, it never moves a point outside the
+  // region — the clamp below is the hard boundary.
+  let bias = 1;
+  for (const [alias, w] of Object.entries(spec.spread)) bias += (Number(e[alias]) || 0) * w;
+  const amp = Math.max(0, amplitude * bias);
+  const off = phaseOffset || 0;
+  // sin(θ + φ + off) − sin(φ + off): exactly 0 at t = 0 for ANY phase
+  // offset (rest invariance — a process restart returns to neutral),
+  // then a smooth traversal through the cloud. y passes a π/2 offset
+  // so x and y lead each other by a quarter period (Lissajous).
+  return amp * (Math.sin((2 * Math.PI * ts) / period + phase + off) - Math.sin(phase + off));
+}
+
+/**
+ * Deterministic part states for one template at local clock time `t`.
+ * No parts declared → empty frozen object (legacy byte-identity).
+ */
+function partStateFor(model, templateId, t = 0) {
+  const entry = portraitTemplates.get(safeTemplateId(String(templateId || DEFAULT_PORTRAIT_TEMPLATE)));
+  if (!entry || !entry.parts || !Object.keys(entry.parts).length) return EMPTY_PARTS;
+  const m = movementFor(model, entry.id);
+  const e = expressionFor(model, entry.id);
+  const ts = Number.isFinite(Number(t)) ? Number(t) : 0;
+  const out = {};
+  for (const [pid, spec] of Object.entries(entry.parts)) {
+    const halfW = Math.max(0, (spec.region.w - 2 * spec.region.clearance) / 2) * spec.envelope.x;
+    const halfH = Math.max(0, (spec.region.h - 2 * spec.region.clearance) / 2) * spec.envelope.y;
+    const clamp1 = (v, lim) => Math.max(-lim, Math.min(lim, v));
+    out[pid] = Object.freeze({
+      dx: clamp1(_partSum(spec.tx, m) + _travTerm(spec, e, ts), halfW),
+      dy: clamp1(_partSum(spec.ty, m) + _travTerm(spec, e, ts, Math.PI / 2), halfH),
+      rot: clamp1(_partSum(spec.rot, m), spec.envelope.r),
+    });
+  }
+  return Object.freeze(out);
+}
+
+/**
+ * Deterministic safety audit: sweep each part across axis extremes and
+ * its full traversal period; every sampled state must sit inside the
+ * declared region × envelope. (The clamp guarantees this by
+ * construction — the audit is the regression check that the weights
+ * were declared sanely.)
+ */
+function partSafetyReport(templateId) {
+  const tid = safeTemplateId(String(templateId || DEFAULT_PORTRAIT_TEMPLATE));
+  const entry = portraitTemplates.get(tid);
+  if (!entry) {
+    const available = listPortraitTemplates().map((x) => x.id).join(', ');
+    throw new RangeError(`Unknown portrait template "${tid}". Available: ${available}`);
+  }
+  if (!entry.parts || !Object.keys(entry.parts).length) {
+    return Object.freeze({ pass: true, parts: 0, samples: 0, note: 'no parts declared' });
+  }
+  const samples = [];
+  let violations = 0;
+  const dims = PORTRAIT_DIMENSIONS;
+  // one axis at a time at ±1 (rest others at 0.5) × traversal quarter
+  for (const dim of dims) {
+    for (const value of [0, 1]) {
+      const user = Object.fromEntries(dims.map((d) => [d, 0.5]));
+      user[dim] = value;
+      const model = buildPortraitModel({ available: true, user, confidence: {} });
+      for (const specKey of Object.keys(entry.parts)) {
+        const spec = entry.parts[specKey];
+        const period = spec.traverse.period || 4;
+        for (const frac of [0, 0.25, 0.5, 0.75]) {
+          const st = partStateFor(model, tid, frac * period)[specKey];
+          const halfW = Math.max(0, (spec.region.w - 2 * spec.region.clearance) / 2) * spec.envelope.x;
+          const halfH = Math.max(0, (spec.region.h - 2 * spec.region.clearance) / 2) * spec.envelope.y;
+          const inside = Math.abs(st.dx) <= halfW + 1e-9
+            && Math.abs(st.dy) <= halfH + 1e-9
+            && Math.abs(st.rot) <= spec.envelope.r + 1e-9;
+          samples.push({ part: specKey, dim, value, frac, dx: st.dx, dy: st.dy, rot: st.rot });
+          if (!inside) violations += 1;
+        }
+      }
+    }
+  }
+  return Object.freeze({
+    pass: violations === 0,
+    parts: Object.keys(entry.parts).length,
+    samples: samples.length,
+    violations,
+    sample: samples,
+  });
 }
 
 function liveControls(data = {}) {
@@ -919,6 +1146,9 @@ function registerPortraitTemplate(definition, { replace = false } = {}) {
     // Template-owned alias graph (axis→group→feature). Absent means the
     // default alias set, which reproduces the legacy expression exactly.
     aliases: normalizeAliases(definition.aliases, DEFAULT_ALIASES),
+    // Stage 3: coordinated head-movement parts (absent = legacy, no
+    // part layer — renderers stay byte-identical).
+    parts: normalizeParts(definition.parts),
   });
   portraitTemplates.set(id, entry);
   return () => {
@@ -1334,6 +1564,10 @@ registerPortraitTemplate({
   // Template-owned movement: feature-relative travel bands sized for 48px
   // visibility, safe regions bound to this face construction.
   movement: STUDIO_MOVEMENT,
+  // Stage 3: coordinated head-movement parts. Head is the reference
+  // frame (rotation only); jaw/shoulders/hair move with their own
+  // tempos and spread clouds, all clamped to safe regions.
+  parts: NEUTRAL_PARTS,
 });
 registerPortraitTemplate({
   id: 'angular-pencil',
@@ -1341,6 +1575,8 @@ registerPortraitTemplate({
   description: 'A more angular jaw and stronger brow construction; an artistic style, not a gender label.',
   render: renderAngular,
   movement: STUDIO_MOVEMENT,
+  // Stage 3: same coordinated part vocabulary, stronger jaw authority.
+  parts: ANGULAR_PARTS,
 });
 registerPortraitTemplate({
   id: 'soft-flow-study',
@@ -1403,5 +1639,8 @@ return Object.freeze({
   ALIAS_CURVES,
   DEFAULT_ALIASES,
   expressionFor,
+  // Head-movement parts (Stage 3 — template-declared, coordinated):
+  partStateFor,
+  partSafetyReport,
 })
 })()
