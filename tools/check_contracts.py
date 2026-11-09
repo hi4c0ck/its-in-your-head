@@ -33,6 +33,7 @@ OWNERSHIP = {                                                 # C7
                "tests/test_s7_"},
     "lane-d": {"desktop/", "tests/test_desktop_"},
     "parent": {"plugin.yaml", "CONTRACTS.md", "MOVEMENT-CONTRACT.md",
+               "PORTRAIT-AUTHORING.md",
                "tools/check_contracts.py", "tools/build-inline-engine.mjs",
                "tests/test_structure.py", "tests/acceptance/"},
 }
