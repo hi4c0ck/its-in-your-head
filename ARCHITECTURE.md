@@ -5,7 +5,10 @@ structure, contracts, manifest, test harness, and install wiring; the
 functional slots below are IMPLEMENTED — v0.1.0 skeleton, v0.1.1 hardening
 (P0 migration, P1 perception wiring + desktop semantic views + ONNX variant
 split + context detection), v0.1.2 maintenance (PULSE LIVE column, drift
-durability, explicit ONNX repin, in-flight-aware flush). See git log per slot
+durability, explicit ONNX repin, in-flight-aware flush), v0.1.9 PULSE &
+Surface Redesign (restart hydration, per-cell readiness, four independent
+lanes + additive v2 envelope, measured bottom-bar/sidebar compositions,
+bubble-arrival transition). See git log per slot
 — the "owner slot" framing is retained only as a change-ownership map, not a
 TODO list. Official references:
 - https://hermes-agent.nousresearch.com/docs/developer-guide/plugins
@@ -33,7 +36,8 @@ its-in-your-head/               # unified package = one installable folder = OSS
 |                                 # fp32 optional; revision + sha256 + sizes) and the isolated worker project
 +-- desktop/
 |   +-- plugin.js               # desktop half: 96px strip pane, semantic PULSE/PORTRAIT/DRIFT views
-|                                 # (PULSE matrix: LIVE first column; theme vars; petstate; polling + onEvent)
+|                                 # (PULSE: four independent lanes in measured bottom-bar/sidebar
+|                                 # compositions; v2 bubble transition; theme vars; petstate; polling + onEvent)
 +-- pulse/ + storage/           # prototype store + deterministic feedback detector (pulse/feedback.py)
 |                                 # + WAL SQLite layer (schema v3: idempotent migrate(), portrait_history)
 +-- tests/                      # full suite (contract + behavior + desktop node checks), CI-gated
@@ -122,24 +126,39 @@ its-in-your-head/               # unified package = one installable folder = OSS
   exposed on /portrait via the additive `perception` key and rendered as the
   Perception section inside the expanded portrait view (no new surface).
 - **Desktop** (`desktop/plugin.js`): 96px strip pane with semantic views —
-  PULSE (activity matrix: columns LIVE / GOAL / GOOD / FRICTION, dynamic tool
-  rows; the pane is constrained + informative by design). Semantic cells
-  render DISCRETE, not as a continuous heatmap: goal/good/friction map to the
-  server's `cell.level` via `pulseBand` (empty / weak / strong — the ramp was
-  retired because a continuous fill blurred "weak" into "empty" and let a
-  count read like a strong similarity). `buildPulseVerdict` adds a word-only
-  verdict (no digits; a single top-row token in compact, up to 3 clauses when
-  expanded). LIVE is kept honest as ACTIVITY, not a 5th similarity cell: its
-  count-squash alpha is capped (0.55, below the 0.85 strong-band ceiling), a
-  hairline separator splits the LIVE column from the similarity group, and the
-  expanded view shows the RAW call count under a LIVE·CALLS header. Recency
-  (`pulseRecency`, pure — takes `nowSec` in, never reads the clock) reads the
-  freshness of the NOW snapshot from `last_seen` (a word: now / recent / today
-  / stale; honest "no activity yet" when unseen) — visible in the expanded
-  view, hover-tooltip only in the compact lane so the 48px lane stays
-  constrained. The PULSE/DRIFT split is explicit: PULSE owns the NOW snapshot
-  (activity + similarity + freshness); DRIFT owns multi-point history/trend
-  (portrait-tab sparklines) and PULSE gains no sparkline/delta.
+  PULSE (v0.1.9 redesign): four INDEPENDENT lanes — LIVE (freshness /
+  activity / momentum: surging / steady / cooling), GOAL (goal-vector
+  similarity + reference support), GOOD (GOOD-prototype similarity +
+  support), FRICTION (user + objective evidence, sources kept distinct) —
+  each lane ranks its OWN tools (no global row ordering, no separate tool
+  name rail); equal-width lanes (repeat(4, minmax(0,1fr))). Every visible
+  cell owns its own truncated tool name + a compact dot-matrix evaluation
+  (quiet, no large score numerals, no rainbow gradients; support is a
+  secondary treatment, never the score); empty slots stay empty. Cells
+  carry per-cell readiness (empty / learning / provisional / ready —
+  thresholds gate confidence, not visibility; low-sample results stay
+  visible as provisional). A meaningful evaluation change (value/level/rank
+  above the backend hysteresis threshold) runs the bubble-arrival
+  transition: two-identity model (semantic metric|tool + visual
+  metric|slotIndex), staged commits (old name stays in the slot until
+  arrival, then a short arrival flash), bounded transition coordinator
+  (supersede / retarget / coalescing under a named cap, re-measure or
+  cancel on resize, reduced-motion commits immediately, first hydration is
+  always static). Composition is measured, not fixed: the 96px bottom strip
+  keeps the current registration (user-resizable initial claim); at narrow
+  viewport a right-zone sidebar pane is auto-selected (measured pane box +
+  host.state.viewport atom, feature-detected for older hosts). The /pulse
+  API serves an ADDITIVE v2 envelope (schema_version 2, lane_order,
+  lanes{live,goal,good,friction}) next to the legacy rows/columns —
+  byte-compatible, never omitted. The expanded inspection keeps
+  `buildPulseVerdict` (word-only verdict, no digits) and `pulseRecency`
+  (pure — takes `nowSec` in, never reads the clock; now / recent / today /
+  stale from `last_seen`); the legacy band-ramp helpers (`pulseBand` et
+  al.) remain for the legacy-rows fallback path and the expanded
+  projection. The PULSE/DRIFT split is explicit: PULSE owns the NOW
+  snapshot (activity + similarity + freshness + momentum); DRIFT owns
+  multi-point history/trend (portrait-tab sparklines) and PULSE gains no
+  sparkline/delta.
   PORTRAIT (six dimensions + trend), DRIFT (history; honestly "no drift data
   yet" when empty). Theme vars resolved once via getComputedStyle, canvas
   ResizeObserver, `host.onEvent` live path + mandatory polling fallback.
