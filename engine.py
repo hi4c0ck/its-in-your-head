@@ -108,6 +108,18 @@ class Engine:
         # restart) — never at Engine construction/register time.
         self._history_loaded = False
         self.goal_text: str | None = None
+        # Hydrated goal vector + metadata (derived vector only, never raw
+        # text). Set from _on_user_turn or from hydration; pulse_view
+        # prefers it over re-encoding goal_text so the restored view
+        # matches the DB-fallback view.
+        self._goal_vector = None
+        self._goal_ts = None
+        self._goal_backend = None
+        # PULSE hydration (Stage 1): lazy one-time restore from the
+        # active profile's DB. _pulse_hydrated guards duplicate loads;
+        # _pulse_hydration_lock serializes concurrent first reads.
+        self._pulse_hydrated = False
+        self._pulse_hydration_lock = threading.Lock()
         # Interpreted-track (agent/reasoning) evidence bookkeeping:
         # counts reasoning_seg updates that actually landed, so
         # /portrait can evidence-gate the agent track separately from
@@ -192,6 +204,72 @@ class Engine:
                 self._backend_name = name
                 self._backend = _encoder.create_backend(None, name)
             return self._backend
+
+    # -- PULSE lazy hydration (Stage 1) ------------------------------------ #
+    def ensure_pulse_hydrated(self) -> None:
+        """Lazy ONE-TIME hydration of PULSE learning state from the
+        active profile's DB: prototype banks (good / friction /
+        objective_friction), recent capsules, latest goal vector +
+        metadata. Public ensure/restore entry point invoked by both
+        pulse_view and the collector feedback-association path before
+        their work (feedback may arrive before the first dashboard
+        read). Concurrency-guarded: concurrent first calls load once.
+        Explicit reset sets _pulse_hydrated=True so post-reset state
+        stays empty. Never raises; never called from on_tool_start
+        (sync tool-start hot path stays I/O-free).
+        """
+        if self._pulse_hydrated:
+            return
+        with self._pulse_hydration_lock:
+            if self._pulse_hydrated:
+                return
+            self._pulse_hydrated = True  # guard first: no retry loops
+            try:
+                state = _pulse_persist.load_pulse_state()
+            except Exception:
+                logger.exception(
+                    "its-in-your-head: pulse hydration failed")
+                return
+            try:
+                # Banks: merge, skipping vectors already present (a
+                # tool_end persisted before hydration must not duplicate).
+                for tool, banks in (state.get("banks") or {}).items():
+                    existing = self.protos.bank(tool)
+                    for label, vecs in banks.items():
+                        for vec in vecs or []:
+                            if vec not in existing.get(label, []):
+                                self.protos.add(tool, vec, label)
+                    self.protos.mark_clean(tool)
+                # Capsules: merge, skipping (tool, ts, vector) duplicates.
+                with self._lock:
+                    for tool, caps in (state.get("capsules") or {}).items():
+                        dq = self._capsules.setdefault(
+                            str(tool), deque(maxlen=CAPSULES_PER_TOOL))
+                        seen = {(c.get("ts"), tuple(c.get("vector") or ()))
+                                for c in dq if isinstance(c, dict)}
+                        for cap in caps or []:
+                            vec = cap.get("vector")
+                            if vec is None:
+                                continue
+                            key = (cap.get("ts"), tuple(vec))
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            dq.append({"vector": list(vec),
+                                       "ts": cap.get("ts"),
+                                       "tool_name": str(tool)})
+                if self._goal_vector is None and \
+                        state.get("goal_vector") is not None:
+                    self._goal_vector = list(state["goal_vector"])
+                    self._goal_ts = state.get("goal_ts")
+                    self._goal_backend = state.get("goal_backend")
+            except Exception:
+                logger.exception(
+                    "its-in-your-head: pulse hydration merge failed")
+
+    def ensure_restored(self) -> None:
+        """Alias of ensure_pulse_hydrated (public restore entry)."""
+        self.ensure_pulse_hydrated()
 
     # -- hot path (pre_tool_call, sync, no inference) --------------------- #
     def on_tool_start(self, event: dict) -> dict:
@@ -747,6 +825,9 @@ class Engine:
             try:
                 goal_vector = pulse.activity_encoder.encode_goal_text(
                     text, self._get_backend())
+                self._goal_vector = list(goal_vector) if goal_vector else None
+                self._goal_ts = ev.get("ts")
+                self._goal_backend = self._backend_name
                 _pulse_persist.persist_goal_vector(
                     goal_vector, ts=ev.get("ts"),
                     backend=self._backend_name)
@@ -1044,6 +1125,7 @@ class Engine:
             return {t: list(dq) for t, dq in self._capsules.items()}
 
     def pulse_view(self) -> dict:
+        self.ensure_pulse_hydrated()
         thr = {k: v for k, v in self._thresholds.items() if v is not None}
         capsules = None
         with self._lock:
@@ -1052,6 +1134,7 @@ class Engine:
         rows = _pulse_matrix.build_matrix(
             self.registry, self.protos,
             session_state=self._session_state(),
+            goal_vector=self._goal_vector,
             goal_text=self.goal_text,
             backend=self._get_backend(),
             capsules_by_tool=capsules,
@@ -1177,9 +1260,14 @@ class Engine:
             self._capsules.clear()
             self._history.clear()
             # Explicit wipe: never resurrect pre-wipe rows from the DB.
-            # (The route's _reset_dataset() deletes portrait_history;
-            # marking loaded keeps this process view equal to that wipe.)
             self._history_loaded = True
+            # PULSE reset semantics: post-reset state stays empty — mark
+            # hydrated so ensure_pulse_hydrated() never re-loads the
+            # just-deleted state. Clear the goal vector too.
+            self._pulse_hydrated = True
+            self._goal_vector = None
+            self._goal_ts = None
+            self._goal_backend = None
             self.goal_text = None
             self._interpreted_evidence_count = 0
             self._interpreted_last_ts = None

@@ -158,3 +158,60 @@ def persist_goal_vector(vector, ts: float | None = None,
             conn.close()
     except Exception:
         logger.exception("its-in-your-head: goal vector persist failed")
+
+
+def load_pulse_state() -> dict:
+    """Load persisted PULSE state for hydration (profile-scoped DB).
+
+    Returns {"banks": {tool: {"good":[...], "friction":[...],
+    "objective_friction":[...]}}, "capsules": {tool: [{"vector":...,
+    "ts":...}]}, "goal_vector": [...|None], "goal_ts": float|None,
+    "goal_backend": str|None}. Derived vectors only — no raw text is
+    read (none is stored). Fault-isolated: logs and returns the empty
+    shape on any failure, never raises.
+    """
+    empty = {"banks": {}, "capsules": {}, "goal_vector": None,
+             "goal_ts": None, "goal_backend": None}
+    try:
+        conn = _database.connect()
+        try:
+            _migration.schema_bootstrap(conn)
+            banks: dict = {}
+            for tool, bank, blob in conn.execute(
+                    "SELECT tool_name, bank, vector FROM pulse_prototypes"
+                    " ORDER BY tool_name, bank, id"):
+                if bank not in _BANKS:
+                    continue
+                vec = unpack_vector(blob)
+                if vec is None:
+                    continue
+                banks.setdefault(str(tool), {
+                    "good": [], "friction": [],
+                    "objective_friction": []})[bank].append(vec)
+            capsules: dict = {}
+            for tool, ts, blob in conn.execute(
+                    "SELECT tool_name, ts, vector FROM pulse_capsules"
+                    " ORDER BY tool_name, ts, id"):
+                vec = unpack_vector(blob)
+                if vec is None:
+                    continue
+                capsules.setdefault(str(tool), []).append(
+                    {"vector": vec, "ts": ts, "tool_name": str(tool)})
+            goal_vector = None
+            goal_ts = None
+            goal_backend = None
+            row = conn.execute(
+                "SELECT ts, vector, backend FROM pulse_goal WHERE id = 1"
+            ).fetchone()
+            if row is not None:
+                goal_ts = row[0]
+                goal_backend = row[2]
+                goal_vector = unpack_vector(row[1])
+            return {"banks": banks, "capsules": capsules,
+                    "goal_vector": goal_vector, "goal_ts": goal_ts,
+                    "goal_backend": goal_backend}
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("its-in-your-head: pulse state load failed")
+        return empty

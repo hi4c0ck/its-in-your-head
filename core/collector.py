@@ -89,6 +89,12 @@ def _apply_explicit_feedback(message) -> None:
         if detect_feedback(message) is None:
             return
         eng = engine.get_engine()
+        # Hydrate BEFORE feedback association (feedback may precede the
+        # first dashboard read). Worker/association path only — never
+        # the sync tool-start hot path.
+        ensure = getattr(eng, "ensure_pulse_hydrated", None)
+        if callable(ensure):
+            ensure()
         apply_feedback(eng.protos, eng.capsule_state(), message)
     except Exception:
         logger.exception(
