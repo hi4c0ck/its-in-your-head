@@ -756,6 +756,31 @@ function partSafetyReport(templateId) {
 }
 
 /**
+ * Stage 5 — the tuner-facing definition accessor: a deep structural
+ * clone of a registered template's data (movement / aliases / parts)
+ * plus its renderer reference. Calibration UIs register calibrated
+ * VARIANTS (travel ×k, part amplitude ×k, …) from this without
+ * touching the stock template.
+ */
+function portraitTemplateDefinition(templateId) {
+  const tid = safeTemplateId(String(templateId || DEFAULT_PORTRAIT_TEMPLATE));
+  const entry = portraitTemplates.get(tid);
+  if (!entry) {
+    const available = listPortraitTemplates().map((x) => x.id).join(', ');
+    throw new RangeError(`Unknown portrait template "${tid}". Available: ${available}`);
+  }
+  return Object.freeze({
+    id: entry.id,
+    label: entry.label,
+    description: entry.description,
+    render: entry.render, // the template's own renderer (reference, not cloned)
+    movement: structuredClone(entry.movement),
+    aliases: structuredClone(entry.aliases),
+    parts: structuredClone(entry.parts),
+  });
+}
+
+/**
  * Stage 4 — renderer-facing part transforms: SVG `transform` attribute
  * values for every declared part at local clock time `t`. A part with a
  * neutral state renders as the EMPTY STRING (the renderer omits the
@@ -1698,5 +1723,7 @@ return Object.freeze({
   partSafetyReport,
   // Template renderers (Stage 4 — the part states, as SVG transforms):
   partTransforms,
+  // Tuner calibration (Stage 5 — the definition accessor for variants):
+  portraitTemplateDefinition,
 })
 })()

@@ -105,7 +105,7 @@ details.baseline summary { font-size: 9px; letter-spacing: 1.5px; color: var(--m
 <body>
 <div class="top">
   <span class="ttl">IYH PORTRAIT · MOTION GRAMMAR TUNER</span>
-  <span class="sha">engine sha 8c6cd8223e4f · deterministic · 0.85s poll cadence</span>
+  <span class="sha">engine sha ea6417691df4 · deterministic · 0.85s poll cadence</span>
   <span class="sp"></span>
   <button class="btn" id="b-reset" title="back to tick 0">t = 0</button>
   <button class="btn" id="b-step">STEP &#9654;</button>
@@ -131,6 +131,7 @@ details.baseline summary { font-size: 9px; letter-spacing: 1.5px; color: var(--m
           <div class="cap">DOCK 96PX</div></div>
       </div>
       <div class="cap" id="vis48" style="margin-top:6px">48PX VISIBILITY — measuring…</div>
+      <div class="cap" id="pixverdict" style="margin-top:4px">PIXEL ACCEPTANCE — measuring…</div>
     </div>
 
     <div class="logbox">
@@ -189,6 +190,17 @@ details.baseline summary { font-size: 9px; letter-spacing: 1.5px; color: var(--m
       <div class="row"><label>context_richness</label><input type="range" id="d-context_richness" min="0" max="1" step="0.01" value="0.60"><span class="val"></span></div>
       <div class="note">the stable six-dimension profile the live layer rides on</div>
     </details>
+
+    <div class="group" id="cal-group">
+      <h2>TEMPLATE CALIBRATION · PIXEL ACCEPTANCE (STAGE 5)</h2>
+      <div class="row"><label>travel ×</label><input type="range" id="cal-travel" min="0.25" max="2" step="0.05" value="1"><span class="val"></span></div>
+      <div class="row"><label>parts ×</label><input type="range" id="cal-parts" min="0" max="2" step="0.05" value="1"><span class="val"></span></div>
+      <div class="note">calibrates a VARIANT of the active template (travel band ×k, part
+      channel weights + traversal amplitude ×k) — the pixel acceptance below
+      re-measures it at 48px and 512px. Stock template is untouched.</div>
+      <button class="btn" id="cal-reset" style="margin-top:8px">RESET CALIBRATION</button>
+      <div id="pixrows" style="margin-top:8px"></div>
+    </div>
   </div>
 </main>
 
@@ -950,6 +962,31 @@ function partSafetyReport(templateId) {
     samples: samples.length,
     violations,
     sample: samples,
+  });
+}
+
+/**
+ * Stage 5 — the tuner-facing definition accessor: a deep structural
+ * clone of a registered template's data (movement / aliases / parts)
+ * plus its renderer reference. Calibration UIs register calibrated
+ * VARIANTS (travel ×k, part amplitude ×k, …) from this without
+ * touching the stock template.
+ */
+function portraitTemplateDefinition(templateId) {
+  const tid = safeTemplateId(String(templateId || DEFAULT_PORTRAIT_TEMPLATE));
+  const entry = portraitTemplates.get(tid);
+  if (!entry) {
+    const available = listPortraitTemplates().map((x) => x.id).join(', ');
+    throw new RangeError(`Unknown portrait template "${tid}". Available: ${available}`);
+  }
+  return Object.freeze({
+    id: entry.id,
+    label: entry.label,
+    description: entry.description,
+    render: entry.render, // the template's own renderer (reference, not cloned)
+    movement: structuredClone(entry.movement),
+    aliases: structuredClone(entry.aliases),
+    parts: structuredClone(entry.parts),
   });
 }
 
@@ -1896,6 +1933,8 @@ return Object.freeze({
   partSafetyReport,
   // Template renderers (Stage 4 — the part states, as SVG transforms):
   partTransforms,
+  // Tuner calibration (Stage 5 — the definition accessor for variants):
+  portraitTemplateDefinition,
 })
 })()
 
@@ -2101,12 +2140,23 @@ function render() {
   for (const id of ['f-openness','f-focus','f-resonance','f-tension','f-intensity',
                     'f-confidence','m-strength','m-ld','m-ca','m-es','m-gb',
                     'd-exploration','d-directness','d-analytical_depth',
-                    'd-iteration','d-scope','d-context_richness']) {
+                    'd-iteration','d-scope','d-context_richness',
+                    'cal-travel','cal-parts']) {
     const el = $(id);
     el.nextElementSibling.textContent = (+el.value).toFixed(2);
   }
   const ms = +$('m-strength').value;
   $('m-warn').style.display = ($('m-active').checked && ms <= 0.02) ? 'block' : 'none';
+
+  // Stage 5 — pixel acceptance: re-measure when the (template, tick,
+  // calibration) input actually changed; the async token inside
+  // measurePixels guards against overlapping runs.
+  const pixKey = template + '|' + tick + '|' + calId + '|' +
+                 $('cal-travel').value + '|' + $('cal-parts').value;
+  if (pixKey !== lastPixKey) {
+    lastPixKey = pixKey;
+    measurePixels();
+  }
 }
 
 function step() { tick += 1; render(); }
@@ -2163,11 +2213,150 @@ function buildTabs() {
     b.className = 'btn' + (t.id === template ? ' on' : '');
     b.onclick = () => {
       template = t.id;
+      calId = null;
       for (const x of host.children) x.classList.remove('on');
       b.classList.add('on');
       render();
     };
     host.appendChild(b);
+  }
+}
+
+// ---- Stage 5 — pixel-level acceptance in the browser ----
+// Rasterize the compact glyph at real 48px and the studio portrait at
+// 512px, then diff ADJACENT deterministic clock steps. Fixed t steps,
+// no randomness: identical inputs → identical pixel counts.
+const PIX_T = [0, 0.8, 1.6, 2.4]; // clock steps, 0.8s apart (poll cadence)
+const PIX48_MIN = 4;  // ≥4 changed pixels @48px  (≈0.17% of 2304)
+const PIX512_MIN = 32; // ≥32 changed pixels @512px (≈0.012% of 262144)
+const pixGen = { n: 0 };
+let lastPixKey = null;
+
+function svgForPixel(svg, size) {
+  return svg.replace('<svg ', '<svg width="' + size + '" height="' + size + '" ');
+}
+function rasterize(svgStr, size) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(new Blob([svgStr], { type: 'image/svg+xml' }));
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = size; c.height = size;
+      const x = c.getContext('2d', { willReadFrequently: true });
+      x.clearRect(0, 0, size, size);
+      x.drawImage(img, 0, 0, size, size);
+      URL.revokeObjectURL(url);
+      resolve(x.getImageData(0, 0, size, size).data);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+}
+function pixelDiff(a, b) {
+  let changed = 0, sum = 0;
+  const total = a.length / 4;
+  for (let i = 0; i < a.length; i += 4) {
+    const d = Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) +
+              Math.abs(a[i + 2] - b[i + 2]);
+    sum += d;
+    if (d > 24) changed++; // above AA flicker
+  }
+  return { changed, total, pct: changed / total, mean: sum / total };
+}
+async function measurePixels() {
+  const gen = ++pixGen.n;
+  const data = payload(tick);
+  const jobs = [
+    { label: '48PX', size: 48, min: PIX48_MIN,
+      svg: (t) => svgForPixel(IYH.buildPortraitSvg(data,
+        { template, rendering: 'compact', clock: t, id: 'px48' }), 48) },
+    { label: '512PX', size: 512, min: PIX512_MIN,
+      svg: (t) => svgForPixel(IYH.buildPortraitSvg(data,
+        { template, rendering: 'studio', clock: t, id: 'px512' }), 512) },
+  ];
+  const frames = await Promise.all(jobs.map(async (j) =>
+    Promise.all(PIX_T.map((t) => rasterize(j.svg(t), j.size)))));
+  if (gen !== pixGen.n) return; // a newer measurement superseded this one
+  let rows = '', allPass = true;
+  jobs.forEach((j, ji) => {
+    const pairs = [];
+    for (let i = 1; i < PIX_T.length; i++) {
+      const a = frames[ji][i - 1], b = frames[ji][i];
+      if (!a || !b) { pairs.push(null); continue; }
+      pairs.push(pixelDiff(a, b));
+    }
+    const usable = pairs.filter(Boolean);
+    if (!usable.length) {
+      rows += '<div class="note">' + j.label + ' rasterization failed</div>';
+      allPass = false;
+      return;
+    }
+    const worst = usable.reduce((acc, p) => Math.max(acc, p.pct), 0);
+    const pass = worst * usable[0].total >= j.min;
+    if (!pass) allPass = false;
+    rows += '<div class="note">' + j.label + ': ' +
+      usable.map((p, i) => 't' + PIX_T[i].toFixed(1) + '→' + PIX_T[i + 1].toFixed(1) +
+        ' <b>' + p.changed + '</b>px').join(' · ') +
+      ' — ' + (pass ? '<span class="v">PASS</span>' : '<span class="v">INVISIBLE</span>') +
+      ' (need ≥' + j.min + 'px)</div>';
+  });
+  $('pixrows').innerHTML = rows;
+  $('pixverdict').innerHTML =
+    '<span class="k">PIXEL ACCEPTANCE</span> ' +
+    (allPass ? '<span class="v big">PASS</span> motion is visible at real raster sizes'
+             : '<span class="v big">INVISIBLE AT 48PX</span> raise the travel × / parts × sliders');
+}
+
+// ---- Stage 5 — per-template calibration (variant registration) ----
+// The author tunes travel ×k (feature motion) and parts ×k (part channel
+// weights + traversal amplitude) of the ACTIVE template; the variant is
+// registered under its own id (stock stays untouched) and the whole
+// tuner — preview, pixel acceptance, safety reports — runs on it.
+let calId = null;
+function baseTemplate() {
+  // a calibrated variant belongs to its stock base
+  if (calId) return calId;
+  return template;
+}
+function registerCalibrated() {
+  const base = baseTemplate();
+  const tm = +$('cal-travel').value, pm = +$('cal-parts').value;
+  if (tm === 1 && pm === 1) {
+    calId = null;
+    if (template !== base) { template = base; syncTabs(); }
+    return;
+  }
+  const d = IYH.portraitTemplateDefinition(base);
+  const id = 'cal-' + base.replace(/-/g, '_') + '-' +
+             tm.toFixed(2).replace('.', '_') + 't-' +
+             pm.toFixed(2).replace('.', '_') + 'p';
+  const mv = structuredClone(d.movement);
+  mv.travel = Object.fromEntries(
+    Object.entries(mv.travel).map(([k, v]) => [k, v * tm]));
+  const parts = structuredClone(d.parts);
+  for (const pid of Object.keys(parts)) {
+    const p = parts[pid];
+    for (const k of ['tx', 'ty', 'rot']) {
+      p[k] = Object.fromEntries(
+        Object.entries(p[k]).map(([ck, w]) => [ck, w * pm]));
+    }
+    if (p.traverse) p.traverse.amplitude = p.traverse.amplitude * pm;
+  }
+  IYH.registerPortraitTemplate({
+    id, label: d.label + ' · cal ' + tm + '×/' + pm + '×',
+    description: 'calibrated variant of ' + base,
+    render: d.render, movement: mv, aliases: d.aliases, parts,
+  }, { replace: true });
+  calId = base;
+  template = id;
+  syncTabs();
+}
+function syncTabs() {
+  const host = $('tabs');
+  const list = IYH.listPortraitTemplates();
+  for (const x of host.children) {
+    const t = list.find((tt) => (tt.label || tt.id) === x.textContent);
+    if (t) x.classList.toggle('on', t.id === template);
   }
 }
 
@@ -2186,8 +2375,26 @@ $('b-mark').onclick = () => {
 };
 
 for (const el of document.querySelectorAll('input, select')) {
+  if (el.id === 'cal-travel' || el.id === 'cal-parts') continue; // own handler below
   el.addEventListener('input', () => { stopPlay(); tick = 0; logEntries.length = 0; render(); });
 }
+
+// Calibration sliders: register the variant FIRST, then the generic
+// path (stopPlay/tick reset/render) — render() re-measures pixels on
+// the calibrated variant.
+for (const id of ['cal-travel', 'cal-parts']) {
+  $(id).addEventListener('input', () => {
+    stopPlay(); tick = 0; logEntries.length = 0;
+    registerCalibrated();
+    render();
+  });
+}
+$('cal-reset').onclick = () => {
+  $('cal-travel').value = 1; $('cal-parts').value = 1;
+  stopPlay(); tick = 0; logEntries.length = 0;
+  registerCalibrated();
+  render();
+};
 
 buildTabs(); buildPresets();
 // start on the exploratory preset so saccades are visible from t = 0

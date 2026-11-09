@@ -1,4 +1,4 @@
-# MOVEMENT-CONTRACT.md — template-owned portrait motion (Stage 4 of 5)
+# MOVEMENT-CONTRACT.md — template-owned portrait motion (Stage 5 of 5)
 
 Owner: lane-d (`desktop/`), settled by the parent run.
 Governing doc: the 5-stage "Portrait Motion System" upgrade design (owner-pasted,
@@ -13,7 +13,7 @@ contract says, and what the remaining stages must do.
 | 2 | Alias compiler: engine emits normalized semantic axes; templates declare axis→feature aliases, response curves, sensitivity (no mandatory universal aliases) | **DONE** |
 | 3 | Head-movement parts: template-declared parts, coordinated transforms, trajectories, allowed regions | **DONE** |
 | 4 | Template renderer: each template renders its own visual language at studio AND compact sizes, consuming the part states | **DONE** |
-| 5 | Tuner upgrade: pixel-level checks (image diff between adjacent steps) in the browser, per-template calibration UI | pending |
+| 5 | Tuner upgrade: pixel-level checks (image diff between adjacent steps) in the browser, per-template calibration UI | **DONE** |
 
 ## The contract (Stage 1 shape)
 
@@ -80,7 +80,8 @@ contract says, and what the remaining stages must do.
   48px), `node tests/test_desktop_alias_compiler.mjs` (alias graph,
   Stage 2), `node tests/test_desktop_head_parts.mjs` (coordinated
   parts, Stage 3), `node tests/test_desktop_template_renderers.mjs`
-  (renderers, Stage 4), `node tests/test_desktop_motion_grammar.mjs`
+  (renderers, Stage 4), `node tests/test_desktop_calibration.mjs`
+  (calibration, Stage 5), `node tests/test_desktop_motion_grammar.mjs`
   (grammar), `node tests/test_desktop_portrait_engine.mjs`
   (routes/state), `py -3.12 -m pytest tests/ -q` (perception lane).
 
@@ -200,3 +201,38 @@ studio and compact sizes; the part layer is how the language moves:
   inert, rest invariance, traversal-driven motion, clock sweep
   smoothness/determinism, template divergence, no-part empty map,
   safety reports).
+
+## Pixel acceptance + calibration (Stage 5)
+
+The tuner (`tools/portrait_motion_tuner.html`) now ACCEPTS with real
+pixels, not just geometric reports:
+
+- **Pixel-level acceptance (in the browser):** the compact glyph is
+  rasterized at real 48px and the studio portrait at 512px (offscreen
+  canvas, SVG → Image → `getImageData`), then ADJACENT deterministic
+  clock steps (t = 0, 0.8, 1.6, 2.4 — the production poll cadence)
+  are diffed pixel-by-pixel. Verdicts:
+  - 48px: ≥ 4 changed pixels per step (≈ 0.17% of 2304)
+  - 512px: ≥ 32 changed pixels per step
+  - otherwise the panel reports `INVISIBLE AT 48PX` — the author's
+    motion is not actually visible at the dock size, whatever the
+    geometry claims.
+- **Per-template calibration UI:** the travel ×k (feature motion) and
+  parts ×k (part channel weights + traversal amplitude) sliders
+  register a calibrated VARIANT of the active template via
+  `IYH.portraitTemplateDefinition(templateId)` (a deep structural
+  clone — the stock template is untouched) +
+  `registerPortraitTemplate({..., movement, parts}, { replace: true })`.
+  The whole tuner (preview, saccade log, pixel acceptance, safety
+  reports) then runs on the variant; RESET CALIBRATION returns to
+  stock.
+- **Deterministic acceptance:** the pixel check uses fixed t steps
+  (no rAF, no randomness) — identical inputs → identical pixel
+  counts. Measured signatures: neutral-pencil 48px ≈ 90px/step,
+  angular-pencil ≈ 86–93px/step (its own part language),
+  soft-flow-study 0px (no parts → no clock-dependent motion, the
+  expected negative).
+- Tests: `node tests/test_desktop_calibration.mjs` (definition
+  accessor clone isolation, variant registration, determinism,
+  stock stability). The pixel pipeline itself is verified in the
+  browser (the tuner's own panel).
