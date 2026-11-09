@@ -1872,6 +1872,31 @@ function iyhPortraitClockFor(rendering, data) {
   return rec.tick * (PORTRAIT_POLL_MS / 1000)
 }
 // IYH-PORTCLOCK-END
+// IiYH brick-masking engine (desktop/brick-mask.html): the brick field is a
+// deterministic function of the pane clock -- two slow sinusoids quantized to
+// 4 opacity levels, ~40% of the 40x48 grid lit. Rendered as a CSS mask-image
+// (black hide-all + white brick rects) applied to the portrait container, so
+// the portrait (the correct image output) reveals through the bricks; the
+// portrait SVG itself is untouched.
+function iiyhBrickMaskImage(clock) {
+  const W = 40, H = 48, CELL = 14, LEVELS = [0.22, 0.45, 0.70, 0.95]
+  const step = Math.max(0, Math.floor((Number(clock) || 0) / 0.15))
+  let rects = ''
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const d = x * 0.7 + y * 0.55
+    const a = Math.sin(d - step * 0.08)
+    const b = Math.sin((x - y) * 0.35 + step * 0.04)
+    const v = (a + b) * 0.5 + 0.5
+    if (v > 0.60) {
+      const lv = Math.min(3, (((v - 0.6) / 0.4) * 4) | 0)
+      rects += '<rect x="' + x * CELL + '" y="' + y * CELL + '" width="' + (CELL - 1.5) + '" height="' + (CELL - 1.5) + '" fill="#fff" opacity="' + LEVELS[lv].toFixed(2) + '"/>'
+    }
+  }
+  const Wpx = W * CELL, Hpx = H * CELL
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + Wpx + '" height="' + Hpx + '" viewBox="0 0 ' + Wpx + ' ' + Hpx + '"><rect width="' + Wpx + '" height="' + Hpx + '" fill="black"/>' + rects + '</svg>'
+  return 'url("data:image/svg+xml,' + encodeURIComponent(svg) + '")'
+}
+// IYH-BRICK-MASK-END
 
 function buildIyhPortraitMarkup(data, template, rendering, id) {
   const svg = IYH_PORTRAIT.buildPortraitSvg(data || {}, {
@@ -1893,6 +1918,7 @@ function IyhPortraitCompact({ data, preferences, size = 48 }) {
   const [selected] = useIyhPortraitTemplate(preferences)
   if (!data || data.available !== true) return null
   const svg = buildIyhPortraitMarkup(data, selected, 'compact', 'iyh-dock-portrait')
+  const brickMask = iiyhBrickMaskImage(iyhPortraitClockFor('compact', data))
   return jsx('div', {
     'aria-label': 'Interaction portrait, compact pencil rendering',
     title: 'PORTRAIT · accumulated interaction impression',
@@ -1901,6 +1927,8 @@ function IyhPortraitCompact({ data, preferences, size = 48 }) {
       height: size,
       flex: '0 0 ' + size + 'px',
       overflow: 'hidden',
+      maskImage: brickMask,
+      WebkitMaskImage: brickMask,
     },
     dangerouslySetInnerHTML: { __html: svg },
   })
@@ -1918,6 +1946,9 @@ function IyhPortraitStudio({ data, preferences }) {
           typeof value === 'number' && Number.isFinite(value),
         )
       })
+  const brickMask = hasEvidence
+    ? iiyhBrickMaskImage(iyhPortraitClockFor('studio', data))
+    : null
   const svg = hasEvidence
     ? buildIyhPortraitMarkup(data, selected, 'studio', 'iyh-workspace-portrait')
     : null
@@ -1938,6 +1969,7 @@ function IyhPortraitStudio({ data, preferences }) {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
+              ...(brickMask ? { maskImage: brickMask, WebkitMaskImage: brickMask } : {}),
             },
             dangerouslySetInnerHTML: { __html: svg },
           })
@@ -2710,6 +2742,209 @@ function adaptPulseToLanes(pulse) {
 }
 // STAGE4-END
 
+// STAGE5-START
+// =====================================================================
+// Stage 5 — bubble-arrival transition (UI-only, no backend fields).
+// Two identities: semantic `metric|tool` (the evaluation that changed)
+// and visual `metric|slotIndex` (the stable slot it lands in).
+// Meaningful-change semantics MIRROR pulse/matrix.py lane ranking:
+// HYSTERESIS = 1e-6 and quantized buckets round(score / HYSTERESIS)
+// (dashboard mirror: _PULSE_HYSTERESIS / _q). A change is meaningful
+// when the quantized bucket, level, state, or rank changes — never a
+// second invented threshold. All timing/cap values are named tuning
+// constants. Surface coordinates are relative to the measured box
+// supplied by the Stage 4 composition layer (no hardcoded dims).
+const PULSE_HYSTERESIS = 1e-6; // mirrors pulse/matrix.py HYSTERESIS
+const BUBBLE_TRAVEL_MS = 450; // tuning: 350-550ms travel
+const BUBBLE_ARRIVAL_MS = 150; // tuning: 120-180ms arrival flash
+const MAX_CONCURRENT_BUBBLES = 4; // bounded concurrent bubbles
+const BUBBLE_STAGGER_MS = 60; // stagger for simultaneous changes
+const PULSE_LANE_ORDER = ['live', 'goal', 'good', 'friction'];
+
+function pulseQuantizedScore(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return 0;
+  return Math.round(Number(value) / PULSE_HYSTERESIS);
+}
+function pulseSemanticId(metric, entry) {
+  var tool = entry && entry.tool_id != null ? String(entry.tool_id) : String((entry && entry.tool_name) || '');
+  return String(metric) + '|' + tool;
+}
+function pulseSlotId(metric, slotIndex) {
+  return String(metric) + '|' + String(slotIndex);
+}
+function pulseEntryValue(entry) {
+  if (!entry) return null;
+  if (typeof entry.value === 'number' && Number.isFinite(entry.value)) return entry.value;
+  if (entry.momentum && typeof entry.momentum.value === 'number') return entry.momentum.value;
+  return null;
+}
+function pulseEntryLevel(entry) { return entry && entry.level != null ? String(entry.level) : null; }
+function pulseEntryState(entry) {
+  if (!entry) return null;
+  if (entry.state != null) return String(entry.state);
+  if (entry.momentum && entry.momentum.state != null) return String(entry.momentum.state);
+  return null;
+}
+// Snapshot = committed/pending model: one entry per semantic identity,
+// visible prefix only (capacity kills sub-visible noise by construction).
+function pulseSnapshotFromLanes(lanes, capacity) {
+  var cap = Math.max(1, Math.floor(Number(capacity) || 1));
+  var byId = {};
+  var laneMap = {};
+  PULSE_LANE_ORDER.forEach(function (metric) {
+    var entries = lanes && Array.isArray(lanes[metric]) ? lanes[metric].slice(0, cap) : [];
+    laneMap[metric] = entries;
+    entries.forEach(function (e) {
+      var snap = {};
+      Object.keys(e || {}).forEach(function (k) { snap[k] = e[k]; });
+      snap.metric = metric;
+      snap.value = pulseEntryValue(e);
+      snap.level = pulseEntryLevel(e);
+      snap.state = pulseEntryState(e);
+      byId[pulseSemanticId(metric, e)] = snap;
+    });
+  });
+  return { byId: byId, lanes: laneMap, capacity: cap };
+}
+function pulseVisibleLanes(snapshot, capacity) {
+  var cap = Math.max(1, Math.floor(Number(capacity) || snapshot.capacity || 1));
+  var out = {};
+  PULSE_LANE_ORDER.forEach(function (metric) {
+    var entries = Object.keys(snapshot.byId).map(function (k) { return snapshot.byId[k]; })
+      .filter(function (e) { return e.metric === metric; })
+      .sort(function (a, b) { return (a.rank || 0) - (b.rank || 0); })
+      .slice(0, cap);
+    out[metric] = entries;
+  });
+  return out;
+}
+// Exactly one transition per meaningful change; sub-threshold noise
+// (same quantized bucket, same level/state/rank) yields none.
+function detectPulseTransitions(prevSnap, nextSnap, seqStart) {
+  var transitions = [];
+  var seq = Number(seqStart) || 0;
+  if (!prevSnap || !nextSnap) return transitions;
+  Object.keys(nextSnap.byId).forEach(function (sid) {
+    var prev = prevSnap.byId[sid];
+    var next = nextSnap.byId[sid];
+    if (!prev || !next) return; // first appearance: hydration/appearance is static
+    var reason = null;
+    if (prev.rank !== next.rank) reason = 'rank-change';
+    else if (prev.level !== next.level) reason = 'level-change';
+    else if (prev.state !== next.state) reason = 'state-change';
+    else if (pulseQuantizedScore(prev.value) !== pulseQuantizedScore(next.value)) reason = 'value-change';
+    if (!reason) return;
+    seq += 1;
+    transitions.push({
+      sequence: seq,
+      metric: next.metric,
+      tool: next.tool_name,
+      toolId: next.tool_id != null ? next.tool_id : null,
+      semanticId: sid,
+      destinationSlot: Math.max(0, (Number(next.rank) || 1) - 1),
+      slotId: pulseSlotId(next.metric, Math.max(0, (Number(next.rank) || 1) - 1)),
+      previousValue: prev.value, nextValue: next.value,
+      previousLevel: prev.level, nextLevel: next.level,
+      previousState: prev.state, nextState: next.state,
+      previousRank: prev.rank != null ? prev.rank : null,
+      nextRank: next.rank != null ? next.rank : null,
+      reason: reason,
+    });
+  });
+  transitions.sort(function (a, b) { return a.sequence - b.sequence; });
+  return transitions;
+}
+// Surface-relative path: spawn at the surface's bottom edge, target
+// over the destination cell — derived only from the measured box.
+function pulseBubblePath(box, metric, slotIndex, capacity) {
+  var w = box && Number.isFinite(Number(box.width)) ? Number(box.width) : 0;
+  var h = box && Number.isFinite(Number(box.height)) ? Number(box.height) : 0;
+  var cap = Math.max(1, Math.floor(Number(capacity) || 1));
+  var laneIdx = PULSE_LANE_ORDER.indexOf(metric);
+  if (laneIdx < 0) laneIdx = 0;
+  var x = w * ((laneIdx + 0.5) / PULSE_LANE_ORDER.length);
+  var y = h * ((Math.max(0, Number(slotIndex) || 0) + 0.5) / cap);
+  return { spawn: { x: x, y: h }, target: { x: x, y: y } };
+}
+function prefersReducedMotion(media) {
+  return !!(media && media.matches === true);
+}
+// Bounded coordinator: committed stays visible during travel; arrival
+// commits one pending entry; newer rankings supersede in-flight work
+// for the same semantic identity; cap bounds concurrent bubbles.
+function createPulseBubbleCoordinator(opts) {
+  var o = opts || {};
+  var cap = Math.max(1, Math.floor(Number(o.maxConcurrent) || MAX_CONCURRENT_BUBBLES));
+  var state = { seq: 0, committed: null, latest: null, active: [], queued: [], flashSlotId: null, hydrated: false };
+  function promote() {
+    while (state.active.length < cap && state.queued.length > 0) {
+      state.active.push(state.queued.shift());
+    }
+  }
+  return {
+    ingest: function (lanes, capacity, ingestOpts) {
+      var snap = pulseSnapshotFromLanes(lanes, capacity);
+      if (!state.hydrated || !state.committed) {
+        state.committed = snap; state.latest = snap; state.hydrated = true;
+        return { transitions: [], active: state.active, queued: state.queued, immediate: false, committed: state.committed };
+      }
+      var found = detectPulseTransitions(state.latest, snap, state.seq);
+      state.seq += found.length;
+      if (ingestOpts && ingestOpts.reducedMotion) {
+        state.committed = snap; state.latest = snap; state.active = []; state.queued = [];
+        return { transitions: found, active: state.active, queued: state.queued, immediate: true, committed: state.committed };
+      }
+      found.forEach(function (t) {
+        state.active = state.active.filter(function (a) { return a.semanticId !== t.semanticId; });
+        state.queued = state.queued.filter(function (a) { return a.semanticId !== t.semanticId; });
+        if (state.active.length < cap) state.active.push(t); else state.queued.push(t);
+      });
+      state.latest = snap;
+      return { transitions: found, active: state.active, queued: state.queued, immediate: false, committed: state.committed };
+    },
+    arrive: function (sequence) {
+      var idx = state.active.findIndex(function (t) { return t.sequence === sequence; });
+      if (idx < 0) return { arrived: false, committed: state.committed };
+      var t = state.active[idx];
+      state.active.splice(idx, 1);
+      if (state.latest && state.latest.byId[t.semanticId]) {
+        state.committed.byId[t.semanticId] = state.latest.byId[t.semanticId];
+        // Rank-change arrival displaces the occupant: its committed
+        // rank follows its own pending rank so two tools never share
+        // a slot in the visible ordering.
+        var arrivedRank = state.latest.byId[t.semanticId].rank;
+        Object.keys(state.committed.byId).forEach(function (k) {
+          var e = state.committed.byId[k];
+          if (e.metric === t.metric && k !== t.semanticId && e.rank === arrivedRank
+              && state.latest.byId[k] && state.latest.byId[k].rank !== arrivedRank) {
+            var moved = {};
+            Object.keys(e).forEach(function (kk) { moved[kk] = e[kk]; });
+            moved.rank = state.latest.byId[k].rank;
+            state.committed.byId[k] = moved;
+          }
+        });
+      }
+      state.flashSlotId = t.slotId;
+      promote();
+      return { arrived: true, transition: t, committed: state.committed, flashSlotId: state.flashSlotId };
+    },
+    clearFlash: function () { state.flashSlotId = null; },
+    // Resize: coordinates are obsolete — cancel travel and commit the
+    // latest snapshot immediately rather than landing in a stale slot.
+    resize: function () {
+      var cancelled = state.active.length + state.queued.length;
+      state.active = []; state.queued = [];
+      if (state.latest) state.committed = state.latest;
+      return { cancelled: cancelled, committed: state.committed };
+    },
+    visibleLanes: function (capacity) {
+      if (!state.committed) return pulseVisibleLanes(pulseSnapshotFromLanes({}, capacity), capacity);
+      return pulseVisibleLanes(state.committed, capacity);
+    },
+    getState: function () { return state; },
+  };
+}
+// STAGE5-END
 // PULSE matrix structure: a real grid of row × column cells (a DOM table,
 // not a painted canvas). The label and its four graphic cells are sibling
 // cells of one grid row, so the layout engine — not pitch arithmetic —
@@ -2726,7 +2961,8 @@ const PULSE_GLOW_CSS =
   '.iyh-glow{animation:iyh-glow-kf .9s ease-out 1}' +
   '.iyh-glow-warn{animation-name:iyh-glow-warn-kf}' +
   '@keyframes iyh-glow-kf{0%{box-shadow:0 0 10px 2px var(--ui-accent, rgba(130,170,255,.55))}100%{box-shadow:0 0 0 0 transparent}}' +
-  '@keyframes iyh-glow-warn-kf{0%{box-shadow:0 0 10px 2px var(--dt-destructive, var(--ui-accent, rgba(255,90,90,.55)))}100%{box-shadow:0 0 0 0 transparent}}'
+  '@keyframes iyh-glow-warn-kf{0%{box-shadow:0 0 10px 2px var(--dt-destructive, var(--ui-accent, rgba(255,90,90,.55)))}100%{box-shadow:0 0 0 0 transparent}}' +
+  '@keyframes iyh-bubble-rise{0%{opacity:.25;transform:translateY(24px)}100%{opacity:.9;transform:translateY(0)}}'
 
 function PulseMatrix({ pulse }) {
   const columns = pulseColumns(pulse)
@@ -2881,9 +3117,47 @@ function PulseMatrix({ pulse }) {
 // floor (fontSize 9, fixed dots); capacity shrinks ROW count only.
 // All lanes share the SAME capacity supplied by the parent (measured
 // box). Theme vars only; no hardcoded colors.
-function PulseLanes({ lanes, capacity }) {
+function PulseLanes({ lanes: rawLanes, capacity, surfaceBox }) {
   var order = ['live', 'goal', 'good', 'friction'];
   var cap = Math.max(1, Math.floor(Number(capacity) || 1));
+  // Stage 5 transition layer: committed content stays visible during
+  // travel; arrival commits the pending entry + flash. Timers are
+  // scheduled here (no new observer/effect); resize cancels travel
+  // via the coordinator when capacity/composition changes.
+  var coordRef = useRef(null);
+  if (!coordRef.current) coordRef.current = createPulseBubbleCoordinator();
+  var coord = coordRef.current;
+  var state5 = useState(0);
+  var setTick5 = state5[1];
+  var scheduledRef = useRef({});
+  var reduced = false;
+  try {
+    reduced = typeof window !== 'undefined' && window.matchMedia
+      ? prefersReducedMotion(window.matchMedia('(prefers-reduced-motion: reduce)')) : false;
+  } catch (e) { reduced = false; }
+  var ingestRes = coord.ingest(rawLanes, cap, { reducedMotion: reduced });
+  var prevCapRef = useRef(cap);
+  if (prevCapRef.current !== cap) {
+    prevCapRef.current = cap;
+    coord.resize();
+    scheduledRef.current = {};
+  }
+  var active5 = coord.getState().active || [];
+  active5.forEach(function (t, idx) {
+    if (!scheduledRef.current[t.sequence]) {
+      scheduledRef.current[t.sequence] = true;
+      var wait = BUBBLE_TRAVEL_MS + BUBBLE_STAGGER_MS * idx;
+      setTimeout(function () {
+        delete scheduledRef.current[t.sequence];
+        coord.arrive(t.sequence);
+        setTick5(function (v) { return v + 1; });
+        setTimeout(function () { coord.clearFlash(); setTick5(function (v) { return v + 1; }); }, BUBBLE_ARRIVAL_MS);
+      }, wait);
+    }
+  });
+  var lanes = coord.visibleLanes(cap);
+  var flashSlot = coord.getState().flashSlotId;
+  var box5 = surfaceBox && Number.isFinite(Number(surfaceBox.width)) ? surfaceBox : { width: 100, height: 100 };
   function dotsFor(value) {
     var v = typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
     var filled = v === null ? 0 : Math.round(v * 12);
@@ -2907,9 +3181,9 @@ function PulseLanes({ lanes, capacity }) {
       display: 'grid',
       gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
       gap: '2px 3px',
-      flex: 1, minWidth: 0, minHeight: 0,
+      flex: 1, minWidth: 0, minHeight: 0, position: 'relative',
     },
-    children: order.map(function (lane) {
+    children: [order.map(function (lane) {
       var entries = lanes && Array.isArray(lanes[lane]) ? lanes[lane].slice(0, cap) : [];
       return jsxs('div', {
         key: lane,
@@ -2968,7 +3242,28 @@ function PulseLanes({ lanes, capacity }) {
           }),
         ],
       });
-    }),
+    }), active5.map(function (t, idx) {
+      var path = pulseBubblePath(box5, t.metric, t.destinationSlot, cap);
+      return jsx('span', {
+        key: 'bubble-' + t.sequence,
+        'data-testid': 'pulse-bubble',
+        'data-slot': t.slotId,
+        'data-reason': t.reason,
+        title: t.tool + ' · ' + t.reason,
+        style: {
+          position: 'absolute', width: 8, height: 8, borderRadius: 4,
+          background: 'var(--ui-accent)', opacity: 0.9, pointerEvents: 'none',
+          posUnits: 'pct',
+          left: Math.max(0, path.target.x) + '%', top: Math.max(0, path.target.y) + '%',
+          animation: 'iyh-bubble-rise ' + BUBBLE_TRAVEL_MS + 'ms linear ' + (BUBBLE_STAGGER_MS * idx) + 'ms 1 both',
+        },
+      });
+    })].concat(flashSlot ? [jsx('span', {
+      key: 'flash',
+      'data-testid': 'pulse-arrival-flash',
+      'data-slot': flashSlot,
+      style: { position: 'absolute', inset: 0, pointerEvents: 'none', boxShadow: 'inset 0 0 8px 2px var(--ui-accent)', opacity: 0.6 },
+    })] : []),
   });
 }
 
