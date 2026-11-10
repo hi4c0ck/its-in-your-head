@@ -4112,9 +4112,14 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
   var hasEntries = order.some(function (l) {
     return lanes && Array.isArray(lanes[l]) && lanes[l].length > 0;
   });
-  function dotsFor(value) {
+  function dotsFor(value, evaluated) {
     var v = typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
     var filled = v === null ? 0 : Math.round(v * 12);
+    // C (v0.1.11 presence floor): an EVALUATED cell (state != 'empty')
+    // never renders a blank meter — at least one dot reads "present,"
+    // magnitude adds on top. A weak score can no longer be mistaken for
+    // an empty one; 'empty' cells stay fully blank.
+    if (evaluated && filled < 1) filled = 1;
     var dots = [];
     for (var i = 0; i < 12; i++) {
       dots.push(jsx('span', {
@@ -4153,6 +4158,16 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
             children: entries.map(function (e, i) {
               var val = e && typeof e.value === 'number' ? e.value
                 : (e && e.momentum && typeof e.momentum.value === 'number' ? e.momentum.value : null);
+              // A (v0.1.11 state-presence marker): decouple "we have a
+              // computed state here" from magnitude. Any cell the engine
+              // evaluated (state != 'empty', or a live count) shows a
+              // small lane-colored lamp beside the meter; 'empty' cells
+              // show nothing. The meter still encodes strength, and the
+              // C floor guarantees it is never blank when evaluated.
+              var evaluated = e.state ? (e.state !== 'empty') : (val !== null);
+              var markerColor = (lane === 'friction')
+                ? 'var(--dt-destructive, var(--destructive, var(--ui-accent)))'
+                : 'var(--ui-accent)';
               // Stage 3 detail surface: full canonical name, value,
               // state, support_count, threshold, evidence source.
               var evidenceSrc = e.evidence && e.evidence.source
@@ -4187,8 +4202,23 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
                     children: String(e.tool_name || '').slice(0, narrow ? 8 : 12),
                   }),
                   jsxs('span', {
-                    style: { display: 'inline-grid', gridTemplateColumns: 'repeat(4, 4px)', gap: 1, flexShrink: 0 },
-                    children: dotsFor(val),
+                    style: { display: 'inline-flex', alignItems: 'center', gap: 2, flexShrink: 0 },
+                    children: [
+                      evaluated
+                        ? jsx('span', {
+                          key: 'state-lamp',
+                          style: {
+                            width: 4, height: 4, borderRadius: 2, display: 'inline-block',
+                            background: markerColor, opacity: 0.95,
+                          },
+                        })
+                        : null,
+                      jsx('span', {
+                        key: 'meter',
+                        style: { display: 'inline-grid', gridTemplateColumns: 'repeat(4, 4px)', gap: 1 },
+                        children: dotsFor(val, evaluated),
+                      }),
+                    ],
                   }),
                 ],
               });
