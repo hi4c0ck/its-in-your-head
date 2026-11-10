@@ -1905,7 +1905,10 @@ const IYH_J = {
   accent: '#35C8FF',       // fallback tint; the pane resolves its accent CSS variable at draw time and overrides this
   accentConf: 0.83,        // brick "confidence" (coverage 0..1) at/above which contrast reaches full (1.0)
   steep: 3.0,              // contrast gamma: steepens the ramp so main lines (high confidence) pop vs faint shadows
-  rasterGain: 1.0,         // brightness of the template-rasterized coverage (darkness * 255 * rasterGain)
+  rasterGain: 2.0,       // brightness of the template-rasterized coverage (darkness * 255 * rasterGain); the pencil is gray -> 2.0 lifts it to full bricks
+  canvasFloor: 0.35,     // min alpha for a non-main brick (the face reads, not washed-out); main lines go to full
+  invertHoldMs: 1300,    // normal phase (main lines follow the contrast) before the invert flicker
+  invertMs: 400,         // inverted phase ("less-visible" faint bricks light up, main lines dim) before reverting
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
   lift: 0.06,             // brightness lift -> effFloor = floor + lift
   tint: 0.10,             // gamma: pow(v.c, 1 + 1.5*tint)
@@ -2088,7 +2091,7 @@ function iiyhRasterizeTemplateCoverage(templateId) {
 }
 // Per-frame CANVAS renderer. `cov` is the 214x240 coverage grid (default the baked
 // IYH_FACE_COV_BYTES; a template-rasterized grid when a drawing template is selected).
-function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov) {
+function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, inverted = false) {
   ctx.clearRect(0, 0, W, H)                                  // transparent bg
   cov = cov || IYH_FACE_COV_BYTES
   const cn = IYH_FACE_COV.cn, rn = IYH_FACE_COV.rn
@@ -2117,12 +2120,17 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov) {
     const gn = IYH_J_TONE[pc % IYH_J_SPEC.bw][prr % IYH_J_SPEC.bh]
     const contrast = iiyhJContrast(vc)                          // acos spline: [0,1], full at accentConf (0.83+)
     const grain = 0.35 + 0.65 * gn                              // per-brick grain variation
-    ctx.globalAlpha = Math.min(IYH_J.soft, contrast * grain * iiyhJShim(i0, seed))
+    const isMain = vc >= 0.5                                       // the darker half of the strokes -> FULL intensity (pop vs the body)
+    let a = isMain ? IYH_J.soft : Math.max(IYH_J.canvasFloor || 0, contrast * grain * iiyhJShim(i0, seed))
+    if (inverted) a = 1 - a          // invert phase: main lines dim, the "less-visible" body bricks light up
+    if (a <= 0.01) continue
+    ctx.globalAlpha = a
     ctx.fillRect(offX + pc * bwS + drift + gapX / 2, offY + prr * bhS + gapY / 2,
                  Math.max(0.5, bwS - gapX), Math.max(0.5, bhS - gapY))
   }
   ctx.globalAlpha = 1
 }
+// iiyhJCanvas v12: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode (no atob) + baked fallback + grout + arccos contrast + accent (read from the canvas; the pane sets --ui-accent on its mounted container, not body, so resolve canvas -> documentElement -> body) + template-following DARKNESS raster (rasterGain 2.0 / canvasFloor .35 / isMain gate, bright not washed-out) + INVERT FLICKER (normal invertHoldMs -> inverted invertMs -> revert) + CONTAIN-FIT (aspectRatio, no stretch) + PULSE fills remaining height (sidebar flex:1). The 850ms model poll stays untouched.
 // Self-driven 12fps canvas renderer. The pane's OWN rAF loop (throttled to
 // IYH_BRICK_FPS) draws the field each frame — not a static image. Started when
 // active, re-fit on resize, stopped on cleanup. Returns the <canvas> ref to attach.
@@ -2173,7 +2181,10 @@ function useIyhBrickCanvas(active, templateId) {
       last = ts
       frame += 1
       if (frame % 10 === 0) seed = iiyhJSeed(frame)   // shimmer re-roll (~0.8s)
-      iiyhBrickCanvasDraw(ctx, canvas.width, canvas.height, frame, seed, covRef.current)
+      const invertHold = IYH_J.invertHoldMs || 1300, invertOn = IYH_J.invertMs || 400
+      const cycle = invertHold + invertOn
+      const inverted = cycle > 0 && (ts % cycle) >= invertHold   // timed invert flicker: 1.3s normal, 0.4s inverted
+      iiyhBrickCanvasDraw(ctx, canvas.width, canvas.height, frame, seed, covRef.current, inverted)
     }
     raf = requestAnimationFrame(loop)
     return () => { running = false; cancelAnimationFrame(raf); if (ro) ro.disconnect() }
@@ -2217,8 +2228,11 @@ function IyhPortraitCompact({ data, preferences, size = 48, fill = false }) {
     title: 'PORTRAIT · accumulated interaction impression',
     // fill (sidebar): the brick canvas stretches to the module's full height/width;
     // fixed (strip): the compact 48px instrument square.
+    // contain-fit, never stretch: aspect-ratio locks the face's 720x760 ratio; the
+    // 100% width + auto height is the LARGEST box that fits the container at that
+    // ratio (the draw's Math.min letterbox fills it exactly, no distortion).
     style: fill
-      ? { width: '100%', height: '100%', flex: '1 1 auto', display: 'block', minWidth: 0, minHeight: 0 }
+      ? { width: '100%', height: 'auto', aspectRatio: '720 / 760', display: 'block', minWidth: 0, maxHeight: '100%' }
       : { width: size, height: size, flex: '0 0 ' + size + 'px', display: 'block' },
   })
 }
@@ -4293,13 +4307,22 @@ function PortraitView({ data, drift, narrow, canExpand, preferences }) {
       })] : []),
     ],
   })
+  // Narrow (sidebar): just the contain-fit image (the flank ticks + readout are the
+  // "redundant artifacts" -> dropped so the image owns the full width).
+  if (narrow) {
+    return jsxs('div', {
+      className: 'flex flex-1 items-center',
+      style: { minHeight: 0, overflow: 'hidden' },
+      children: [jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: true })],
+    })
+  }
   return jsxs('div', {
-    className: 'flex flex-1',
-    style: { gap: narrow ? 8 : 12, minHeight: 0, overflow: 'hidden', alignItems: narrow ? 'stretch' : 'center' },
+    className: 'flex flex-1 items-center',
+    style: { gap: 12, minHeight: 0, overflow: 'hidden' },
     children: [
-      jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: narrow }),
+      jsx(IyhPortraitCompact, { data, preferences, size: 48 }),
       flank,
-      ...(!narrow ? [readout] : []),
+      readout,
     ],
   })
 }
@@ -5339,8 +5362,8 @@ function Strip({ source, rest, portraitPreferences }) {
       // v0.1.10 (review fix 7): equal flexible basis so PORTRAIT and
       // PULSE genuinely split the sidebar 50/50 (the old '1 1 50%' /
       // 'flex: 1' pair gave portrait ~75%).
-      flex: composition === 'sidebar' ? '0 0 auto' : 1,
-      minWidth: 0, minHeight: 0, maxHeight: '42%', overflow: 'hidden',
+      flex: composition === 'sidebar' ? '1 1 0%' : 1,
+      minWidth: 0, minHeight: 0, overflow: 'hidden',
       outline: tab === 'pulse' ? '1px solid var(--ui-accent)' : '1px solid transparent',
       outlineOffset: -1,
     },
@@ -5379,7 +5402,7 @@ function Strip({ source, rest, portraitPreferences }) {
     'data-focus': tab === 'portrait' ? 'active' : 'inactive',
     className: 'flex items-center',
     style: {
-      flex: composition === 'sidebar' ? '1 1 0%' : '0 0 auto',
+      flex: '0 0 auto',
       minHeight: 0, minWidth: 0, overflow: 'hidden',
       outline: tab === 'portrait' ? '1px solid var(--ui-accent)' : '1px solid transparent',
       outlineOffset: -1,
