@@ -1919,10 +1919,7 @@ const IYH_J = {
   ditherDriftX: 12,    // dither mask drift, X (bricks/sec; features crawl, the face visibly shimmers)
   ditherDriftY: 8,     // dither mask drift, Y (bricks/sec; DIFFERENT from X -> NON-diagonal)
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
-  waveAmp: 6,            // v20: the WAVE offset amplitude (noise-units) - how hard the mask ripples in the wave shape
-  groundMax: 0.3,        // v21: the GROUND dither max opacity - the background (void) ripples on its own opacity, the face lines stay crisp
-  foldOffset: 1,         // v20: the SECONDARY fold mask = the SVG lines shifted LEFT this many pooled bricks (~avg line width, 8-12px) -> prevents mess near the lines
-  lineFoldThr: 0.5,   // v20 coverage (0..1) at/above which the wave FOLDS (damps) at a brick -> crisp lines, no mess near the SVG lines
+  waveAmp: 6,            // v23: the WAVE offset amplitude (noise-units) - how hard the dither field ripples in the wave shape (the NEW iihyJWave formula)
   glitchEvery: 90,    // v19 the GLITCH burst cadence: frames between glitch bursts (~7.5s at 12fps)
   glitchLen: 10,       // v19 how long a glitch burst lasts, in frames (~0.83s) -> a brief rip, then snap-back
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
@@ -2041,15 +2038,14 @@ function iihyJNoise(nx, ny, seed, feat) {
   const ab = a + (b - a) * sx, cd = c + (d - c) * sx
   return ab + (cd - ab) * sy
 }
-// v20: the user's wave-formula OFFSET mask (x in 0..1): y = 0.54 + 0.12 sin(πx) - 0.15 cos(πx)
-// + 0.22 sin(2πx) - 0.23 cos(2πx) - 0.09 sin(3πx) - 0.02 cos(3πx). Drives the per-column mask
-// offset -> the dither field ripples in this wave shape across the face (the "impress" drift).
+// v23: the user's NEW wave-formula OFFSET mask (x in 0..1): y = 0.28 sin(πx) - 0.25 cos(πx)
+// + 0.01 sin(2πx) - 0.59 cos(2πx) + 0.15 sin(3πx) - 0.37 cos(3πx). Drives the per-column mask
+// offset -> the dither field ripples in this wave shape across the face.
 function iihyJWave(x) {
   const PI = Math.PI
-  return 0.54
-    + 0.12 * Math.sin(PI * x) - 0.15 * Math.cos(PI * x)
-    + 0.22 * Math.sin(2 * PI * x) - 0.23 * Math.cos(2 * PI * x)
-    - 0.09 * Math.sin(3 * PI * x) - 0.02 * Math.cos(3 * PI * x)
+  return 0.28 * Math.sin(PI * x) - 0.25 * Math.cos(PI * x)
+    + 0.01 * Math.sin(2 * PI * x) - 0.59 * Math.cos(2 * PI * x)
+    + 0.15 * Math.sin(3 * PI * x) - 0.37 * Math.cos(3 * PI * x)
 }
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1
@@ -2165,13 +2161,10 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     gColor = '#ff2d95'   // the RGB-split glitch color: a strong MAGENTA (unmistakable against the base cyan)
   }
   const accentColor = iiyhJResolveAccent()                     // pane accent (cached); alpha via globalAlpha; the glitch band overrides it
-  // v20: the WAVE-FORMULA offset mask (iihyJWave) + the LINE-FOLD damping. The wave ripples the
-  // dither field per-column; it FOLDS (damps) where a brick sits ON the SVG lines (cvv) or in the
-  // SECONDARY fold band (the lines shifted LEFT by foldOff -> cvvL) -> the ripple is full in open
-  // areas, calm at the lines (no mess).
+  // v23: the WAVE-FORMULA offset mask (iihyJWave, the NEW formula) -> the dither field ripples per-column
+  // in the wave shape. The dither projects ONLY onto the bricks (the face cells); the void stays empty.
+  // No separate ground layer, no fold-damping (the projection is ON the bricks).
   const waveAmp = IYH_J.waveAmp || 6
-  const foldOff = IYH_J.foldOffset || 1
-  const lineFoldThr = (IYH_J.lineFoldThr || 0.5) * 255
   for (let prr = 0; prr < pm; prr++) for (let pc = 0; pc < pn; pc++) {
     let cvv = 0, found = false
     for (let yy = 0; yy < pool; yy++) for (let xx = 0; xx < pool; xx++) {
@@ -2181,41 +2174,14 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       if (v > cvv) cvv = v
       found = true
     }
-    if (!found) continue
-    const vc = cvv / 255                                       // brick "confidence" 0..1
-    const contrast = iiyhJContrast(vc)                          // acos spline: [0,1], full at accentConf (0.83+)
-    const isLit = cvv >= IYH_FACE_COV.thr                       // a FACE line (the SVG pattern hit here)
-    // the SECONDARY fold mask = the SVG lines shifted LEFT by foldOff pooled bricks (≈ the avg line
-    // width) -> the fold band that keeps the ground ripple from getting messy near the lines.
-    let cvvL = 0
-    if (pc >= foldOff) {
-      const cc = pc - foldOff
-      for (let yy2 = 0; yy2 < pool; yy2++) for (let xx2 = 0; xx2 < pool; xx2++) {
-        const c0 = cc * pool + xx2, r0 = prr * pool + yy2
-        if (c0 >= cn || r0 >= rn) continue
-        const v2 = cov[r0 * cn + c0]; if (v2 > cvvL) cvvL = v2
-      }
-    }
-    // proximity to the lines (0 = deep void, 1 = on/near a line or the shifted-left fold band)
-    const lineProx = Math.min(1, Math.max(cvv, cvvL) / lineFoldThr)
-    // the per-column WAVE offset (FULL in the ground; it FOLDS (damps) where it hits the lines).
-    // v22: MIRRORED L->R ((pn-1-pc) not pc) so the wave ripples the correct way, not inverted.
-    const waveOff = (iihyJWave((pn - 1 - pc) / Math.max(1, pn - 1)) - 0.5) * waveAmp * (1 - lineProx)
+    if (!found || cvv < IYH_FACE_COV.thr) continue   // v23: the dither projects ONLY onto the bricks (the face cells); the void stays empty (no separate ground layer)
+    // v23: the per-column WAVE offset (the NEW formula, MIRRORED L->R). The dither field ripples in this
+    // wave shape across the face. No ground, no fold-damping (the projection is ON the bricks).
+    const waveOff = iihyJWave((pn - 1 - pc) / Math.max(1, pn - 1)) * waveAmp
     const dv = iihyJNoise(pc + dOffX, prr + dOffY + waveOff, IYH_J.ditherSeed, IYH_J.ditherFeat)
-    let a
-    if (isLit) {
-      // v22: the FACE line PULLS FULL COLOR (the accent, ~1.0, no faint-line dimming) with a 0.05-level
-      // pulse (a subtle 5% flicker, deterministic per-frame + per-brick). Where a face brick clashes with
-      // the dither mask it stays full color + the pulse -> the lines pop, the ground ripples beneath.
-      const pulse = 0.5 + 0.5 * Math.sin(frame * 0.5 + pc * 0.4 + prr * 0.3)
-      a = 0.95 + 0.05 * pulse
-    } else {
-      // v21: the GROUND — draw the dither where it MISSES the svg pattern (the void, "zero ground"),
-      // on its own opacity (groundMax), FOLDED at the lines (damped where lineProx is high). The
-      // background ripples in the wave shape, the face lines stay crisp.
-      a = IYH_J.groundMax * dv * (1 - lineProx)
-    }
-    if (a <= 0.02) continue
+    // v23: the dither projects onto the brick's OPACITY, CLAMPED at a 0.05 floor on the final color level
+    // (the brick is the FULL accent color; its opacity = the dither value, never below 5% -> it pops).
+    const a = Math.max(dv, 0.05)
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
     const inBand = gActive && prr >= gBand && prr < gBand + gH
     let gx = offX + pc * bwS + drift + gapX / 2, ga = a
