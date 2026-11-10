@@ -281,19 +281,19 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   eq3(fb.lanes.live.length, 2, 'legacy fallback returns ALL tools per lane')
   eq3(fb.lanes.friction.find((e) => e.tool_name === 'github').dominant_source, 'objective', 'fallback friction dominant objective')
   eq3(seam(null).lanes.goal, [], 'null payload -> empty lanes, never omits lanes')
-  // v0.1.11 A + C: decouple "we have a computed state" from magnitude.
-  //   C (presence floor): an evaluated cell never renders a blank meter.
-  //   A (state-presence marker): a lane-colored lamp shows beside the meter
-  //     whenever the engine evaluated the cell (state != 'empty'); empty
-  //     cells show nothing. B (bubble on state) already lives in
-  //     detectPulseTransitions (reason 'state-change'), so not re-pinned here.
+  // v0.1.11 presence floor (C): the meter itself carries "we have a state."
+  //   An evaluated cell (state != 'empty') shows >=1 solid dot; an empty
+  //   cell shows only the faint 0.15-opacity dots. B (bubble on state)
+  //   already lives in detectPulseTransitions (reason 'state-change').
+  //   The earlier leading state-lamp was dropped: it was sized like a meter
+  //   dot, so it read as a phantom 13th dot (friction: 2 real dots + lamp =
+  //   "3") and dropped a second color onto a monochrome meter.
   ok3(lanesSrc.includes('function dotsFor(value, evaluated)'), 'dotsFor is state-aware (presence floor wired)')
   ok3(lanesSrc.includes('if (evaluated && filled < 1) filled = 1'),
     'C floor: an evaluated cell always shows >=1 meter dot (weak can not read as empty)')
-  ok3(lanesSrc.includes("'state-lamp'"), 'A: a state-presence lamp renders beside the meter')
-  ok3(lanesSrc.includes('markerColor'), 'A: the lamp color is computed per cell')
-  ok3(lanesSrc.includes("lane === 'friction'"), 'A: friction lane selects the danger hue for the lamp')
-  ok3(lanesSrc.includes('--dt-destructive'), 'A: friction lamp falls back through the danger var chain')
-  console.log('ok ' + (++n) + ' - v0.1.11 presence floor (C) + state-presence marker (A) wired')
+  ok3(lanesSrc.includes('dotsFor(val, evaluated)'), 'the meter carries the floor (dotsFor gets evaluated at the render site)')
+  ok3(!lanesSrc.includes('state-lamp'), 'no phantom leading lamp dot (presence is the floor, not a 13th dot)')
+  ok3(!lanesSrc.includes('markerColor'), 'no separate marker color (one dot-language, no second hue)')
+  console.log('ok ' + (++n) + ' - v0.1.11 presence floor (C) carried by the meter; phantom lamp dropped')
 }
 console.log('PASS pulse: ' + n + ' assertions')

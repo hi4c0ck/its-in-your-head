@@ -4158,16 +4158,13 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
             children: entries.map(function (e, i) {
               var val = e && typeof e.value === 'number' ? e.value
                 : (e && e.momentum && typeof e.momentum.value === 'number' ? e.momentum.value : null);
-              // A (v0.1.11 state-presence marker): decouple "we have a
-              // computed state here" from magnitude. Any cell the engine
-              // evaluated (state != 'empty', or a live count) shows a
-              // small lane-colored lamp beside the meter; 'empty' cells
-              // show nothing. The meter still encodes strength, and the
-              // C floor guarantees it is never blank when evaluated.
+              // C (v0.1.11 presence floor): presence is carried by the
+              // meter itself, not a separate marker. An evaluated cell
+              // (state != 'empty', or a live count) shows >=1 solid dot;
+              // an empty cell shows only the faint 0.15-opacity dots. No
+              // leading lamp — one dot-language, no phantom 13th dot, no
+              // second color.
               var evaluated = e.state ? (e.state !== 'empty') : (val !== null);
-              var markerColor = (lane === 'friction')
-                ? 'var(--dt-destructive, var(--destructive, var(--ui-accent)))'
-                : 'var(--ui-accent)';
               // Stage 3 detail surface: full canonical name, value,
               // state, support_count, threshold, evidence source.
               var evidenceSrc = e.evidence && e.evidence.source
@@ -4202,23 +4199,8 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
                     children: String(e.tool_name || '').slice(0, narrow ? 8 : 12),
                   }),
                   jsxs('span', {
-                    style: { display: 'inline-flex', alignItems: 'center', gap: 2, flexShrink: 0 },
-                    children: [
-                      evaluated
-                        ? jsx('span', {
-                          key: 'state-lamp',
-                          style: {
-                            width: 4, height: 4, borderRadius: 2, display: 'inline-block',
-                            background: markerColor, opacity: 0.95,
-                          },
-                        })
-                        : null,
-                      jsx('span', {
-                        key: 'meter',
-                        style: { display: 'inline-grid', gridTemplateColumns: 'repeat(4, 4px)', gap: 1 },
-                        children: dotsFor(val, evaluated),
-                      }),
-                    ],
+                    style: { display: 'inline-grid', gridTemplateColumns: 'repeat(4, 4px)', gap: 1, flexShrink: 0 },
+                    children: dotsFor(val, evaluated),
                   }),
                 ],
               });
