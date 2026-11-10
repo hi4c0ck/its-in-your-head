@@ -1919,6 +1919,8 @@ const IYH_J = {
   ditherDriftX: 12,    // dither mask drift, X (bricks/sec; features crawl, the face visibly shimmers)
   ditherDriftY: 8,     // dither mask drift, Y (bricks/sec; DIFFERENT from X -> NON-diagonal)
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
+  glitchEvery: 90,    // v19 the GLITCH burst cadence: frames between glitch bursts (~7.5s at 12fps)
+  glitchLen: 10,       // v19 how long a glitch burst lasts, in frames (~0.83s) -> a brief rip, then snap-back
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
   lift: 0.06,             // brightness lift -> effFloor = floor + lift
   tint: 0.10,             // gamma: pow(v.c, 1 + 1.5*tint)
@@ -2135,6 +2137,20 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   // NON-diagonally (x + y at different slow rates). No per-brick state (the mask drives the bricks).
   const dOffX = (frame / 12) * (IYH_J.ditherDriftX || 0.5)
   const dOffY = (frame / 12) * (IYH_J.ditherDriftY || 0.35)
+  // v19: the GLITCH burst (a TV-tracking glitch). Mostly the stable dither; then a periodic
+  // random horizontal band rips sideways + takes a glitch (RGB-split) color + its bricks
+  // scramble, then snaps back. Deterministic (seeded from the burst index).
+  const gEvery = IYH_J.glitchEvery || 90, gLen = IYH_J.glitchLen || 10
+  const gActive = (frame % (gEvery + gLen)) < gLen
+  const gIdx = Math.floor(frame / (gEvery + gLen))
+  let gBand = 0, gH = 0, gShift = 0, gJit = 0, gColor = null
+  if (gActive) {
+    gBand = 30 + Math.floor(iihyJHash(gIdx * 31 + 1, gIdx * 7 + 2, IYH_J.ditherSeed + 100) * 15)   // the face's LIT middle (eye/nose), so the rip always shows
+    gH = 5 + Math.floor(iihyJHash(gIdx * 17 + 3, gIdx * 3 + 4, IYH_J.ditherSeed + 99) * 7)
+    gShift = (Math.floor(iihyJHash(gIdx * 13 + 5, gIdx * 11 + 6, IYH_J.ditherSeed + 98) * 13) - 6) * bwS
+    gJit = 0.5 + iihyJHash(gIdx * 19 + 7, gIdx * 13 + 8, IYH_J.ditherSeed + 97) * 0.8
+    gColor = '#ff2d95'   // the RGB-split glitch color: a strong MAGENTA (unmistakable against the base cyan)
+  }
   ctx.fillStyle = iiyhJResolveAccent()                           // pane accent; alpha via globalAlpha
   for (let prr = 0; prr < pm; prr++) for (let pc = 0; pc < pn; pc++) {
     let cvv = 0, i0 = -1, found = false
@@ -2155,13 +2171,20 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     const dv = iihyJNoise(pc + dOffX, prr + dOffY, IYH_J.ditherSeed, IYH_J.ditherFeat)
     const a = contrast * (IYH_J.ditherFloor + (1 - IYH_J.ditherFloor) * dv) * (focusShift ? 1.05 : 1)
     if (a <= 0.02) continue
-    ctx.globalAlpha = a
-    ctx.fillRect(offX + pc * bwS + drift + gapX / 2, offY + prr * bhS + gapY / 2,
-                 Math.max(0.5, bwS - gapX), Math.max(0.5, bhS - gapY))
+    // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
+    const inBand = gActive && prr >= gBand && prr < gBand + gH
+    let gx = offX + pc * bwS + drift + gapX / 2, ga = a
+    if (inBand) {
+      ctx.fillStyle = gColor
+      gx += gShift + Math.sin(frame * 0.9 + prr * 1.3) * bwS * 0.3   // the sideways rip + a little jitter
+      ga = Math.min(1, Math.max(a, 0.85) * (0.6 + 0.4 * iihyJHash(pc * 7 + frame, gIdx, IYH_J.ditherSeed + 90)))  // the band BRIGHT magenta (the RGB-split pop)
+    }
+    ctx.globalAlpha = ga
+    ctx.fillRect(gx, offY + prr * bhS + gapY / 2, Math.max(0.5, bwS - gapX), Math.max(0.5, bhS - gapY))
   }
   ctx.globalAlpha = 1
 }
-// iiyhJCanvas v18: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + DITHER-MASK DRIFT (v18, THE SIMPLE model): face position FIXED; each face brick's opacity = its base brightness * a DRIFTING value-noise DITHER MASK (fit to the image size via IYH_J.ditherFeat, drifting NON-diagonally via ditherDriftX/Y) -> the face shimmers with the drift, no per-brick state, no thin-line sim, no impulse arrays. + contain-fit + PULSE fills remaining height. Tune IYH_J.ditherFeat/ditherFloor/ditherDriftX/ditherDriftY/ditherSeed (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
+// iiyhJCanvas v19: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + DITHER-MASK DRIFT (v18, THE SIMPLE model): face position FIXED; each face brick's opacity = its base brightness * a DRIFTING value-noise DITHER MASK (fit to the image size via IYH_J.ditherFeat, drifting NON-diagonally via ditherDriftX/Y) -> the face shimmers with the drift, no per-brick state, no thin-line sim, no impulse arrays. + contain-fit + PULSE fills remaining height. Tune IYH_J.ditherFeat/ditherFloor/ditherDriftX/ditherDriftY/ditherSeed + glitchEvery/glitchLen (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
 // Self-driven 12fps canvas renderer. The pane's OWN rAF loop (throttled to
 // IYH_BRICK_FPS) draws the field each frame — not a static image. Started when
 // active, re-fit on resize, stopped on cleanup. Returns the <canvas> ref to attach.
