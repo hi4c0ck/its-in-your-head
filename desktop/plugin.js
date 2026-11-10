@@ -2526,8 +2526,8 @@ const PORTRAIT_POLL_MS = 850
 // polls at the mandatory POLL_MS (5000) safety-net cadence. The primary
 // path is still the ~850ms tick push (PULSE_REDUCER_MS); the poll only
 // covers a missed push.
-const IO_WIDTH = 220   // fixed I/O-frame column
-const NARROW_W = 480   // below this frame width the strip is docked narrow (sidebar): I/O column hidden, header collapses to essentials
+const IO_WIDTH = 220   // RETIRED v0.1.12: the I/O readout moved from a fixed side column to a compact bottom-strip ticker (pulse-io-strip); the 4 lane boxes own the full width
+const NARROW_W = 480   // below this frame width the strip is docked narrow (sidebar): the I/O bottom-strip ticker stays compact, header collapses to essentials
 const TINY_W = 320     // below this the sidebar is too thin for worded tabs in the two-row header: tabs collapse to icons-only mode
 const PET_HOLD_MS = 7000  // affection faces hold this long after the LAST pat, then the operational face returns
 const PET_PATS_FOR_TO_PET = 4  // pats during wonder needed to reach the to-pet face
@@ -4366,6 +4366,30 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
         },
         children: available === true ? 'no tools yet' : 'no pulse data yet',
       }),
+    })]).concat([jsx('div', {
+      key: 'pulse-io-strip',
+      'data-testid': 'pulse-io-strip',
+      // v0.1.12 (I/O -> bottom strip): the reserved spawn band doubles as
+      // a compact 1-line I/O ticker (the LATEST frame). The 4 lane boxes
+      // own the full width; the I/O readout no longer steals a 220px side
+      // column. The sprite columns fly up THROUGH this band to the lane
+      // dot columns, so it is the shared spawn space (dual-purpose).
+      style: {
+        position: 'absolute', left: 0, right: 0, bottom: 0,
+        height: PULSE_SPAWN_SPACE, display: 'flex', alignItems: 'center',
+        justifyContent: 'flex-end', gap: 4, padding: '0 4px',
+        pointerEvents: 'none', boxSizing: 'border-box', overflow: 'hidden',
+        fontSize: 10, lineHeight: PULSE_SPAWN_SPACE + 'px',
+      },
+      children: (Array.isArray(ioRecent) && ioRecent.length > 0)
+        ? [jsx(IoLine, { ev: ioRecent[0] })]   // the most recent I/O frame
+        : [jsx('span', {
+            style: {
+              fontSize: 9, color: 'var(--ui-text-quaternary)',
+              fontFamily: 'var(--ui-font-mono, monospace)',
+            },
+            children: 'no I/O yet',
+          })],
     })])],
   });
 }
@@ -5753,31 +5777,13 @@ function Strip({ source, rest, portraitPreferences }) {
         // visible tool's unconsumed backlog (which lives in the DB, not
         // in renderer memory).
         rest,
+        // v0.1.12 (I/O -> bottom strip): the I/O readout no longer owns a
+        // 220px side column. It becomes a compact 1-line ticker in the
+        // grid's reserved bottom spawn band (PULSE_SPAWN_SPACE); the 4
+        // lane boxes now get the full module width. `recent` = the I/O
+        // frames (most-recent-first); the ticker shows the latest.
+        ioRecent: recent,
       }),
-      ...(!narrow
-        ? [jsxs('div', {
-            className: 'flex flex-col justify-end overflow-hidden',
-            style: {
-              width: IO_WIDTH, gap: 2, flexShrink: 0, boxSizing: 'border-box',
-              // v0.1.12 space pass: the I/O readout suits the lane boxes —
-              // same 1px border + 3px padding + 2px radius, so it reads as
-              // a matching 5th board beside the four lanes.
-              border: '1px solid var(--ui-border, var(--border, transparent))',
-              borderRadius: 2,
-              padding: PULSE_BOARD_PAD,
-            },
-            children: [
-              recent.length > 0
-                ? recent.map((ev, i) => jsx(IoLine, { key: i, ev }))
-                : jsx('span', {
-                    style: { fontSize: 10, color: 'var(--ui-text-quaternary)' },
-                    children: metrics && metrics.events > 0
-                      ? 'I/O frames arrive with each agent call'
-                      : 'no events yet — ticks on your next agent turn',
-                  }),
-            ],
-          })]
-        : []),
     ],
   })
   const portraitModule = jsx('div', {

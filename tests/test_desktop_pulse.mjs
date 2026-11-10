@@ -115,8 +115,8 @@ assert.ok(!src.includes("className: g ? 'iyh-glow'"), 'Stage 6: changed-cell glo
 assert.ok(src.includes('iyh-bubble-travel'), 'bubble keyframes still present for PulseLanes (travel: bottom-edge -> destination cell, the rise keyframe was superseded by the measured-surface travel)')
 assert.ok(src.includes("flex: narrow ? '1 1 30%' : undefined"),
   'drift wraps 3x2 in the narrow dock (labels to tooltip, numbers stay)')
-assert.ok(src.indexOf('...(!narrow') > -1,
-  'header wordmark / status / I/O column collapse under the narrow dock (tooltips keep them reachable)')
+assert.ok(src.includes("'data-testid': 'pulse-io-strip'"),
+  'v0.1.12: the I/O readout is a compact bottom-strip ticker (pulse-io-strip, dual-purpose spawn band), not a 220px side column — the 4 lane boxes own the full width')
 assert.ok(src.indexOf('// PULSE-START') < src.indexOf('function selectPulseRows'),
   'pure helpers live between the PULSE markers')
 console.log('ok ' + (++n) + ' - matrix structure assertions')
