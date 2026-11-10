@@ -27,8 +27,9 @@ assert.ok(rStart > 0, 'PULSE_REDUCER_MS region found')
 const rEnd = src.indexOf('// Portrait-only cadence', rStart)
 assert.ok(rEnd > rStart, 'reducer region bounded')
 const rApi = new Function(src.slice(rStart, rEnd) +
-  '\n;return { PULSE_REDUCER_MS, createPulseTickReducer, pulseActivityQuerySuffix, pulseActivityAccept }')()
-const { PULSE_REDUCER_MS, createPulseTickReducer, pulseActivityQuerySuffix } = rApi
+  '\n;return { PULSE_REDUCER_MS, createPulseTickReducer, pulseActivityQuerySuffix, pulseActivityAccept, pulseActivityShouldAdopt }')()
+const { PULSE_REDUCER_MS, createPulseTickReducer, pulseActivityQuerySuffix,
+  pulseActivityAccept, pulseActivityShouldAdopt } = rApi
 
 // --- Extract the STAGE5 block (coordinator + key + detect)
 const block = src.slice(src.indexOf('// STAGE5-START'), src.indexOf('// STAGE5-END'))
@@ -281,6 +282,22 @@ const ev = (id, tool) => ({
   eq(pulseActivityQuerySuffix(), '?after_event_id=57', 'the cursor is monotone per accepted batch')
   rApi.pulseActivityAccept(null) // no fault, no advance
   eq(pulseActivityQuerySuffix(), '?after_event_id=57', 'null batch never moves the cursor')
+  // DEADLOCK regression (found in live smoke, v0.1.10+4): the fresh
+  // pane's first fetch is the no-cursor BASELINE — the server answers
+  // with empty events + the high-water mark. If the pane only adopted
+  // the cursor on accepted events, the cursor stayed null forever,
+  // every fetch stayed a baseline, and the first real batch was
+  // unreachable (no bubbles, ever).
+  eq(pulseActivityShouldAdopt({ accepted: 0 }, { events: [], next_cursor: 42 }),
+    true, 'baseline (no events) ADOPTS the server high-water mark')
+  eq(pulseActivityShouldAdopt({ accepted: 3 }, { events: [1, 2, 3], next_cursor: 9 }),
+    true, 'an accepted batch advances the cursor')
+  eq(pulseActivityShouldAdopt({ accepted: 0 }, { events: [1, 2], next_cursor: 9 }),
+    false, 'a FULL REDELIVERY (zero accepted, non-empty) must NOT advance — refetch redelivers')
+  eq(pulseActivityShouldAdopt({ accepted: 0 }, { events: [] }),
+    false, 'a malformed batch (no next_cursor) must NOT advance')
+  eq(pulseActivityShouldAdopt(null, { events: [], next_cursor: 5 }),
+    true, 'a well-formed empty batch adopts even with no coordinator result (the cursor is module state; the effect always passes a real result)')
 }
 
 console.log('PASS pulse-tick-reducer: ' + n + ' assertions')

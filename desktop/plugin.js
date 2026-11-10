@@ -2375,6 +2375,21 @@ function actBatchKey(batch) {
   if (!batch || !Array.isArray(batch.events) || batch.events.length === 0) return ''
   return batch.events.map(function (e) { return e ? e.id : 0 }).join(',')
 }
+// v0.1.10 (spec §4.4) — cursor adoption. Two well-formed cases advance
+// the cursor after the batch is accepted:
+//   * a batch with accepted events (rule 6: the desktop accepted it);
+//   * the NO-EVENTS BASELINE (no cursor sent -> the server returns its
+//     high-water mark with empty history). The baseline must be adopted
+//     too — otherwise every fetch stays cursor-less, the baseline never
+//     carries history, and the first real event batch is unreachable
+//     (cursor deadlock: bubbles never appear on a fresh pane).
+// A non-empty batch with ZERO accepted (full redelivery) must NOT
+// advance — that is how a refetch without acceptance redelivers.
+function pulseActivityShouldAdopt(res, batch) {
+  if (!batch || typeof batch.next_cursor !== 'number') return false
+  if (res && res.accepted > 0) return true
+  return Array.isArray(batch.events) && batch.events.length === 0
+}
 // The module-level reducer instance: ticks come from the single
 // register() listener; the refresh runs the TARGETED PULSE
 // invalidation installed at register time. Settle happens via the
@@ -3770,17 +3785,29 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
   // is accepted (pulseActivityAccept); a refetch without acceptance
   // redelivers and the coordinator's per-surface watermark de-dupes.
   var actKey = actBatchKey(activityEvents);
+  // The effect must ALSO run for the well-formed BASELINE batch
+  // (events: [] + next_cursor): that is the only moment the pane
+  // adopts the server's high-water mark. Key: the event-id list, or
+  // the baseline cursor identity when there are no events.
+  var effKey = actKey || (activityEvents && typeof activityEvents.next_cursor === 'number'
+    ? 'base|' + activityEvents.next_cursor : '');
   useEffect(function () {
-    if (!actKey) return;
+    if (!effKey) return;
     var evs = activityEvents.events;
     var res = coord.activity(evs, rawLanes, cap,
       { reducedMotion: reducedRef.current });
-    if (res.accepted > 0) {
-      pulseActivityAccept({ activity_events: { next_cursor: activityEvents.next_cursor } });
+    // Cursor adoption (spec §4.4): advance after the batch is accepted —
+    // accepted events, OR the no-events baseline (which must be adopted
+    // too or the cursor never leaves null and the first batch is
+    // unreachable). Redelivered batches (zero accepted) do not advance.
+    if (pulseActivityShouldAdopt(res, activityEvents)) {
+      pulseActivityAccept({ activity_events: activityEvents });
     }
     res.fresh.forEach(scheduleArrival);
-    setTick5(function (v) { return v + 1; });
-  }, [actKey]);
+    if (res.accepted > 0 || res.fresh.length > 0) {
+      setTick5(function (v) { return v + 1; });
+    }
+  }, [effKey]);
 
   // Snapshot ingest + arrival scheduling, effect-only: re-runs when
   // the visible lane content or capacity changes, never per render.
