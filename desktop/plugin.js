@@ -2537,16 +2537,21 @@ function visibleCapacity(availableHeight, opts) {
   return cap;
 }
 
-function capacityForComposition(box, composition) {
+function capacityForComposition(box, composition, opts) {
+  var o = opts || {};
   var w = box && Number.isFinite(Number(box.width)) ? Number(box.width) : 0;
   var h = box && Number.isFinite(Number(box.height)) ? Number(box.height) : 0;
   // Reserve header/ticker/padding so the measured pane height maps to
   // the PULSE module's actual available height. The pixel budget is
   // layout geometry (not a theme color), consistent with NARROW_W.
-  var chrome = 48;
+  // v0.1.10 (review fix 7): a MEASURED box is already the PULSE module
+  // (its own ResizeObserver readout) — no chrome estimate and no 50/50
+  // halving apply to it; only the legacy outer-Strip path keeps the
+  // 48px reserve + sidebar half.
+  var chrome = o.measured ? 0 : 48;
   var avail = h - chrome;
-  if (!Number.isFinite(avail) || avail <= 0) avail = 48;
-  if (composition === 'sidebar') {
+  if (!Number.isFinite(avail) || avail <= 0) avail = o.measured ? 24 : 48;
+  if (composition === 'sidebar' && !o.measured) {
     // Sidebar splits PORTRAIT/PULSE ~50/50: PULSE gets roughly half.
     var half = Math.max(24, Math.floor(avail / 2));
     return visibleCapacity(half, { minCap: 1, maxCap: 4 });
@@ -2682,13 +2687,19 @@ function adaptPulseToLanes(pulse) {
   function semEntry(e, idx, col, threshold, evidenceKey) {
     var r = e.row;
     var v = semValue(r, col);
-    var support = stage4Support(0, 3);
+    // Legacy rows carry NO evidence counts: support is UNKNOWN
+    // (null), not "zero of 3 required" — the compatibility path must
+    // not pretend the old API supplied evidence (review fix 9). With
+    // unknown support the state can only be 'learning' (a numeric
+    // score without evidence is never 'provisional').
+    var support = { count: null, required: null, ratio: null };
     var entry = {
       tool_id: idOf(r), tool_name: nameOf(r), rank: idx + 1,
       value: v, threshold: threshold,
       level: stage4Level(v, threshold),
-      state: v === null ? 'learning' : 'provisional',
+      state: 'learning',
       support: support,
+      compat: 'legacy',
     };
     if (evidenceKey === 'prototype_banks') {
       entry.evidence = { source: 'none', prototype_count: 0, capsule_count: 0 };
@@ -2704,7 +2715,8 @@ function adaptPulseToLanes(pulse) {
     var f = r && r.friction && typeof r.friction === 'object' ? r.friction : {};
     function part(p) {
       var v = p === null || p === undefined ? null : stage4Clamp01(typeof p === 'number' ? p : p.value);
-      return { value: v, level: stage4Level(v, 0.4), state: v === null ? 'learning' : 'provisional', support: stage4Support(0, 3) };
+      return { value: v, level: stage4Level(v, 0.4), state: 'learning',
+               support: { count: null, required: null, ratio: null } };
     }
     // Legacy shape: friction.user / friction.objective may be numbers OR
     // per-source cells. The adapter normalises to PulseFrictionPart.
@@ -2727,7 +2739,9 @@ function adaptPulseToLanes(pulse) {
       tool_id: idOf(r), tool_name: nameOf(r), rank: idx + 1,
       value: top, threshold: 0.4,
       level: stage4Level(top, 0.4),
-      state: top === null ? 'learning' : 'provisional',
+      state: 'learning',
+      support: { count: null, required: null, ratio: null },
+      compat: 'legacy',
       dominant_source: dominant_source, user: userPart, objective: objPart,
     };
   });
@@ -2818,41 +2832,135 @@ function pulseVisibleLanes(snapshot, capacity) {
   });
   return out;
 }
-// Exactly one transition per meaningful change; sub-threshold noise
-// (same quantized bucket, same level/state/rank) yields none.
+// Slot-occupancy map: metric|slot -> semantic identity. The visual
+// destination of every transition is a SLOT, not a semantic identity:
+// entries, exits, rank moves and swaps are all visible-slot occupant
+// changes (review fix 4). Occupied -> empty slots never animate (an
+// exit commits statically); the coordinator prunes them.
+function pulseSlotMap(snapshot, capacity) {
+  var cap = Math.max(1, Math.floor(Number(capacity) || (snapshot && snapshot.capacity) || 1));
+  var slots = {};
+  PULSE_LANE_ORDER.forEach(function (metric) {
+    var entries = Object.keys(snapshot.byId).map(function (k) { return snapshot.byId[k]; })
+      .filter(function (e) { return e.metric === metric; })
+      .sort(function (a, b) { return (a.rank || 0) - (b.rank || 0); })
+      .slice(0, cap);
+    entries.forEach(function (e, i) {
+      slots[pulseSlotId(metric, i)] = pulseSemanticId(metric, e);
+    });
+  });
+  return slots;
+}
+// One transition per meaningful VISIBLE-SLOT change: new occupant
+// (entry), displaced occupant (rank-change), or the same occupant with
+// a meaningful evaluation change. Sub-threshold noise (same quantized
+// bucket, level, state) yields none — mirrors pulse/matrix.py ranking.
 function detectPulseTransitions(prevSnap, nextSnap, seqStart) {
   var transitions = [];
   var seq = Number(seqStart) || 0;
   if (!prevSnap || !nextSnap) return transitions;
-  Object.keys(nextSnap.byId).forEach(function (sid) {
-    var prev = prevSnap.byId[sid];
-    var next = nextSnap.byId[sid];
-    if (!prev || !next) return; // first appearance: hydration/appearance is static
+  var prevSlots = pulseSlotMap(prevSnap, nextSnap.capacity);
+  var nextSlots = pulseSlotMap(nextSnap, nextSnap.capacity);
+  var slotKeys = {};
+  Object.keys(prevSlots).forEach(function (k) { slotKeys[k] = true; });
+  Object.keys(nextSlots).forEach(function (k) { slotKeys[k] = true; });
+  Object.keys(slotKeys).forEach(function (slotKey) {
+    var metric = slotKey.split('|')[0];
+    var prevOcc = prevSlots[slotKey] || null;
+    var nextOcc = nextSlots[slotKey] || null;
     var reason = null;
-    if (prev.rank !== next.rank) reason = 'rank-change';
-    else if (prev.level !== next.level) reason = 'level-change';
-    else if (prev.state !== next.state) reason = 'state-change';
-    else if (pulseQuantizedScore(prev.value) !== pulseQuantizedScore(next.value)) reason = 'value-change';
+    var prevEntry = prevOcc ? prevSnap.byId[prevOcc] : null;
+    var nextEntry = nextOcc ? nextSnap.byId[nextOcc] : null;
+    if (nextOcc && prevOcc === nextOcc) {
+      // Stable occupant: only a meaningful evaluation change animates.
+      if (prevEntry.level !== nextEntry.level) reason = 'level-change';
+      else if (prevEntry.state !== nextEntry.state) reason = 'state-change';
+      else if (pulseQuantizedScore(prevEntry.value) !== pulseQuantizedScore(nextEntry.value)) reason = 'value-change';
+    } else if (nextOcc && nextEntry) {
+      // New occupant of this slot: either a FIRST APPEARANCE in the
+      // visible set ('entry') or a rank move/swap of an already-visible
+      // tool ('rank-change') that displaced the previous occupant.
+      reason = (prevOcc === null || !prevSnap.byId[nextOcc]) ? 'entry' : 'rank-change';
+    }
+    // Occupied -> empty slots are exits: they never spawn a bubble;
+    // the coordinator prunes the committed occupant instead.
     if (!reason) return;
     seq += 1;
     transitions.push({
       sequence: seq,
-      metric: next.metric,
-      tool: next.tool_name,
-      toolId: next.tool_id != null ? next.tool_id : null,
-      semanticId: sid,
-      destinationSlot: Math.max(0, (Number(next.rank) || 1) - 1),
-      slotId: pulseSlotId(next.metric, Math.max(0, (Number(next.rank) || 1) - 1)),
-      previousValue: prev.value, nextValue: next.value,
-      previousLevel: prev.level, nextLevel: next.level,
-      previousState: prev.state, nextState: next.state,
-      previousRank: prev.rank != null ? prev.rank : null,
-      nextRank: next.rank != null ? next.rank : null,
+      metric: metric,
+      tool: nextEntry.tool_name,
+      toolId: nextEntry.tool_id != null ? nextEntry.tool_id : null,
+      semanticId: nextOcc,
+      destinationSlot: Number(slotKey.split('|')[1]),
+      slotId: slotKey,
+      previousValue: prevEntry ? prevEntry.value : null,
+      nextValue: nextEntry.value,
+      previousLevel: prevEntry ? prevEntry.level : null,
+      nextLevel: nextEntry.level,
+      previousState: prevEntry ? prevEntry.state : null,
+      nextState: nextEntry.state,
+      previousRank: prevEntry ? prevEntry.rank : null,
+      nextRank: nextEntry.rank,
       reason: reason,
     });
   });
   transitions.sort(function (a, b) { return a.sequence - b.sequence; });
   return transitions;
+}
+// Coherent lane-level commit on arrival (review fix 4): settle every
+// slot whose occupant is not still in flight with its latest content,
+// and drop this lane's committed occupants that left the visible set
+// and are not in flight. In-flight occupants keep their old evaluation
+// CONTENT until their own bubble arrives, but their RANK follows the
+// latest snapshot immediately — two tools never share a slot in the
+// visible ordering, and the rank sort stays coherent mid-flight.
+function pulseCommitLane(state, metric) {
+  var latest = state.latest;
+  if (!latest) return;
+  var laneIds = {};
+  Object.keys(latest.byId).forEach(function (k) {
+    if (latest.byId[k] && latest.byId[k].metric === metric) laneIds[k] = latest.byId[k];
+  });
+  var inFlight = {};
+  (state.active || []).concat(state.queued || []).forEach(function (a) {
+    if (a.metric === metric) inFlight[a.semanticId] = true;
+  });
+  Object.keys(state.committed.byId).forEach(function (k) {
+    var e = state.committed.byId[k];
+    if (e.metric === metric && !laneIds[k] && !inFlight[k]) {
+      delete state.committed.byId[k];
+    }
+  });
+  var slots = pulseSlotMap(latest, latest.capacity);
+  Object.keys(slots).forEach(function (sk) {
+    var occ = slots[sk];
+    if (laneIds[occ] && !inFlight[occ]) {
+      state.committed.byId[occ] = laneIds[occ];
+    }
+  });
+  Object.keys(inFlight).forEach(function (k) {
+    if (laneIds[k] && state.committed.byId[k]) {
+      state.committed.byId[k] = Object.assign(
+        {}, state.committed.byId[k], { rank: laneIds[k].rank });
+    }
+  });
+}
+// Renderer-side data key: PulseLanes effects re-run only when the
+// VISIBLE lane content actually changes (identity of the polled object
+// must not re-ingest on every render).
+function pulseLanesKey(lanes, capacity) {
+  var cap = Math.max(1, Math.floor(Number(capacity) || 1));
+  var parts = [];
+  PULSE_LANE_ORDER.forEach(function (metric) {
+    var entries = lanes && Array.isArray(lanes[metric]) ? lanes[metric].slice(0, cap) : [];
+    var seg = entries.map(function (e) {
+      return pulseSemanticId(metric, e) + ':' + pulseQuantizedScore(pulseEntryValue(e)) +
+        ':' + (pulseEntryLevel(e) || '') + ':' + (pulseEntryState(e) || '');
+    }).join(';');
+    parts.push(metric + '=' + seg);
+  });
+  return parts.join('|');
 }
 // Surface-relative path: spawn at the surface's bottom edge, target
 // over the destination cell — derived only from the measured box.
@@ -2872,10 +2980,16 @@ function prefersReducedMotion(media) {
 // Bounded coordinator: committed stays visible during travel; arrival
 // commits one pending entry; newer rankings supersede in-flight work
 // for the same semantic identity; cap bounds concurrent bubbles.
+// v0.1.10 (review fixes 4/6): transitions are VISIBLE-SLOT occupant
+// changes (entry / rank-change / evaluation), exits prune the committed
+// snapshot, and arrival commits the lane coherently. Arrival flashes
+// are per-slot with sequence ownership (a stale timer can never clear
+// a newer flash); the renderer owns timer lifecycle in effects.
 function createPulseBubbleCoordinator(opts) {
   var o = opts || {};
   var cap = Math.max(1, Math.floor(Number(o.maxConcurrent) || MAX_CONCURRENT_BUBBLES));
-  var state = { seq: 0, committed: null, latest: null, active: [], queued: [], flashSlotId: null, hydrated: false };
+  var state = { seq: 0, committed: null, latest: null, active: [], queued: [],
+                flashSlotId: null, flashes: {}, flashOwner: {}, hydrated: false };
   function promote() {
     while (state.active.length < cap && state.queued.length > 0) {
       state.active.push(state.queued.shift());
@@ -2892,12 +3006,28 @@ function createPulseBubbleCoordinator(opts) {
       state.seq += found.length;
       if (ingestOpts && ingestOpts.reducedMotion) {
         state.committed = snap; state.latest = snap; state.active = []; state.queued = [];
+        state.flashes = {}; state.flashOwner = {}; state.flashSlotId = null;
         return { transitions: found, active: state.active, queued: state.queued, immediate: true, committed: state.committed };
       }
       found.forEach(function (t) {
         state.active = state.active.filter(function (a) { return a.semanticId !== t.semanticId; });
         state.queued = state.queued.filter(function (a) { return a.semanticId !== t.semanticId; });
         if (state.active.length < cap) state.active.push(t); else state.queued.push(t);
+      });
+      // Exits: an occupied slot that is now empty and whose occupant is
+      // not handled by a transition or still in flight left the visible
+      // set — prune the committed snapshot now (no bubble for exits).
+      var movedIds = {};
+      found.forEach(function (t) { movedIds[t.semanticId] = true; });
+      var inFlightIds = {};
+      state.active.concat(state.queued).forEach(function (a) { inFlightIds[a.semanticId] = true; });
+      var prevSlots = pulseSlotMap(state.latest, snap.capacity);
+      var nextSlots = pulseSlotMap(snap, snap.capacity);
+      Object.keys(prevSlots).forEach(function (sk) {
+        var occ = prevSlots[sk];
+        if (nextSlots[sk] === occ) return; // occupant still on this slot
+        if (movedIds[occ] || inFlightIds[occ]) return; // settling elsewhere
+        if (state.committed.byId[occ]) delete state.committed.byId[occ];
       });
       state.latest = snap;
       return { transitions: found, active: state.active, queued: state.queued, immediate: false, committed: state.committed };
@@ -2907,33 +3037,34 @@ function createPulseBubbleCoordinator(opts) {
       if (idx < 0) return { arrived: false, committed: state.committed };
       var t = state.active[idx];
       state.active.splice(idx, 1);
-      if (state.latest && state.latest.byId[t.semanticId]) {
-        state.committed.byId[t.semanticId] = state.latest.byId[t.semanticId];
-        // Rank-change arrival displaces the occupant: its committed
-        // rank follows its own pending rank so two tools never share
-        // a slot in the visible ordering.
-        var arrivedRank = state.latest.byId[t.semanticId].rank;
-        Object.keys(state.committed.byId).forEach(function (k) {
-          var e = state.committed.byId[k];
-          if (e.metric === t.metric && k !== t.semanticId && e.rank === arrivedRank
-              && state.latest.byId[k] && state.latest.byId[k].rank !== arrivedRank) {
-            var moved = {};
-            Object.keys(e).forEach(function (kk) { moved[kk] = e[kk]; });
-            moved.rank = state.latest.byId[k].rank;
-            state.committed.byId[k] = moved;
-          }
-        });
+      if (state.latest) {
+        pulseCommitLane(state, t.metric);
       }
+      state.flashes[t.slotId] = true;
+      state.flashOwner[t.slotId] = t.sequence;
       state.flashSlotId = t.slotId;
       promote();
       return { arrived: true, transition: t, committed: state.committed, flashSlotId: state.flashSlotId };
     },
-    clearFlash: function () { state.flashSlotId = null; },
+    clearFlash: function (slotId, owner) {
+      if (slotId == null) {
+        state.flashes = {}; state.flashOwner = {}; state.flashSlotId = null;
+        return;
+      }
+      // Ownership guard: a stale flash timer (older sequence) must not
+      // clear a newer arrival's flash on the same slot.
+      if (owner == null || state.flashOwner[slotId] === owner || !state.flashes[slotId]) {
+        delete state.flashes[slotId];
+        delete state.flashOwner[slotId];
+        state.flashSlotId = null;
+      }
+    },
     // Resize: coordinates are obsolete — cancel travel and commit the
     // latest snapshot immediately rather than landing in a stale slot.
     resize: function () {
       var cancelled = state.active.length + state.queued.length;
       state.active = []; state.queued = [];
+      state.flashes = {}; state.flashOwner = {}; state.flashSlotId = null;
       if (state.latest) state.committed = state.latest;
       return { cancelled: cancelled, committed: state.committed };
     },
@@ -2945,60 +3076,137 @@ function createPulseBubbleCoordinator(opts) {
   };
 }
 // STAGE5-END
-// Bubble-arrival keyframes (Stage 6: pre-lane table layout PulseMatrix and
-// its one-shot live-glow removed as dead; S5 bubble transition + S4
-// composition + Strip wiring stay as-is). The bubble keyframe is still
-// consumed by PulseLanes (S5); glow keyframes were only consumed by
-// the removed PulseMatrix (verify: grep iyh-glow has no live caller).
+// Bubble-travel keyframes: the bubble SPAWNS at the measured surface
+// bottom edge and travels to its destination cell via a per-element
+// transform (--dx/--dy set inline from pulseBubblePath) — no 24px
+// local hop, no mixed px/% coordinates (review fix 5).
 const PULSE_GLOW_CSS =
-  '@keyframes iyh-bubble-rise{0%{opacity:.25;transform:translateY(24px)}100%{opacity:.9;transform:translateY(0)}}'\n
+  '@keyframes iyh-bubble-travel{from{transform:translate(0,0);opacity:.25}to{transform:translate(var(--dx,0),var(--dy,0));opacity:.9}}';
 
 // Stage 4 lane matrix: four equal independent lanes, each cell owns
 // its tool name + compact dot matrix. Text/dots stay at the readability
 // floor (fontSize 9, fixed dots); capacity shrinks ROW count only.
 // All lanes share the SAME capacity supplied by the parent (measured
 // box). Theme vars only; no hardcoded colors.
-function PulseLanes({ lanes: rawLanes, capacity, surfaceBox }) {
+// v0.1.10 (review fixes 5/6): the transition layer is EFFECT-OWNED —
+// a render never ingests, schedules timers, or mutates the
+// coordinator; data changes re-ingest in an effect (keyed by visible
+// lane content), travel/flash timers live in refs and are cancelled
+// on unmount/supersede/resize. The bubble surface is MEASURED at the
+// lane grid itself (never the whole Strip), and bubbles travel
+// bottom-edge -> destination cell in one pixel coordinate system.
+function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available }) {
   var order = ['live', 'goal', 'good', 'friction'];
   var cap = Math.max(1, Math.floor(Number(capacity) || 1));
-  // Stage 5 transition layer: committed content stays visible during
-  // travel; arrival commits the pending entry + flash. Timers are
-  // scheduled here (no new observer/effect); resize cancels travel
-  // via the coordinator when capacity/composition changes.
   var coordRef = useRef(null);
   if (!coordRef.current) coordRef.current = createPulseBubbleCoordinator();
   var coord = coordRef.current;
   var state5 = useState(0);
   var setTick5 = state5[1];
-  var scheduledRef = useRef({});
-  var reduced = false;
-  try {
-    reduced = typeof window !== 'undefined' && window.matchMedia
-      ? prefersReducedMotion(window.matchMedia('(prefers-reduced-motion: reduce)')) : false;
-  } catch (e) { reduced = false; }
-  var ingestRes = coord.ingest(rawLanes, cap, { reducedMotion: reduced });
+  var timersRef = useRef({});      // sequence -> travel timer id
+  var flashTimersRef = useRef({}); // sequence -> flash timer id
+  var reducedRef = useRef(false);
+  var laneKey = pulseLanesKey(rawLanes, cap);
+
+  // Reduced motion: read + subscribe in an effect (no render-time
+  // matchMedia; a preference change re-ingests immediately).
+  useEffect(function () {
+    if (typeof window === 'undefined' || !window.matchMedia) return undefined;
+    var mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    reducedRef.current = prefersReducedMotion(mq);
+    var on = function (e) { reducedRef.current = e.matches === true; };
+    if (mq.addEventListener) mq.addEventListener('change', on);
+    else if (mq.addListener) mq.addListener(on);
+    return function () {
+      if (mq.removeEventListener) mq.removeEventListener('change', on);
+      else if (mq.removeListener) mq.removeListener(on);
+    };
+  }, []);
+
+  // The ACTUAL PULSE lane surface, measured at the grid itself: the
+  // bottom-to-cell journey resolves against this box (fall back to the
+  // parent-supplied surfaceBox, then a 100x100 safe default).
+  var gridRef = useRef(null);
+  var measuredRef = useRef(null);
+  var [, setMeasuredTick] = useState(0);
+  useEffect(function () {
+    var el = gridRef.current;
+    if (!el) return undefined;
+    var update = function () {
+      measuredRef.current = { width: el.clientWidth, height: el.clientHeight };
+      setMeasuredTick(function (v) { return v + 1; });
+    };
+    update();
+    var ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    if (ro) ro.observe(el);
+    return function () { if (ro) ro.disconnect(); };
+  }, []);
+  var measured = measuredRef.current;
+  var box5 = (measured && measured.width > 0 && measured.height > 0)
+    ? measured
+    : (surfaceBox && Number.isFinite(Number(surfaceBox.width))
+      ? surfaceBox : { width: 100, height: 100 });
+
+  // Capacity/composition change: coordinates are obsolete — cancel
+  // travel on the coordinator side AND drop every pending timer (a
+  // stale timer must never fire after a supersede).
   var prevCapRef = useRef(cap);
-  if (prevCapRef.current !== cap) {
+  useEffect(function () {
+    if (prevCapRef.current === cap) return;
     prevCapRef.current = cap;
     coord.resize();
-    scheduledRef.current = {};
-  }
-  var active5 = coord.getState().active || [];
-  active5.forEach(function (t, idx) {
-    if (!scheduledRef.current[t.sequence]) {
-      scheduledRef.current[t.sequence] = true;
-      var wait = BUBBLE_TRAVEL_MS + BUBBLE_STAGGER_MS * idx;
-      setTimeout(function () {
-        delete scheduledRef.current[t.sequence];
-        coord.arrive(t.sequence);
-        setTick5(function (v) { return v + 1; });
-        setTimeout(function () { coord.clearFlash(); setTick5(function (v) { return v + 1; }); }, BUBBLE_ARRIVAL_MS);
-      }, wait);
+    Object.keys(timersRef.current).forEach(function (k) { clearTimeout(timersRef.current[k]); });
+    timersRef.current = {};
+    Object.keys(flashTimersRef.current).forEach(function (k) { clearTimeout(flashTimersRef.current[k]); });
+    flashTimersRef.current = {};
+    setTick5(function (v) { return v + 1; });
+  }, [cap]);
+
+  // Snapshot ingest + arrival scheduling, effect-only: re-runs when
+  // the visible lane content or capacity changes, never per render.
+  useEffect(function () {
+    var res = coord.ingest(rawLanes, cap, { reducedMotion: reducedRef.current });
+    if (res.immediate) {
+      setTick5(function (v) { return v + 1; });
+      return;
     }
-  });
+    var active = (res.active || []).slice();
+    active.forEach(function (t, idx) {
+      if (timersRef.current[t.sequence]) return;
+      var wait = BUBBLE_TRAVEL_MS + BUBBLE_STAGGER_MS * idx;
+      timersRef.current[t.sequence] = setTimeout(function () {
+        delete timersRef.current[t.sequence];
+        var arr = coord.arrive(t.sequence);
+        setTick5(function (v) { return v + 1; });
+        if (arr.arrived && !flashTimersRef.current[t.sequence]) {
+          flashTimersRef.current[t.sequence] = setTimeout(function () {
+            delete flashTimersRef.current[t.sequence];
+            // Ownership guard inside the coordinator: a stale timer can
+            // never clear a newer arrival's flash on the same slot.
+            coord.clearFlash(t.slotId, t.sequence);
+            setTick5(function (v) { return v + 1; });
+          }, BUBBLE_ARRIVAL_MS);
+        }
+      }, wait);
+    });
+  }, [laneKey, cap]);
+
+  // Unmount: cancel every pending travel/flash timer.
+  useEffect(function () {
+    var timers = timersRef.current;
+    var flashes = flashTimersRef.current;
+    return function () {
+      Object.keys(timers).forEach(function (k) { clearTimeout(timers[k]); });
+      Object.keys(flashes).forEach(function (k) { clearTimeout(flashes[k]); });
+    };
+  }, []);
+
   var lanes = coord.visibleLanes(cap);
-  var flashSlot = coord.getState().flashSlotId;
-  var box5 = surfaceBox && Number.isFinite(Number(surfaceBox.width)) ? surfaceBox : { width: 100, height: 100 };
+  var active5 = coord.getState().active || [];
+  var flashes = coord.getState().flashes || {};
+  var hasEntries = order.some(function (l) {
+    return lanes && Array.isArray(lanes[l]) && lanes[l].length > 0;
+  });
   function dotsFor(value) {
     var v = typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
     var filled = v === null ? 0 : Math.round(v * 12);
@@ -3018,6 +3226,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox }) {
     role: 'grid',
     'aria-label': 'pulse lanes',
     'data-testid': 'pulse-lanes',
+    ref: gridRef,
     style: {
       display: 'grid',
       gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
@@ -3036,7 +3245,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox }) {
         children: [
           jsxs('div', {
             style: { display: 'flex', flexDirection: 'column', gap: 2, minHeight: 0, minWidth: 0 },
-            children: entries.map(function (e) {
+            children: entries.map(function (e, i) {
               var val = e && typeof e.value === 'number' ? e.value
                 : (e && e.momentum && typeof e.momentum.value === 'number' ? e.momentum.value : null);
               // Stage 3 detail surface: full canonical name, value,
@@ -3057,6 +3266,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox }) {
               var tip = parts.join(' · ');
               return jsxs('div', {
                 key: e.tool_id + '-' + e.rank,
+                'data-slot': lane + '|' + i,
                 title: tip,
                 style: {
                   display: 'flex', alignItems: 'center', gap: 4, minHeight: 14, overflow: 'hidden',
@@ -3077,14 +3287,20 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox }) {
                   }),
                 ],
               });
-            }.concat(Array.from({ length: Math.max(0, cap - entries.length) }).map(function (_, i) {
-              return jsx('div', { key: 'empty-' + i, style: { minHeight: 14 } });
-            }))),
+            }).concat(Array.from({ length: Math.max(0, cap - entries.length) }).map(function (_, i) {
+              return jsx('div', { key: 'empty-' + i, 'data-slot': lane + '|' + i, style: { minHeight: 14 } });
+            })),
           }),
         ],
       });
     }), active5.map(function (t, idx) {
       var path = pulseBubblePath(box5, t.metric, t.destinationSlot, cap);
+      // Pixel coordinates end-to-end: the bubble SPAWNS at the surface
+      // bottom edge and travels to the destination cell via --dx/--dy
+      // (iyh-bubble-travel keyframes) — one coordinate system, no
+      // mixed px/% (review fix 5).
+      var dx = path.target.x - path.spawn.x;
+      var dy = path.target.y - path.spawn.y;
       return jsx('span', {
         key: 'bubble-' + t.sequence,
         'data-testid': 'pulse-bubble',
@@ -3094,17 +3310,50 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox }) {
         style: {
           position: 'absolute', width: 8, height: 8, borderRadius: 4,
           background: 'var(--ui-accent)', opacity: 0.9, pointerEvents: 'none',
-          posUnits: 'pct',
-          left: Math.max(0, path.target.x) + '%', top: Math.max(0, path.target.y) + '%',
-          animation: 'iyh-bubble-rise ' + BUBBLE_TRAVEL_MS + 'ms linear ' + (BUBBLE_STAGGER_MS * idx) + 'ms 1 both',
+          left: Math.max(0, path.spawn.x) + 'px',
+          top: Math.max(0, path.spawn.y - 8) + 'px',
+          '--dx': dx + 'px', '--dy': dy + 'px',
+          animation: 'iyh-bubble-travel ' + BUBBLE_TRAVEL_MS + 'ms linear ' + (BUBBLE_STAGGER_MS * idx) + 'ms 1 both',
         },
       });
-    })].concat(flashSlot ? [jsx('span', {
-      key: 'flash',
-      'data-testid': 'pulse-arrival-flash',
-      'data-slot': flashSlot,
-      style: { position: 'absolute', inset: 0, pointerEvents: 'none', boxShadow: 'inset 0 0 8px 2px var(--ui-accent)', opacity: 0.6 },
-    })] : []),
+    }).concat(Object.keys(flashes).map(function (slotId) {
+      // Arrival flash on the DESTINATION CELL only (stable data-slot
+      // identity), never the whole grid.
+      var parts = slotId.split('|');
+      var laneIdx = PULSE_LANE_ORDER.indexOf(parts[0]); if (laneIdx < 0) laneIdx = 0;
+      var slotIndex = Number(parts[1]) || 0;
+      var laneW = box5.width / PULSE_LANE_ORDER.length;
+      var cellH = box5.height / cap;
+      return jsx('span', {
+        key: 'flash-' + slotId,
+        'data-testid': 'pulse-arrival-flash',
+        'data-slot': slotId,
+        style: {
+          position: 'absolute', pointerEvents: 'none',
+          left: laneIdx * laneW + 'px', top: slotIndex * cellH + 'px',
+          width: laneW + 'px', height: cellH + 'px',
+          boxShadow: 'inset 0 0 8px 2px var(--ui-accent)', opacity: 0.6,
+        },
+      });
+    })).concat(hasEntries ? [] : [jsx('div', {
+      key: 'pulse-empty',
+      'data-testid': 'pulse-empty',
+      // No-data state (review fix 9): lane geometry stays stable (the
+      // empty cells above keep the grid); the absence is made visible
+      // as one restrained line.
+      style: {
+        position: 'absolute', inset: 0, display: 'flex',
+        alignItems: 'center', justifyContent: 'center', pointerEvents: 'none',
+      },
+      children: jsx('span', {
+        style: {
+          fontSize: 9, letterSpacing: 1, opacity: 0.6,
+          color: 'var(--ui-text-quaternary)',
+          fontFamily: 'var(--ui-font-mono, monospace)',
+        },
+        children: available === true ? 'no tools yet' : 'no pulse data yet',
+      }),
+    })]]),
   });
 }
 
@@ -4191,6 +4440,28 @@ function Strip({ source, rest, portraitPreferences }) {
   const [narrow, setNarrow] = useState(false)
   const [tiny, setTiny] = useState(false)
   const [box, setBox] = useState({ width: 0, height: 0 })
+  // v0.1.10 (review fix 7): capacity is computed from the MEASURED
+  // PULSE module, not the outer Strip minus a fragile 48px chrome
+  // estimate — the module box is the lanes' actual content area.
+  const pulseRef = useRef(null)
+  const [pulseBox, setPulseBox] = useState({ width: 0, height: 0 })
+  useEffect(() => {
+    const el = pulseRef.current
+    if (!el) return undefined
+    let ro = null
+    const update = () => {
+      const w = el.clientWidth
+      const h = el.clientHeight
+      setPulseBox((p) => (p.width === w && p.height === h ? p : { width: w, height: h }))
+    }
+    update()
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(update)
+      ro.observe(el)
+    }
+    return () => { if (ro) ro.disconnect() }
+  }, [])
+  const pulseMeasured = pulseBox.width > 0 && pulseBox.height > 0
   // Frame orientation + measured composition: the layout engine hands
   // us the box (wide bottom lane or narrow sidebar column) — we READ
   // width AND height from the single observer on the actual surface.
@@ -4220,7 +4491,11 @@ function Strip({ source, rest, portraitPreferences }) {
     return () => { if (ro) ro.disconnect() }
   }, [])
   const composition = chooseComposition(box.width, box.height)
-  const capacity = capacityForComposition(box, composition)
+  // v0.1.10 (review fix 7): measured PULSE module drives capacity
+  // (chrome-free); the legacy outer-box path stays for first paint.
+  const capacity = pulseMeasured
+    ? capacityForComposition(pulseBox, composition, { measured: true })
+    : capacityForComposition(box, composition)
   const activateFocus = (id) => setTab((cur) => nextFocusFor(cur, id))
 
   const metricsQ = useQuery({
@@ -4384,17 +4659,28 @@ function Strip({ source, rest, portraitPreferences }) {
   // (its query/cache above is untouched; no DriftView here).
   // Bottom: PORTRAIT left module, PULSE (four lanes) right module.
   // Sidebar: PORTRAIT top ~50/50, PULSE bottom, flex + minHeight 0.
+  const pulseV2 = adaptPulseToLanes(pulseQ.data)
   const pulseModule = jsxs('div', {
     'data-module': 'pulse',
     'data-focus': tab === 'pulse' ? 'active' : 'inactive',
+    ref: pulseRef,
     className: 'flex flex-1',
     style: {
-      flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden',
+      // v0.1.10 (review fix 7): equal flexible basis so PORTRAIT and
+      // PULSE genuinely split the sidebar 50/50 (the old '1 1 50%' /
+      // 'flex: 1' pair gave portrait ~75%).
+      flex: composition === 'sidebar' ? '1 1 0%' : 1,
+      minWidth: 0, minHeight: 0, overflow: 'hidden',
       outline: tab === 'pulse' ? '1px solid var(--ui-accent)' : '1px solid transparent',
       outlineOffset: -1,
     },
     children: [
-      jsx(PulseLanes, { lanes: adaptPulseToLanes(pulseQ.data).lanes, capacity }),
+      jsx(PulseLanes, {
+        lanes: pulseV2.lanes,
+        capacity,
+        surfaceBox: pulseMeasured ? pulseBox : null,
+        available: pulseV2.available,
+      }),
       ...(!narrow
         ? [jsxs('div', {
             className: 'flex flex-col justify-end overflow-hidden',
@@ -4418,7 +4704,7 @@ function Strip({ source, rest, portraitPreferences }) {
     'data-focus': tab === 'portrait' ? 'active' : 'inactive',
     className: 'flex items-center',
     style: {
-      flex: composition === 'sidebar' ? '1 1 50%' : '0 0 auto',
+      flex: composition === 'sidebar' ? '1 1 0%' : '0 0 auto',
       minHeight: 0, minWidth: 0, overflow: 'hidden',
       outline: tab === 'portrait' ? '1px solid var(--ui-accent)' : '1px solid transparent',
       outlineOffset: -1,
@@ -4649,11 +4935,15 @@ function Strip({ source, rest, portraitPreferences }) {
       overflow: 'hidden',
     },
     children: [
-      // PULSE live-glow keyframes (namespaced; inert if already injected).
+      // PULSE live-travel keyframes (namespaced; inert if already injected).
       jsx('style', { children: PULSE_GLOW_CSS }),
       // This surface's copy of the tintable icon atlas (see IYH-ICONS).
       jsx(IyhAtlas, { prefix: IYH_IC }),
-      narrow
+      // v0.1.10 (review fix 7): composition decides the HEADER layout —
+      // only the sidebar gets the two-row header; a narrow BOTTOM strip
+      // keeps the shallow single-row header (its space belongs to PULSE).
+      // The separate compact-width rule (tiny) still shapes control fit.
+      narrow && composition === 'sidebar'
         ? jsxs('div', {
             // Two-row sidebar header: pet spans both rows (and grows to
             // fill them); top row = every icon control except help/expand;
@@ -4816,23 +5106,16 @@ export default {
       render: () => jsx(Strip, { source: ctx.source, rest: ctx.rest, portraitPreferences }),
     })
 
-    // Right-zone pane (Stage 4 sidebar surface, Stage 0 verdict):
-    // placement 'right' + width (the verified host path). The SAME
-    // measured Strip renders here as a tall pane, so the 50/50
-    // sidebar composition appears automatically. Gated on host
-    // signals so older hosts degrade to bottom-only.
-    var viewportSignal = typeof host.state === 'object' && host.state != null
-      && typeof host.state.viewport !== 'undefined'
-    var paneVisibilitySignal = typeof host.paneVisibility === 'function'
-    if (viewportSignal && paneVisibilitySignal) {
-      ctx.register({
-        id: 'its-in-your-head-sidebar',
-        area: 'panes',
-        title: "It's in Your Head",
-        data: { placement: 'right', width: '400px' },
-        render: () => jsx(Strip, { source: ctx.source, rest: ctx.rest, portraitPreferences }),
-      })
-    }
+    // v0.1.10 (review fix 8): ONE registered surface. The host does not
+    // expose a verifiable mutual-exclusion contract between the bottom
+    // workspace pane and a right-zone sidebar pane, so registering both
+    // produced two live copies of the strip (the stuck minimized rail
+    // users saw). The bottom placement is the owner-locked 96px
+    // instrument; the sidebar composition is still rendered by the SAME
+    // measured Strip (chooseComposition), it just no longer gets a
+    // second registration. Re-enable a second surface only when the
+    // host gains an explicit per-plugin placement/visibility API that
+    // can prove which of the two is live.
 
     // Live accelerator (optional): backend tick -> invalidate the polling
     // queries. The polling fallback above stays mandatory — ctx.socket is a

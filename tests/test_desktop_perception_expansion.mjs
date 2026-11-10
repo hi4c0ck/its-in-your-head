@@ -85,7 +85,16 @@ assert.ok(strip.length > 0, 'Strip region found')
 // pass: the strip now measures width AND height, selects bottom/sidebar
 // from the measured box, renders PORTRAIT+PULSE coexisting modules,
 // and consumes the v2 lane adapter (DRIFT stays expanded-only).
-const STRIP_SHA_S16_MOTION = 'd1b4acf7c96adae02bb55142f7927359f3f42d5ac08a8bb8121e19ebbab90919'
+// Re-baselined again at the v1.9 panel-controls + pet-face pass: the
+// strip now carries the in-panel EXP/ENC/mirror controls, the two-row
+// narrow sidebar layout, the ticker overlay, and the two new affection
+// pet faces (wonder / to-pet) with the patPet click mechanic.
+// Re-baselined at v0.1.10 (review fixes 5/7/8/9): the strip now
+// measures the PULSE module for capacity (chrome-free), passes
+// surfaceBox + available into PulseLanes, splits the sidebar on an
+// equal 1 1 0% flex basis, keeps the two-row header sidebar-only, and
+// registers a SINGLE pane surface (no right-zone copy).
+const STRIP_SHA_S16_MOTION = 'dbc704e01b9a3661446d1175fdd1f3fa1f1d812b36c6cd075ff38264bfd8a9c9'
 assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_S16_MOTION,
   '96px strip source byte-identical to the S16 motion-grammar baseline')
 ok(true, 'strip byte-identity snapshot pinned')

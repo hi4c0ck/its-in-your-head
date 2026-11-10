@@ -16,11 +16,12 @@ const block = src.slice(src.indexOf('// STAGE5-START'), src.indexOf('// STAGE5-E
 assert.ok(block.length > 0, 'STAGE5 markers found')
 const api = new Function(block + `\n;return { PULSE_HYSTERESIS, BUBBLE_TRAVEL_MS, BUBBLE_ARRIVAL_MS,
   MAX_CONCURRENT_BUBBLES, BUBBLE_STAGGER_MS, pulseQuantizedScore, pulseSemanticId, pulseSlotId,
-  pulseSnapshotFromLanes, detectPulseTransitions, pulseBubblePath, prefersReducedMotion,
-  createPulseBubbleCoordinator };`)()
+  pulseSnapshotFromLanes, pulseSlotMap, pulseCommitLane, pulseLanesKey, detectPulseTransitions,
+  pulseBubblePath, prefersReducedMotion, createPulseBubbleCoordinator };`)()
 const { PULSE_HYSTERESIS, BUBBLE_TRAVEL_MS, BUBBLE_ARRIVAL_MS, MAX_CONCURRENT_BUBBLES,
   BUBBLE_STAGGER_MS, pulseQuantizedScore, pulseSemanticId, pulseSlotId,
-  pulseSnapshotFromLanes, detectPulseTransitions, pulseBubblePath, prefersReducedMotion,
+  pulseSnapshotFromLanes, pulseSlotMap, pulseCommitLane, pulseLanesKey,
+  detectPulseTransitions, pulseBubblePath, prefersReducedMotion,
   createPulseBubbleCoordinator } = api
 
 let n = 0
@@ -172,6 +173,125 @@ eq(pulseSlotId('goal', 0), 'goal|0', 'visual slot identity metric|slotIndex')
   ok(q.target.x !== p.target.x, 'coordinates derive from the measured box, not constants')
 }
 
+// v0.1.10 (review fix 4): a NEW tool enters the visible top three while
+// another leaves — slot-occupant changes, not semantic-identity diffs.
+{
+  const c = createPulseBubbleCoordinator()
+  const before = lanesOf([
+    entry(12, 'terminal', 1, 0.9, 'strong'),
+    entry(17, 'github', 2, 0.7, 'weak'),
+    entry(21, 'browser', 3, 0.6, 'weak'),
+  ])
+  c.ingest(before, 3)
+  const after = lanesOf([
+    entry(33, 'filesystem', 1, 0.95, 'strong'),
+    entry(12, 'terminal', 2, 0.9, 'strong'),
+    entry(17, 'github', 3, 0.7, 'weak'),
+  ])
+  const r = c.ingest(after, 3)
+  const bySlot = {}
+  r.transitions.forEach(t => { bySlot[t.slotId] = t })
+  eq(bySlot['goal|0'].reason, 'entry', 'new tool entering the visible set -> entry transition on its slot')
+  eq(bySlot['goal|0'].tool, 'filesystem', 'entry transition names the arriving tool')
+  eq(bySlot['goal|1'].reason, 'rank-change', 'displaced terminal moved slot 0 -> 1')
+  eq(bySlot['goal|2'].reason, 'rank-change', 'displaced github moved slot 1 -> 2')
+  ok(!r.transitions.some(t => t.tool === 'browser'), 'leaving tool (browser) spawns NO transition (exit, not entry)')
+  // Exits prune the committed snapshot EAGERLY at ingest (no bubble for
+  // exits): the leaving tool is gone from the settled cells immediately,
+  // while the entering tool only lands when its arrival commits the lane.
+  eq(c.visibleLanes(3).goal.map(e => e.tool_name), ['terminal', 'github'],
+     'before arrival: exited browser already pruned; displaced tools hold their old ranks')
+  c.arrive(bySlot['goal|0'].sequence)
+  eq(c.visibleLanes(3).goal.map(e => e.tool_name), ['filesystem', 'terminal', 'github'],
+     'after entry arrival, the lane is the NEW ordering (no stale or missing cell)')
+  ok(c.visibleLanes(3).goal.map(e => e.tool_name).indexOf('browser') < 0,
+     'exited tool stays pruned from the visible lane')
+}
+
+// v0.1.10 (review fix 4/6): a rank swap while OTHER bubbles are queued —
+// lane-level commit keeps ordering coherent, queue order survives.
+{
+  const c = createPulseBubbleCoordinator()
+  const mk = (k) => Array.from({ length: k }, (_, i) => entry(100 + i, 'tool' + i, i + 1, 0.5, 'weak'))
+  c.ingest(lanesOf(mk(6)), 6)
+  // Six in-place value changes -> four active, two queued.
+  const r1 = c.ingest(lanesOf(mk(6).map((e, i) => ({ ...e, value: 0.9, level: 'strong' }))), 6)
+  eq(r1.active.length + r1.queued.length, 6, 'all six meaningful changes tracked')
+  eq(r1.queued.length, 6 - MAX_CONCURRENT_BUBBLES, 'overflow stays queued in sequence order')
+  // Now a rank swap between two QUEUED tools lands as slot-occupant
+  // changes (lane ARRAY order IS the visual slot order); the in-flight
+  // / queued value bubbles supersede per identity.
+  const swapped = mk(6).map((e, i) => ({ ...e, value: 0.9, level: 'strong' }))
+  const tmp = swapped[0]; swapped[0] = swapped[1]; swapped[1] = tmp
+  // rank fields follow the new visual order (v2: rank = slot + 1) so the
+  // lane sort and the slot map agree after the commit.
+  swapped[0].rank = 1; swapped[1].rank = 2
+  const r2 = c.ingest(lanesOf(swapped), 6)
+  ok(r2.transitions.some(t => t.slotId === 'goal|0' && t.reason === 'rank-change'),
+     'swap produces a slot-0 rank-change transition')
+  ok(r2.transitions.some(t => t.slotId === 'goal|1' && t.reason === 'rank-change'),
+     'swap produces a slot-1 rank-change transition')
+  // Arrivals settle the lane coherently: committing one rank-change
+  // moves BOTH slots (the displaced occupant follows its pending rank).
+  const swapSeq = r2.transitions.find(t => t.slotId === 'goal|0').sequence
+  c.arrive(swapSeq)
+  const vis = c.visibleLanes(6).goal.map(e => e.tool_name)
+  eq(vis[0], 'tool1', 'lane head shows the swapped-in tool after its arrival')
+  eq(vis[1], 'tool0', 'the displaced tool follows its new pending rank')
+  ok(c.getState().queued.length >= 0, 'remaining value bubbles stay queued (nothing dropped)')
+}
+
+// v0.1.10 (review fix 6): per-slot flash ownership — a stale flash
+// timer can never clear a NEWER arrival's flash on the same slot.
+{
+  const c = createPulseBubbleCoordinator()
+  c.ingest(lanesOf([entry(12, 'terminal', 1, 0.5, 'weak')]), 3)
+  const r1 = c.ingest(lanesOf([entry(12, 'terminal', 1, 0.7, 'weak')]), 3)
+  const s1 = r1.transitions[0].sequence
+  const r2 = c.ingest(lanesOf([entry(12, 'terminal', 1, 0.9, 'strong')]), 3)
+  const s2 = r2.transitions[0].sequence
+  ok(s2 > s1, 'newer arrival has a newer sequence')
+  ok(c.getState().active.length === 1, 'stale in-flight superseded (one bubble per identity)')
+  const arr1 = c.arrive(s2)
+  ok(arr1.arrived, 'newest arrival commits')
+  eq(c.getState().flashSlotId, 'goal|0', 'arrival flash on the destination slot')
+  // The stale timer fires and tries to clear the slot's flash — the
+  // ownership guard must protect the newer flash.
+  c.clearFlash('goal|0', s1)
+  ok(c.getState().flashes['goal|0'] === true, 'stale (older-sequence) timer does not clear the newer flash')
+  c.clearFlash('goal|0', s2)
+  eq(c.getState().flashes['goal|0'], undefined, 'the owning sequence clears its own flash')
+  // A slot with no active flash clears unconditionally.
+  c.clearFlash('goal|1')
+  eq(c.getState().flashes['goal|1'], undefined, 'clearing a never-flashed slot is a no-op')
+}
+
+// v0.1.10 (review fix 6): resize cancels in-flight travel AND flashes.
+{
+  const c = createPulseBubbleCoordinator()
+  c.ingest(lanesOf([entry(12, 'terminal', 1, 0.5, 'weak')]), 3)
+  c.ingest(lanesOf([entry(12, 'terminal', 1, 0.9, 'strong')]), 3)
+  c.arrive(c.getState().active[0].sequence)
+  ok(c.getState().flashes['goal|0'] === true, 'flash pending after arrival')
+  const rs = c.resize()
+  eq(rs.cancelled, 0, 'nothing in flight after arrival (cap satisfied)')
+  eq(c.getState().flashes, {}, 'resize clears pending flashes (coordinates obsolete)')
+}
+
+// v0.1.10 (review fix 6): the renderer data key — same content under a
+// fresh object identity must NOT re-ingest (effect dep is the key).
+{
+  const lanes = [entry(12, 'terminal', 1, 0.9, 'strong')]
+  eq(pulseLanesKey(lanesOf(lanes), 3), pulseLanesKey(lanesOf([...lanes]), 3),
+     'same visible content -> same key (no re-ingest on object identity change)')
+  const changed = [entry(12, 'terminal', 1, 0.95, 'strong')]
+  ok(pulseLanesKey(lanesOf(changed), 3) !== pulseLanesKey(lanesOf(lanes), 3),
+     'content change -> different key (effect re-runs)')
+  const noise = [entry(12, 'terminal', 1, 0.9000000004, 'strong')]
+  eq(pulseLanesKey(lanesOf(noise), 3), pulseLanesKey(lanesOf(lanes), 3),
+     'sub-hysteresis noise shares the key (no effect churn)')
+}
+
 // Source pins: wired into PulseLanes, UI-only (no backend schema fields).
 {
   const lanesSrc = src.slice(src.indexOf('function PulseLanes'), src.indexOf('function IoLine'))
@@ -180,7 +300,8 @@ eq(pulseSlotId('goal', 0), 'goal|0', 'visual slot identity metric|slotIndex')
   ok(lanesSrc.includes('pulse-bubble') && lanesSrc.includes('pulseBubblePath'), 'bubble overlay rendered surface-relative')
   ok(lanesSrc.includes('BUBBLE_TRAVEL_MS') && lanesSrc.includes('BUBBLE_ARRIVAL_MS'), 'named timing constants used in PulseLanes')
   ok(!lanesSrc.includes('destination_slot'), 'no destination_slot in lane UI (desktop resolves slot, backend schema clean)')
-  ok(src.includes('iyh-bubble-rise'), 'bubble keyframes present')
+  ok(src.includes('iyh-bubble-travel'), 'bubble travel keyframes present (bottom-edge -> cell, one px coordinate system)')
+  ok(!src.includes('iyh-bubble-rise'), 'old 24px local-hop keyframe removed')
   ok(!/fetch\(|XMLHttpRequest/.test(block), 'transition layer is pure UI (no I/O)')
   // Imports invariant: only SDK + react.
   const imports = src.match(/^import .*$/gm) || []

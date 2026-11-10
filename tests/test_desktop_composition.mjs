@@ -76,8 +76,12 @@ ok(src.includes("data-focus"), 'focus outline keys off tab state (no exclusive h
 // The only allowed tab=== remaining is the focus outline/expanded workspace.
 ok(src.includes("TABS.filter((t) => t.id !== 'drift')") || src.includes("compactTabs"), 'compact tabs exclude DRIFT (DRIFT stays expanded)')
 ok(src.includes("placement: 'main'") && src.includes("dock: { pane: 'workspace', pos: 'bottom' }") && src.includes("height: '96px'"), 'bottom registration verbatim')
-ok(src.includes("placement: 'right'") && src.includes("width: '400px'"), 'right-zone pane path present')
-ok(src.includes("typeof host.paneVisibility === 'function'") && src.includes("typeof host.state.viewport"), 'host signals feature-detected')
+// v0.1.10 (review fix 8): the host exposes no verifiable mutual-exclusion
+// contract, so exactly ONE pane surface is registered — no second
+// right-zone copy (the two live surfaces caused the stuck rail).
+ok((src.match(/ctx\.register\(\{/g) || []).length === 1, 'exactly one ctx.register call (single surface)')
+ok(!src.includes("placement: 'right'"), 'no second right-zone surface registered')
+ok(src.includes("host gains an explicit per-plugin placement/visibility API"), 'single-surface rationale documented at the registration')
 
 // 5. Seam shape conformance to v2 TS types (snapshot for a fixture).
 const fixture = {
@@ -104,7 +108,10 @@ eq(g.value, 0.86, 'goal value preserved')
 eq(g.threshold, 0.8, 'goal threshold 0.8')
 eq(g.level, 'strong', 'goal level strong at 0.86 >= 0.8')
 ok(['empty', 'learning', 'provisional', 'ready'].includes(g.state), 'goal state enum')
-ok(g.support && typeof g.support.ratio === 'number' && g.support.ratio === Math.min(1, g.support.count / g.support.required), 'support ratio = min(count/required,1)')
+ok(g.support && g.support.count === null && g.support.required === null && g.support.ratio === null,
+  'legacy support is UNKNOWN (nulls) — never a fabricated 0-of-3 (review fix 9)')
+ok(g.compat === 'legacy', 'legacy entries carry the compat marker')
+ok(g.state === 'learning', 'unknown evidence cannot claim provisional')
 ok(g.evidence && ['prototype_banks', 'recent_capsules', 'none'].includes(g.evidence.source), 'goal evidence source enum')
 const gd = v2.lanes.good.find((e) => e.tool_name === 'github')
 eq(gd.threshold, 0.6, 'good threshold 0.6')
@@ -119,12 +126,40 @@ eq(adaptPulseToLanes({ rows: [], columns: [] }).available, false, 'no tools -> a
 eq(adaptPulseToLanes(null).lanes.goal, [], 'null payload -> empty lanes, never omits lanes')
 
 // 6. Stage 6 gap-fill (§15 criterion 11): sidebar proportional shrink.
-// Sidebar PORTRAIT/PULSE share ~50/50 via flex and shrink together.
-ok(src.includes("flex: composition === 'sidebar' ? '1 1 50%' : '0 0 auto'"),
-  'sidebar portrait module is flex 1 1 50% (proportional share)')
+// v0.1.10 (review fix 7): EQUAL flexible basis on both modules — the
+// old '1 1 50%' (portrait) vs 'flex: 1' (pulse) pair split ~75/25;
+// both '1 1 0%' genuinely divide the sidebar 50/50.
+ok(src.includes("flex: composition === 'sidebar' ? '1 1 0%' : '0 0 auto'"),
+  'sidebar portrait module is flex 1 1 0% (equal basis)')
+ok(src.includes("flex: composition === 'sidebar' ? '1 1 0%' : 1"),
+  'sidebar pulse module is flex 1 1 0% in sidebar mode (equal basis)')
+ok(!/flex: composition === 'sidebar' \? '1 1 50%'/.test(src), 'no functional 50%-basis flex left (the 75/25 split is gone)')
 ok(src.includes("'data-composition': 'sidebar'"), 'sidebar composition hook present')
-ok(src.includes('className: \'flex flex-1 flex-col\'') && src.includes("gap: 4, minHeight: 0, overflow: 'hidden'"),
+ok(src.includes("className: 'flex flex-1 flex-col'") && src.includes("gap: 4, minHeight: 0, overflow: 'hidden'"),
   'sidebar column flexes vertically with minHeight 0 (no large min-heights pushing other plugins out)')
 ok(src.includes("'data-composition': 'bottom'"), 'bottom composition hook present')
+
+// 7. v0.1.10 (review fixes 7/9): the two-row header is a SIDEBAR-only
+// layout (composition decides), and capacity has a measured path with
+// no chrome estimate.
+ok(src.includes("narrow && composition === 'sidebar'"),
+  'two-row header only in sidebar composition (a narrow bottom strip keeps the shallow header)')
+eq(capacityForComposition({ width: 400, height: 48 }, 'bottom', { measured: true }), 3,
+  'measured 48px PULSE module -> cap 3 (no 48px chrome subtracted from it)')
+eq(capacityForComposition({ width: 400, height: 16 }, 'bottom', { measured: true }), 1,
+  'measured 16px module -> single row (fits exactly one 14px cell)')
+ok(capacityForComposition({ width: 400, height: 48 }, 'bottom', { measured: true })
+  === capacityForComposition({ width: 400, height: 48 }, 'sidebar', { measured: true }),
+  'a measured box is the PULSE module itself: no composition halving applies')
+
+// 8. v0.1.10 (review fix 9): the adapter's available flag + the
+// restrained empty state reach the lanes renderer.
+const lanesCall = src.slice(src.indexOf('jsx(PulseLanes, {'), src.indexOf('}),', src.indexOf('jsx(PulseLanes, {')))
+ok(lanesCall.includes('lanes: pulseV2.lanes') && lanesCall.includes('available: pulseV2.available'),
+  'Strip passes lanes AND the available flag to PulseLanes')
+const lanesSrc2 = src.slice(src.indexOf('function PulseLanes'), src.indexOf('function IoLine'))
+ok(lanesSrc2.includes("'data-testid': 'pulse-empty'"), 'PulseLanes renders the restrained empty state')
+ok(lanesSrc2.includes("'no pulse data yet'"), 'empty state labels the absence of data')
+ok(lanesSrc2.includes('hasEntries'), 'empty state keeps lane geometry (rendered only when all lanes are empty)')
 
 console.log('PASS composition: ' + n + ' assertions')
