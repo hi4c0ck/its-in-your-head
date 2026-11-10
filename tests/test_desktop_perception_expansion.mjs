@@ -94,7 +94,10 @@ assert.ok(strip.length > 0, 'Strip region found')
 // surfaceBox + available into PulseLanes, splits the sidebar on an
 // equal 1 1 0% flex basis, keeps the two-row header sidebar-only, and
 // registers a SINGLE pane surface (no right-zone copy).
-const STRIP_SHA_S16_MOTION = 'dbc704e01b9a3661446d1175fdd1f3fa1f1d812b36c6cd075ff38264bfd8a9c9'
+// Re-baselined at v0.1.10+2: the right-zone sidebar registration is
+// restored (the user's working surface) and openWs captures the
+// host close handle for the expanded view's collapse button.
+const STRIP_SHA_S16_MOTION = '52a6f7de34aa41cf524c35713cb600aae35b333c5aef31d3d2a62297c6a806ab'
 assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_S16_MOTION,
   '96px strip source byte-identical to the S16 motion-grammar baseline')
 ok(true, 'strip byte-identity snapshot pinned')

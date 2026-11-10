@@ -3800,6 +3800,20 @@ function driftSparkline(values) {
 // (never the portrait itself), and readable drift history.
 const WS_WORKSPACE_ID = 'its-in-your-head-workspace'
 
+// The host close handle for the opened workspace: host.openWorkspace
+// returns one. Both registered surfaces (bottom strip + right sidebar)
+// share ONE workspace instance (the stable id re-fronts, never stacks),
+// so one module-level handle is the single source of truth. Re-opening
+// refreshes it; closing the tab host-side leaves a stale handle, which
+// the guard below swallows (the teardown is host-owned either way).
+let IYH_WS_CLOSE = null
+function closeIyhWorkspace() {
+  if (typeof IYH_WS_CLOSE !== 'function') return
+  const fn = IYH_WS_CLOSE
+  IYH_WS_CLOSE = null
+  try { fn() } catch (e) { /* stale handle: the tab is already gone */ }
+}
+
 function ExpandedPulse({ pulse }) {
   const columns = pulseColumns(pulse)
   const rows = pulse && Array.isArray(pulse.rows) ? pulse.rows : []
@@ -4231,7 +4245,7 @@ function ExpandedDrift({ data }) {
   })
 }
 
-function ExpandedWorkspace({ source, rest, portraitPreferences }) {
+function ExpandedWorkspace({ source, rest, portraitPreferences, onCollapse }) {
   const [tab, setTab] = useState('pulse')
   // Same query keys as the compact instrument -> the app's single React
   // Query client dedupes and both surfaces share one cache (one observer
@@ -4307,6 +4321,15 @@ function ExpandedWorkspace({ source, rest, portraitPreferences }) {
             style: { flex: 1, textAlign: 'right', fontSize: 9, color: V_QUAT, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
             children: statusText,
           }),
+          // The inverse of the compact strip's expand icon: collapse this
+          // inspection surface back to the compact panel (strip/sidebar).
+          // Only offered when the close handle is reachable; otherwise the
+          // host tab's own Close still tears the workspace down.
+          ...(typeof onCollapse === 'function' ? [jsx(IconButton, {
+            title: 'Collapse — back to the compact panel',
+            label: jsx(IyhIcon, { prefix: IYH_WS_IC, name: 'minimize', size: 13, vb: '0 0 16 16' }),
+            onClick: onCollapse,
+          })] : []),
         ],
       }),
       tab === 'pulse'
@@ -4638,10 +4661,13 @@ function Strip({ source, rest, portraitPreferences }) {
   const wsCan = typeof host.openWorkspace === 'function'
   const openWs = () => {
     if (!wsCan) return
-    host.openWorkspace(WS_WORKSPACE_ID, {
+    // The returned close handle is what the EXPANDED view's collapse
+    // button routes through (one instance, shared by both surfaces).
+    const handle = host.openWorkspace(WS_WORKSPACE_ID, {
       title: "It's in Your Head",
-      render: () => jsx(ExpandedWorkspace, { source: source, rest: rest, portraitPreferences }),
+      render: () => jsx(ExpandedWorkspace, { source: source, rest: rest, portraitPreferences, onCollapse: closeIyhWorkspace }),
     })
+    if (typeof handle === 'function') IYH_WS_CLOSE = handle
   }
 
   const emptyState = (label, q) => jsxs('div', {

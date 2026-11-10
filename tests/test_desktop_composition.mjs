@@ -162,4 +162,18 @@ ok(lanesSrc2.includes("'data-testid': 'pulse-empty'"), 'PulseLanes renders the r
 ok(lanesSrc2.includes("'no pulse data yet'"), 'empty state labels the absence of data')
 ok(lanesSrc2.includes('hasEntries'), 'empty state keeps lane geometry (rendered only when all lanes are empty)')
 
+// 9. Expand/collapse symmetry: the compact strip's expand icon opens the
+// inspection workspace; the EXPANDED view carries the inverse button
+// (minimize glyph) that routes through the host close handle openWorkspace
+// returns — back to the compact panel (strip/sidebar).
+ok(src.includes('let IYH_WS_CLOSE = null') && src.includes('function closeIyhWorkspace()'),
+  'module-level workspace close handle + guarded close function')
+ok(src.includes('if (typeof handle === \'function\') IYH_WS_CLOSE = handle'),
+  'openWorkspace\'s returned close handle is captured')
+ok(src.includes('onCollapse: closeIyhWorkspace'), 'ExpandedWorkspace receives the collapse callback')
+const wsSrc = src.slice(src.indexOf('function ExpandedWorkspace'), src.indexOf('const TABS'))
+ok(wsSrc.includes('name: \'minimize\'') && wsSrc.includes('onCollapse'),
+  'the expanded header offers the minimize (inverse of expand) button')
+ok(wsSrc.includes('typeof onCollapse === \'function\''), 'the button degrades away when no close path exists')
+
 console.log('PASS composition: ' + n + ' assertions')
