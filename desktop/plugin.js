@@ -2335,13 +2335,14 @@ function IyhPortraitStudio({ data, preferences }) {
 
 
 const POLL_MS = 5000
-const PULSE_POLL_MS = 15000
+const PULSE_POLL_MS = 5000
 
 // v0.1.10 (spec §4.1): fixed-window PULSE refresh reducer. The MAXIMUM
 // normal aggregation window for incoming tick notifications — NOT a
-// replacement for the 15s poll (which stays the recovery path for
-// missed pushes).
-const PULSE_REDUCER_MS = 1300
+// replacement for the poll (which stays the recovery path for missed
+// pushes). 850ms = the portrait cadence, so an activity burst reaches a
+// bubble in the same breath the live expression decays (C.2).
+const PULSE_REDUCER_MS = 850
 
 // v0.1.10 (spec §4.2): createPulseTickReducer — fixed window, never a
 // trailing debounce. First tick opens the window; later ticks only
@@ -2477,9 +2478,10 @@ let PULSE_TICK_REFRESH = null
 // PORTRAIT polls ~0.85s (settle window well inside one interval) while
 // PULSE / DRIFT / metrics keep the slow POLL_MS cadence.
 const PORTRAIT_POLL_MS = 850
-// Legacy hourly lane retired: the pane polls /pulse at the same slow cadence
-// the old hourly heat lane used; POLL_MS polling below is the mandatory
-// fallback on every route.
+// Legacy hourly lane retired; C.2 dropped its 15s vestige — PULSE now
+// polls at the mandatory POLL_MS (5000) safety-net cadence. The primary
+// path is still the ~850ms tick push (PULSE_REDUCER_MS); the poll only
+// covers a missed push.
 const IO_WIDTH = 220   // fixed I/O-frame column
 const NARROW_W = 480   // below this frame width the strip is docked narrow (sidebar): I/O column hidden, header collapses to essentials
 const TINY_W = 320     // below this the sidebar is too thin for worded tabs in the two-row header: tabs collapse to icons-only mode

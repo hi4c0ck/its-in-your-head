@@ -76,7 +76,11 @@ function fakeClock() {
 }
 
 // ============ R: reducer semantics ============
-eq(PULSE_REDUCER_MS, 1300, 'reducer window is the spec 1.3s (1300ms)')
+// C.2: the window dropped from the legacy 1.3s to the portrait cadence
+// (850ms) so an activity burst reaches a bubble in the same breath the
+// live expression decays. The semantic tests below drive it symbolically
+// (PULSE_REDUCER_MS), so only this constant pin changes.
+eq(PULSE_REDUCER_MS, 850, 'reducer window is the portrait cadence (850ms, C.2)')
 
 {
   const clk = fakeClock()

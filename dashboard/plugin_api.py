@@ -256,7 +256,8 @@ def _query(sql: str, params: tuple = ()):
 
 
 def _pulse_activity_events(after_event_id: int | None = None,
-                           limit: int = 256) -> dict:
+                           limit: int = 256,
+                           tool_name: str | None = None) -> dict:
     """Cursor-based PULSE activity batch (v0.1.10 spec §3.3).
 
     Returns newly persisted tool_start EVENT METADATA only (id, ts,
@@ -266,7 +267,15 @@ def _pulse_activity_events(after_event_id: int | None = None,
     tool_start events with ids greater than the cursor, ascending event
     id order, one bounded page, has_more on a truncated page.
     Fault-isolated: any DB fault maps to an empty page at the caller's
-    cursor — the /pulse route never 500s on activity fetch."""
+    cursor — the /pulse route never 500s on activity fetch.
+
+    C/B (additive): ``tool_name`` (when set) restricts the page to ONE
+    tool's backlog — the pane's FILO flush-on-visibility reads a tool's
+    unconsumed events from the persisted events table (the "external
+    toolkit") instead of hoarding them in renderer memory. Same cursor
+    semantics (ASC, next_cursor = page high) as the global path; the
+    caller reverses the page for newest-first animation. No schema or
+    shape change to the response envelope (C1/C3-clean)."""
     limit = max(1, int(limit))
     # Unusable cursor (unresolved FastAPI Query default in direct
     # calls, None, junk) degrades to the baseline: high-water mark,
@@ -277,6 +286,12 @@ def _pulse_activity_events(after_event_id: int | None = None,
             after = int(after_event_id)
         except (TypeError, ValueError):
             after = None
+    # C/B: the tool_name filter must also survive a direct (non-ASGI)
+    # call, where the FastAPI Query default is left as the unresolved
+    # Query sentinel — only a plain string filters (mirror the `after`
+    # guard above so `api.pulse(...)` direct calls stay byte-compatible).
+    if not isinstance(tool_name, str):
+        tool_name = None
     try:
         conn = _database.connect()
         conn.execute("PRAGMA busy_timeout=2000")  # cross-process WAL reads
@@ -289,11 +304,18 @@ def _pulse_activity_events(after_event_id: int | None = None,
         high_water = int(hi) if hi is not None else 0
         if after is None:
             return {"events": [], "next_cursor": high_water, "has_more": False}
-        rows = conn.execute(
-            "SELECT id, ts, tool_name, tool_call_id FROM events"
-            " WHERE id > ? AND type = 'tool_start'"
-            " ORDER BY id ASC LIMIT ?",
-            (after, limit + 1)).fetchall()
+        if tool_name is not None:
+            sql = ("SELECT id, ts, tool_name, tool_call_id FROM events"
+                   " WHERE id > ? AND type = 'tool_start'"
+                   " AND tool_name = ?"
+                   " ORDER BY id ASC LIMIT ?")
+            params: list = [after, tool_name, limit + 1]
+        else:
+            sql = ("SELECT id, ts, tool_name, tool_call_id FROM events"
+                   " WHERE id > ? AND type = 'tool_start'"
+                   " ORDER BY id ASC LIMIT ?")
+            params = [after, limit + 1]
+        rows = conn.execute(sql, params).fetchall()
         has_more = len(rows) > limit
         page = rows[:limit]
         return {
@@ -845,6 +867,7 @@ def _pulse_shape() -> dict:
     try:
         from pulse import matrix as _pulse_matrix
         from pulse import prototypes as _pulse_protos
+        from pulse import velocity as _pulse_velocity
     except ModuleNotFoundError:
         # Isolated plugin-host child: its startup cwd is NOT the plugin
         # root, so the bare top-level names are off its sys.path (the
@@ -857,6 +880,7 @@ def _pulse_shape() -> dict:
             sys.path.insert(0, _root)
         from pulse import matrix as _pulse_matrix
         from pulse import prototypes as _pulse_protos
+        from pulse import velocity as _pulse_velocity
 
     class _DbRegistry:
         """pulse_tools rows as the matrix's registry projection."""
@@ -909,13 +933,28 @@ def _pulse_shape() -> dict:
                     "model_version": model_version,
                     "dim": len(goal_vector) if goal_vector else None}
     goal_backend = goal_row[2] if goal_row is not None else None
+    # C.1: per-tool event-rate velocity (persisted tool_start throughput
+    # in a rolling window) — the "fast-decay" LIVE signal, computed for
+    # free from the events table (idx_events_ts). Fault-tolerant -> {}
+    # so a read fault degrades to the legacy capped-capsule sort, never
+    # a 500.
+    event_rates: dict = {}
+    try:
+        vconn = _connect()
+        _migration.schema_bootstrap(vconn)
+        event_rates = _pulse_velocity.event_velocity(
+            vconn, window_s=_pulse_velocity.PULSE_VELOCITY_WINDOW_S)
+        vconn.close()
+    except Exception:
+        event_rates = {}
     common = dict(
         registry=_DbRegistry(registry_rows), prototypes=store,
         session_state=None,
         goal_vector=goal_vector, goal_text=None, backend=None,
         capsules_by_tool=capsules,
         thresholds=thresholds,
-        vector_space=vector_space, goal_backend=goal_backend)
+        vector_space=vector_space, goal_backend=goal_backend,
+        event_rates=event_rates)
     rows = _pulse_matrix.build_matrix(**common)
     lanes = _pulse_matrix.build_lanes(**common)
     shape["lanes"] = lanes
@@ -1367,7 +1406,8 @@ def _reset_dataset() -> dict:
 
 
 @router.get("/pulse")
-async def pulse(after_event_id: int | None = Query(default=None)):
+async def pulse(after_event_id: int | None = Query(default=None),
+                tool_name: str | None = Query(default=None)):
     """Pulse matrix (rows x 4 columns) + additive v2 lanes envelope:
     the live in-process engine view when the agent half holds rows;
     otherwise the profile-DB fallback (isolated dashboard child).
@@ -1379,7 +1419,13 @@ async def pulse(after_event_id: int | None = Query(default=None)):
     page of persisted tool_start event metadata (no content). No
     cursor -> baseline high-water mark, no history; cursor -> new
     events after it. `rows`, `lanes`, `lane_order`, `schema_version`
-    are untouched."""
+    are untouched.
+
+    C/B (additive): optional `tool_name` restricts the `activity_events`
+    page to ONE tool's backlog (the pane's FILO flush-on-visibility reads
+    a tool's unconsumed events from the persisted events table instead of
+    hoarding them in renderer memory). Same cursor semantics; no change
+    to the lanes/rows envelope."""
     view = _pulse_live_view()
     if view is not None:
         if "lanes" not in view or view.get("schema_version") != 2:
@@ -1402,7 +1448,8 @@ async def pulse(after_event_id: int | None = Query(default=None)):
         result = view
     else:
         result = _pulse_shape()
-    result["activity_events"] = _pulse_activity_events(after_event_id)
+    result["activity_events"] = _pulse_activity_events(after_event_id,
+                                                       tool_name=tool_name)
     return result
 
 

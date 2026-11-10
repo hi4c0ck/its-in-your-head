@@ -29,6 +29,7 @@ try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from . import pulse
     from .pulse import matrix as _pulse_matrix
     from .pulse import persistence as _pulse_persist
+    from .pulse import velocity as _pulse_velocity
     from .perception import encoder as _encoder
     from .perception import anchors as _anchors
     from .perception import portrait as _portrait_mod
@@ -38,6 +39,7 @@ except ImportError:
     import pulse
     from pulse import matrix as _pulse_matrix
     from pulse import persistence as _pulse_persist
+    from pulse import velocity as _pulse_velocity
     from perception import encoder as _encoder
     from perception import anchors as _anchors
     from perception import portrait as _portrait_mod
@@ -1216,6 +1218,23 @@ class Engine:
             if self._capsules:
                 capsules = {t: list(dq) for t, dq in self._capsules.items()}
         space = self._pulse_vector_space()
+        # C.1: per-tool event-rate velocity (persisted tool_start
+        # throughput in a rolling window) — the "fast-decay" LIVE signal.
+        # The agent half owns the same profile DB (it writes events);
+        # open a per-call handle (the _storage pattern) and fault-
+        # tolerate -> {} (the lane then uses the legacy sort).
+        event_rates: dict = {}
+        try:
+            _db, _mig = self._storage()
+            vconn = _db.connect()
+            try:
+                _mig.schema_bootstrap(vconn)
+                event_rates = _pulse_velocity.event_velocity(
+                    vconn, window_s=_pulse_velocity.PULSE_VELOCITY_WINDOW_S)
+            finally:
+                vconn.close()
+        except Exception:
+            event_rates = {}
         common = dict(
             registry=self.registry, prototypes=self.protos,
             session_state=self._session_state(),
@@ -1229,7 +1248,8 @@ class Engine:
             # known encoder space differs from the active one is
             # gated out).
             vector_space=space,
-            goal_backend=self._goal_backend)
+            goal_backend=self._goal_backend,
+            event_rates=event_rates)
         rows = _pulse_matrix.build_matrix(**common)
         # v0.1.10 (review fix 2): the authoritative lane calculation
         # comes from the SAME inputs (one scoring path — the

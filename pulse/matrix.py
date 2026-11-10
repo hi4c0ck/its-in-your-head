@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from .prototypes import cosine, strongest_similarity
 from .momentum import surge_values, empty_momentum
+from .velocity import PULSE_VELOCITY_WINDOW_S
 
 # C4 thresholds (pulse.thresholds.*); S1 settings defaults.
 DEFAULT_THRESHOLDS = {"goal": 0.8, "good": 0.6, "friction": 0.4}
@@ -189,14 +190,20 @@ def build_matrix(registry, prototypes, session_state=None,
                  goal_vector=None, goal_text: str | None = None,
                  backend=None, capsules_by_tool: dict | None = None,
                  thresholds: dict | None = None, vector_space=None,
-                 goal_backend=None) -> list[dict]:
+                 goal_backend=None, event_rates: dict | None = None) -> list[dict]:
     """Build one row per registry tool (dynamic — no hardcoded list).
 
     v0.1.10: ``vector_space`` ({"id", "model_version", "dim"}) +
     ``goal_backend`` activate the compatibility gate — scoring and
     readiness support only use vectors comparable in the active
     embedding space (see the gate block above). Omitted -> legacy
-    behavior (everything scores, everything counts)."""
+    behavior (everything scores, everything counts).
+
+    ``event_rates`` (C.1, additive) is accepted so the shared ``common``
+    dict can feed both builders with one shape; the legacy row
+    projection is deliberately left untouched (byte-compatible) — the
+    velocity-driven LIVE ranking lives in :func:`build_lanes` only.
+    """
     thr = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     if goal_vector is None and goal_text is not None and backend is not None:
         from .activity_encoder import encode_goal_text
@@ -401,15 +408,25 @@ def _sem_sort_key(entry: dict):
 def _live_sort_key(entry: dict):
     mom = entry.get("momentum") or {}
     act = entry.get("activity") or {}
+    vel = entry.get("velocity")  # C.1: only present when event_rates was fed
+    vcount = int(vel.get("count") or 0) if vel is not None else 0
     has = bool(act.get("calls_started") or act.get("calls_completed")
-               or act.get("errors") or act.get("last_seen") is not None)
+               or act.get("errors") or act.get("last_seen") is not None
+               or vcount > 0)
     total = (int(act.get("calls_started") or 0)
              + int(act.get("calls_completed") or 0)
              + int(act.get("errors") or 0))
     last = act.get("last_seen")
+    lastf = -(float(last) if isinstance(last, (int, float)) else -1.0)
+    if vel is not None:
+        # C.1: persisted event-rate velocity is the primary dynamic key
+        # (fast-decay consistency — a recent batch rises, then cools as
+        # events roll out of the window). Cumulative + recency tie-break.
+        return (0 if has else 1, -vcount, total * -1, lastf,
+                entry.get("tool_name", ""), entry.get("tool_id", -1))
+    # Legacy (event_rates=None): capped-capsule surge is the primary key.
     return (0 if has else 1, -_q(mom.get("value", 0.5)), total * -1,
-            -(float(last) if isinstance(last, (int, float)) else -1.0),
-            entry.get("tool_name", ""), entry.get("tool_id", -1))
+            lastf, entry.get("tool_name", ""), entry.get("tool_id", -1))
 
 
 def _assign_ranks(entries: list, key_fn) -> list:
@@ -423,14 +440,21 @@ def build_lanes(registry, prototypes, session_state=None,
                 goal_vector=None, goal_text: str | None = None,
                 backend=None, capsules_by_tool: dict | None = None,
                 thresholds: dict | None = None, vector_space=None,
-                goal_backend=None) -> dict:
+                goal_backend=None, event_rates: dict | None = None) -> dict:
     """The four independent lane arrays (v2 contract). Pure projection
     over the same inputs as build_matrix — no tables, no I/O beyond
     what build_matrix already does. Returns ALL eligible tools per
     lane. v0.1.10: the v8 compatibility gate (``vector_space`` +
     ``goal_backend``) splits score candidates (dimension-comparable)
     from support candidates (dimension-comparable AND known provenance
-    in the active space); evidence counts stay the RAW stored facts."""
+    in the active space); evidence counts stay the RAW stored facts.
+
+    C.1 (additive): when ``event_rates`` is not None, each LIVE entry
+    gains a ``velocity`` field (persisted tool_start event-rate in a
+    rolling window) and the LIVE lane ranks by that velocity first —
+    the "fast-decay consistency" signal, free from the events table.
+    ``None`` (the default, and the legacy path) leaves the capped-
+    capsule momentum sort untouched (byte-identical)."""
     thr = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     if goal_vector is None and goal_text is not None and backend is not None:
         from .activity_encoder import encode_goal_text
@@ -558,6 +582,15 @@ def build_lanes(registry, prototypes, session_state=None,
     for entry in live:
         entry["momentum"] = momentum.get(entry["tool_name"],
                                          empty_momentum())
+    # C.1: attach the persisted event-rate velocity so the LIVE lane can
+    # rank by it (fast-decay consistency). Only when the caller fed
+    # event_rates — a None keeps the legacy capped-capsule sort intact.
+    if event_rates is not None:
+        default_vel = {"count": 0, "per_s": 0.0,
+                       "window_s": PULSE_VELOCITY_WINDOW_S}
+        for entry in live:
+            entry["velocity"] = dict(event_rates.get(entry["tool_name"],
+                                                     default_vel))
     return {
         "live": _assign_ranks(live, _live_sort_key),
         "goal": _assign_ranks(goal, _sem_sort_key),
