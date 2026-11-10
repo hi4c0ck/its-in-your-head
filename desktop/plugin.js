@@ -2149,7 +2149,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const drift = 0                                             // v17: face position FIXED (no whole-picture sway); the DRIFT = the dither mask's thin lines sweeping the face
   // v18: the DITHER MASK drift offsets — a value-noise field fit to the image size, drifting
   // NON-diagonally (x + y at different slow rates). No per-brick state (the mask drives the bricks).
-  const dOffX = (frame / 12) * (IYH_J.ditherDriftX || 0.5)
+  const dOffX = -(frame / 12) * (IYH_J.ditherDriftX || 0.5)   // v22: NEGATED -> the features sweep LEFT-TO-RIGHT (not R->L)
   const dOffY = (frame / 12) * (IYH_J.ditherDriftY || 0.35)
   // v19: the GLITCH burst (a TV-tracking glitch). Mostly the stable dither; then a periodic
   // random horizontal band rips sideways + takes a glitch (RGB-split) color + its bricks
@@ -2198,14 +2198,17 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     }
     // proximity to the lines (0 = deep void, 1 = on/near a line or the shifted-left fold band)
     const lineProx = Math.min(1, Math.max(cvv, cvvL) / lineFoldThr)
-    // the per-column WAVE offset (FULL in the ground; it FOLDS (damps) where it hits the lines)
-    const waveOff = (iihyJWave(pc / Math.max(1, pn - 1)) - 0.5) * waveAmp * (1 - lineProx)
+    // the per-column WAVE offset (FULL in the ground; it FOLDS (damps) where it hits the lines).
+    // v22: MIRRORED L->R ((pn-1-pc) not pc) so the wave ripples the correct way, not inverted.
+    const waveOff = (iihyJWave((pn - 1 - pc) / Math.max(1, pn - 1)) - 0.5) * waveAmp * (1 - lineProx)
     const dv = iihyJNoise(pc + dOffX, prr + dOffY + waveOff, IYH_J.ditherSeed, IYH_J.ditherFeat)
     let a
     if (isLit) {
-      // the FACE line: CRISP (the accent, full brightness, the v13 focus flicker). The wave folds here
-      // -> no dither shimmer on the lines.
-      a = contrast * (focusShift ? 1.05 : 1)
+      // v22: the FACE line PULLS FULL COLOR (the accent, ~1.0, no faint-line dimming) with a 0.05-level
+      // pulse (a subtle 5% flicker, deterministic per-frame + per-brick). Where a face brick clashes with
+      // the dither mask it stays full color + the pulse -> the lines pop, the ground ripples beneath.
+      const pulse = 0.5 + 0.5 * Math.sin(frame * 0.5 + pc * 0.4 + prr * 0.3)
+      a = 0.95 + 0.05 * pulse
     } else {
       // v21: the GROUND — draw the dither where it MISSES the svg pattern (the void, "zero ground"),
       // on its own opacity (groundMax), FOLDED at the lines (damped where lineProx is high). The

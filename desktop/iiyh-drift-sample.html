@@ -5,7 +5,7 @@ canvas{background:#0e1116;border:1px solid #263140}
 .sld{display:grid;grid-template-columns:230px 1fr 70px;gap:8px 12px;align-items:center;margin:7px 0}
 .sld input[type=range]{width:100%}
 h1{font-size:18px}.sub{color:#8fa0b2;font-size:13px;max-width:760px}</style></head><body>
-<h1>IYH J brick mosaic &mdash; GROUND DITHER + LINE-FOLD (v21)</h1>
+<h1>IYH J brick mosaic &mdash; GROUND DITHER + LINE-FOLD (v22)</h1>
 <p class="sub">The face lines stay <b>crisp</b> (the accent, no dither). The dither mask ripples in the <b>wave shape</b> (your formula) where it <b>misses the SVG pattern</b> &mdash; the <b>ground/void</b> ("zero ground") &mdash; on its own opacity (<b>groundMax</b>). It <b>folds</b> (damps) where it hits the SVG lines + a <b>secondary fold mask</b> = the lines shifted LEFT by the avg line width (<b>foldOffset</b> bricks, ~8-12px). Sliders: wave amplitude, fold line-threshold, fold offset, glitch cadence, ground floor + ground opacity. Open in a FOREGROUND tab.</p>
 <div class="sld"><label>waveAmp (noise-units)</label><input id="waveAmp" type="range" min="0" max="20" value="6"><span class="v" id="waveAmpv">6</span></div>
 <div class="sld"><label>lineFoldThr (0..1)</label><input id="lineFoldThr" type="range" min="10" max="90" value="50"><span class="v" id="lineFoldThrv">0.50</span></div>
@@ -99,7 +99,7 @@ function draw(f){
   const feat=8,dFloor=+$('floor').value/100
   const waveAmp=+$('waveAmp').value,foldOff=+$('foldOffset').value,lineFoldThr=+$('lineFoldThr').value/100
   const gEvery=+$('gEvery').value,gLen=+$('gLen').value
-  const dOffX=(f/12)*(IYH_J.ditherDriftX||0.5),dOffY=(f/12)*(IYH_J.ditherDriftY||0.35)
+  const dOffX=-(f/12)*(IYH_J.ditherDriftX||0.5),dOffY=(f/12)*(IYH_J.ditherDriftY||0.35)   // v22: dOffX negated -> L->R sweep
   const gActive=(f%(gEvery+gLen))<gLen,gIdx=Math.floor(f/(gEvery+gLen))
   let gBand=0,gH=0,gShift=0,gColor=null
   if(gActive){
@@ -119,9 +119,10 @@ function draw(f){
     let cvvL=0
     if(pc>=foldOff){const cc=pc-foldOff;for(let yy2=0;yy2<pool;yy2++)for(let xx2=0;xx2<pool;xx2++){const c0=cc*pool+xx2,r0=prr*pool+yy2;if(c0>=cn||r0>=rn)continue;const v2=IYH_FACE_COV_BYTES[r0*cn+c0];if(v2>cvvL)cvvL=v2}}
     const lineProx=Math.min(1,Math.max(cvv,cvvL)/(lineFoldThr*255))   // 0 = deep void, 1 = on/near a line / the fold band
-    const waveOff=(iihyJWave(pc/Math.max(1,pn-1))-0.5)*waveAmp*(1-lineProx)   // the wave offset, FOLDED at the lines
+    const waveOff=(iihyJWave((pn-1-pc)/Math.max(1,pn-1))-0.5)*waveAmp*(1-lineProx)   // v22: MIRRORED L->R
     const dv=iihyJNoise(pc+dOffX,prr+dOffY+waveOff,IYH_J.ditherSeed,feat)
-    let a=isLit?contrast:gMax*(dFloor+(1-dFloor)*dv)*(1-lineProx)   // FACE: crisp (the accent); GROUND: the dither ripple (own opacity), folded at the lines
+    const pulse=0.5+0.5*Math.sin(f*0.5+pc*0.4+prr*0.3)
+    let a=isLit?(0.95+0.05*pulse):gMax*(dFloor+(1-dFloor)*dv)*(1-lineProx)   // v22: FACE full color + 0.05 pulse; GROUND dither (own opacity), folded at the lines
     if(a<=0.02)continue
     const inBand=gActive&&isLit&&prr>=gBand&&prr<gBand+gH   // the glitch is on the FACE lines
     let gx=offX+pc*bwS+gapX/2,ga=a
