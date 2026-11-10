@@ -2143,23 +2143,21 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const gEvery = IYH_J.glitchEvery || 90, gLen = IYH_J.glitchLen || 10
   const gActive = (frame % (gEvery + gLen)) < gLen
   const gIdx = Math.floor(frame / (gEvery + gLen))
-  let gBand = 0, gH = 0, gShift = 0, gJit = 0, gColor = null
+  let gBand = 0, gH = 0, gShift = 0, gColor = null
   if (gActive) {
     gBand = 30 + Math.floor(iihyJHash(gIdx * 31 + 1, gIdx * 7 + 2, IYH_J.ditherSeed + 100) * 15)   // the face's LIT middle (eye/nose), so the rip always shows
     gH = 5 + Math.floor(iihyJHash(gIdx * 17 + 3, gIdx * 3 + 4, IYH_J.ditherSeed + 99) * 7)
     gShift = (Math.floor(iihyJHash(gIdx * 13 + 5, gIdx * 11 + 6, IYH_J.ditherSeed + 98) * 13) - 6) * bwS
-    gJit = 0.5 + iihyJHash(gIdx * 19 + 7, gIdx * 13 + 8, IYH_J.ditherSeed + 97) * 0.8
     gColor = '#ff2d95'   // the RGB-split glitch color: a strong MAGENTA (unmistakable against the base cyan)
   }
-  ctx.fillStyle = iiyhJResolveAccent()                           // pane accent; alpha via globalAlpha
+  const accentColor = iiyhJResolveAccent()                     // pane accent (cached); alpha via globalAlpha; the glitch band overrides it
   for (let prr = 0; prr < pm; prr++) for (let pc = 0; pc < pn; pc++) {
-    let cvv = 0, i0 = -1, found = false
+    let cvv = 0, found = false
     for (let yy = 0; yy < pool; yy++) for (let xx = 0; xx < pool; xx++) {
       const c0 = pc * pool + xx, r0 = prr * pool + yy
       if (c0 >= cn || r0 >= rn) continue
       const idx = r0 * cn + c0, v = cov[idx]
       if (v > cvv) cvv = v
-      if (xx === 0 && yy === 0) i0 = idx
       found = true
     }
     if (!found || cvv < IYH_FACE_COV.thr) continue
@@ -2175,10 +2173,10 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     const inBand = gActive && prr >= gBand && prr < gBand + gH
     let gx = offX + pc * bwS + drift + gapX / 2, ga = a
     if (inBand) {
-      ctx.fillStyle = gColor
       gx += gShift + Math.sin(frame * 0.9 + prr * 1.3) * bwS * 0.3   // the sideways rip + a little jitter
       ga = Math.min(1, Math.max(a, 0.85) * (0.6 + 0.4 * iihyJHash(pc * 7 + frame, gIdx, IYH_J.ditherSeed + 90)))  // the band BRIGHT magenta (the RGB-split pop)
     }
+    ctx.fillStyle = inBand ? gColor : accentColor   // the magenta stays IN the band; everything else is the accent
     ctx.globalAlpha = ga
     ctx.fillRect(gx, offY + prr * bhS + gapY / 2, Math.max(0.5, bwS - gapX), Math.max(0.5, bhS - gapY))
   }
