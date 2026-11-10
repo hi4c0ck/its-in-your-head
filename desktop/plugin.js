@@ -3353,7 +3353,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available }) {
         },
         children: available === true ? 'no tools yet' : 'no pulse data yet',
       }),
-    })]]),
+    })])],
   });
 }
 
