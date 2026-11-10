@@ -5106,16 +5106,24 @@ export default {
       render: () => jsx(Strip, { source: ctx.source, rest: ctx.rest, portraitPreferences }),
     })
 
-    // v0.1.10 (review fix 8): ONE registered surface. The host does not
-    // expose a verifiable mutual-exclusion contract between the bottom
-    // workspace pane and a right-zone sidebar pane, so registering both
-    // produced two live copies of the strip (the stuck minimized rail
-    // users saw). The bottom placement is the owner-locked 96px
-    // instrument; the sidebar composition is still rendered by the SAME
-    // measured Strip (chooseComposition), it just no longer gets a
-    // second registration. Re-enable a second surface only when the
-    // host gains an explicit per-plugin placement/visibility API that
-    // can prove which of the two is live.
+    // Right-zone sidebar (the user's working surface): the SAME measured
+    // Strip renders as a tall pane; chooseComposition switches to the
+    // 50/50 sidebar layout automatically. Gated on host signals so
+    // older hosts degrade to bottom-only. The bottom 96px instrument
+    // and the sidebar are two views of the one surface model; the host
+    // manages their placement/visibility.
+    var viewportSignal = typeof host.state === 'object' && host.state != null
+      && typeof host.state.viewport !== 'undefined'
+    var paneVisibilitySignal = typeof host.paneVisibility === 'function'
+    if (viewportSignal && paneVisibilitySignal) {
+      ctx.register({
+        id: 'its-in-your-head-sidebar',
+        area: 'panes',
+        title: "It's in Your Head",
+        data: { placement: 'right', width: '400px' },
+        render: () => jsx(Strip, { source: ctx.source, rest: ctx.rest, portraitPreferences }),
+      })
+    }
 
     // Live accelerator (optional): backend tick -> invalidate the polling
     // queries. The polling fallback above stays mandatory — ctx.socket is a

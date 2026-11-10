@@ -76,12 +76,12 @@ ok(src.includes("data-focus"), 'focus outline keys off tab state (no exclusive h
 // The only allowed tab=== remaining is the focus outline/expanded workspace.
 ok(src.includes("TABS.filter((t) => t.id !== 'drift')") || src.includes("compactTabs"), 'compact tabs exclude DRIFT (DRIFT stays expanded)')
 ok(src.includes("placement: 'main'") && src.includes("dock: { pane: 'workspace', pos: 'bottom' }") && src.includes("height: '96px'"), 'bottom registration verbatim')
-// v0.1.10 (review fix 8): the host exposes no verifiable mutual-exclusion
-// contract, so exactly ONE pane surface is registered — no second
-// right-zone copy (the two live surfaces caused the stuck rail).
-ok((src.match(/ctx\.register\(\{/g) || []).length === 1, 'exactly one ctx.register call (single surface)')
-ok(!src.includes("placement: 'right'"), 'no second right-zone surface registered')
-ok(src.includes("host gains an explicit per-plugin placement/visibility API"), 'single-surface rationale documented at the registration')
+// Sidebar surface (the user's working view): right-zone pane on the
+// same measured Strip, gated on host signals (older hosts degrade to
+// bottom-only).
+ok(src.includes("placement: 'right'") && src.includes("width: '400px'"), 'right-zone sidebar registration present (user working surface)')
+ok(src.includes("typeof host.paneVisibility === 'function'") && src.includes("typeof host.state.viewport"), 'sidebar registration gated on host signals')
+ok((src.match(/ctx\.register\(\{/g) || []).length === 2, 'two registrations: bottom instrument + right sidebar (same surface model)')
 
 // 5. Seam shape conformance to v2 TS types (snapshot for a fixture).
 const fixture = {
