@@ -1907,8 +1907,10 @@ const IYH_J = {
   steep: 3.0,              // contrast gamma: steepens the ramp so main lines (high confidence) pop vs faint shadows
   rasterGain: 2.0,       // brightness of the template-rasterized coverage (darkness * 255 * rasterGain); the pencil is gray -> 2.0 lifts it to full bricks
   canvasFloor: 0.35,     // min alpha for a non-main brick (the face reads, not washed-out); main lines go to full
-  invertHoldMs: 1300,    // normal phase (main lines follow the contrast) before the invert flicker
-  invertMs: 400,         // inverted phase ("less-visible" faint bricks light up, main lines dim) before reverting
+  shiftHoldMs: 1300,   // normal phase (main lines in focus) before the focus shift
+  shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
+  focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
+  ditherDrift: 1.0,    // offsetting dither mask: the IYH_J_TONE grain tiles scroll this many cells/frame -> the visible drift
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
   lift: 0.06,             // brightness lift -> effFloor = floor + lift
   tint: 0.10,             // gamma: pow(v.c, 1 + 1.5*tint)
@@ -2091,7 +2093,7 @@ function iiyhRasterizeTemplateCoverage(templateId) {
 }
 // Per-frame CANVAS renderer. `cov` is the 214x240 coverage grid (default the baked
 // IYH_FACE_COV_BYTES; a template-rasterized grid when a drawing template is selected).
-function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, inverted = false) {
+function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   ctx.clearRect(0, 0, W, H)                                  // transparent bg
   cov = cov || IYH_FACE_COV_BYTES
   const cn = IYH_FACE_COV.cn, rn = IYH_FACE_COV.rn
@@ -2104,6 +2106,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, inverted = false) {
   const bwS = bw * scale, bhS = bh * scale
   const gapX = bwS * p, gapY = bhS * p                         // grout gap (px), proportional to brick
   const drift = iiyhBrickDriftX(frame, 720) * scale            // field sway (px)
+  const dOff = (frame * (IYH_J.ditherDrift || 0)) | 0          // offsetting dither mask: scroll the grain tiles -> drift
   ctx.fillStyle = iiyhJResolveAccent()                           // pane accent; alpha via globalAlpha
   for (let prr = 0; prr < pm; prr++) for (let pc = 0; pc < pn; pc++) {
     let cvv = 0, i0 = -1, found = false
@@ -2117,12 +2120,12 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, inverted = false) {
     }
     if (!found || cvv < IYH_FACE_COV.thr) continue
     const vc = cvv / 255                                       // brick "confidence" 0..1
-    const gn = IYH_J_TONE[pc % IYH_J_SPEC.bw][prr % IYH_J_SPEC.bh]
+    const gn = IYH_J_TONE[(pc + dOff) % IYH_J_SPEC.bw][(prr + dOff) % IYH_J_SPEC.bh]   // offsetting dither tile (drifts as dOff advances)
     const contrast = iiyhJContrast(vc)                          // acos spline: [0,1], full at accentConf (0.83+)
-    const grain = 0.35 + 0.65 * gn                              // per-brick grain variation
-    const isMain = vc >= 0.5                                       // the darker half of the strokes -> FULL intensity (pop vs the body)
-    let a = isMain ? IYH_J.soft : Math.max(IYH_J.canvasFloor || 0, contrast * grain * iiyhJShim(i0, seed))
-    if (inverted) a = 1 - a          // invert phase: main lines dim, the "less-visible" body bricks light up
+    const grain = 0.5 + 0.8 * gn                               // wider dither range so the offsetting drift is visible
+    const isMain = vc >= 0.5                                    // the darker strokes -> FULL intensity (pop vs the body)
+    const floor = focusShift ? IYH_J.focusFloor : IYH_J.canvasFloor   // focus shift: lift the faint parts into focus (NO polarity inversion / no folding)
+    let a = isMain ? IYH_J.soft : Math.max(floor, contrast * grain * iiyhJShim(i0, seed))
     if (a <= 0.01) continue
     ctx.globalAlpha = a
     ctx.fillRect(offX + pc * bwS + drift + gapX / 2, offY + prr * bhS + gapY / 2,
@@ -2130,7 +2133,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, inverted = false) {
   }
   ctx.globalAlpha = 1
 }
-// iiyhJCanvas v12: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode (no atob) + baked fallback + grout + arccos contrast + accent (read from the canvas; the pane sets --ui-accent on its mounted container, not body, so resolve canvas -> documentElement -> body) + template-following DARKNESS raster (rasterGain 2.0 / canvasFloor .35 / isMain gate, bright not washed-out) + INVERT FLICKER (normal invertHoldMs -> inverted invertMs -> revert) + CONTAIN-FIT (aspectRatio, no stretch) + PULSE fills remaining height (sidebar flex:1). The 850ms model poll stays untouched.
+// iiyhJCanvas v13: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode (no atob) + baked fallback + grout + arccos contrast + accent (read off the canvas; the pane sets --ui-accent on its mounted container, not body) + template-following DARKNESS raster (rasterGain 2.0 / canvasFloor .35 / isMain gate, bright) + FOCUS-SHIFT flicker (normal shiftHoldMs -> focus-shift shiftMs -> revert: the FAINT parts lift to focusFloor while main lines STAY full — NO polarity inversion / no folding) + OFFSETTING DITHER-DRIFT (IYH_J.ditherDrift scrolls the IYH_J_TONE tiles -> visible drift) + contain-fit (aspectRatio, no stretch) + PULSE fills remaining height. The 850ms model poll stays untouched.
 // Self-driven 12fps canvas renderer. The pane's OWN rAF loop (throttled to
 // IYH_BRICK_FPS) draws the field each frame — not a static image. Started when
 // active, re-fit on resize, stopped on cleanup. Returns the <canvas> ref to attach.
@@ -2181,10 +2184,10 @@ function useIyhBrickCanvas(active, templateId) {
       last = ts
       frame += 1
       if (frame % 10 === 0) seed = iiyhJSeed(frame)   // shimmer re-roll (~0.8s)
-      const invertHold = IYH_J.invertHoldMs || 1300, invertOn = IYH_J.invertMs || 400
-      const cycle = invertHold + invertOn
-      const inverted = cycle > 0 && (ts % cycle) >= invertHold   // timed invert flicker: 1.3s normal, 0.4s inverted
-      iiyhBrickCanvasDraw(ctx, canvas.width, canvas.height, frame, seed, covRef.current, inverted)
+      const shiftHold = IYH_J.shiftHoldMs || 1300, shiftOn = IYH_J.shiftMs || 400
+      const cycle = shiftHold + shiftOn
+      const focusShift = cycle > 0 && (ts % cycle) >= shiftHold  // timed FOCUS shift: 1.3s main-line focus, 0.4s the less-visible parts come into focus
+      iiyhBrickCanvasDraw(ctx, canvas.width, canvas.height, frame, seed, covRef.current, focusShift)
     }
     raf = requestAnimationFrame(loop)
     return () => { running = false; cancelAnimationFrame(raf); if (ro) ro.disconnect() }
