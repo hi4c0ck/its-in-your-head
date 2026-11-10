@@ -842,8 +842,21 @@ def _pulse_shape() -> dict:
     # projection and the v2 lanes envelope stay byte-compatible; the
     # rows->lanes mirror (_pulse_lanes_from_rows) remains a
     # compatibility path for pre-v0.1.10 engine responses only.
-    from pulse import matrix as _pulse_matrix
-    from pulse import prototypes as _pulse_protos
+    try:
+        from pulse import matrix as _pulse_matrix
+        from pulse import prototypes as _pulse_protos
+    except ModuleNotFoundError:
+        # Isolated plugin-host child: its startup cwd is NOT the plugin
+        # root, so the bare top-level names are off its sys.path (the
+        # 502 "No module named 'pulse'" on /pulse). Bootstrap from THIS
+        # file's location (dashboard/ -> plugin root) and retry once.
+        # The gateway half already imports fine — this path never runs
+        # there.
+        _root = str(Path(__file__).resolve().parent.parent)
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        from pulse import matrix as _pulse_matrix
+        from pulse import prototypes as _pulse_protos
 
     class _DbRegistry:
         """pulse_tools rows as the matrix's registry projection."""
