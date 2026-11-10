@@ -1,16 +1,18 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>IYH J glitch sample (v19)</title>
-<style>body{background:#101316;color:#cfd6dd;font:14px/1.5 system-ui;margin:24px;max-width:820px}
+<html><head><meta charset="utf-8"><title>IYH J wave-fold sample (v20)</title>
+<style>body{background:#101316;color:#cfd6dd;font:14px/1.5 system-ui;margin:24px;max-width:860px}
 canvas{background:#0e1116;border:1px solid #263140}
-.sld{display:grid;grid-template-columns:210px 1fr 70px;gap:8px 12px;align-items:center;margin:8px 0}
+.sld{display:grid;grid-template-columns:230px 1fr 70px;gap:8px 12px;align-items:center;margin:7px 0}
 .sld input[type=range]{width:100%}
-h1{font-size:18px}.sub{color:#8fa0b2;font-size:13px}</style></head><body>
-<h1>IYH J brick mosaic &mdash; GLITCH (v19)</h1>
-<p class="sub">The face = the value-noise dither (mostly stable); then a <b>glitch burst</b>: a random horizontal band rips sideways, takes a glitch (RGB-split) color (magenta / aqua), its bricks scramble, then snaps back. Open in a FOREGROUND tab to watch the glitches fire.</p>
-<div class="sld"><label>ditherFeat</label><input id="feat" type="range" min="4" max="40" value="8"><span class="v" id="featv">8</span></div>
-<div class="sld"><label>ditherFloor</label><input id="floor" type="range" min="0" max="90" value="40"><span class="v" id="floorv">0.40</span></div>
+h1{font-size:18px}.sub{color:#8fa0b2;font-size:13px;max-width:760px}</style></head><body>
+<h1>IYH J brick mosaic &mdash; WAVE-FORMULA fold (v20)</h1>
+<p class="sub">The dither mask ripples in the <b>wave shape</b> (your formula y(x) = 0.54 + 0.12&middot;sin(&pi;x) &minus; 0.15&middot;cos(&pi;x) + 0.22&middot;sin(2&pi;x) &minus; 0.23&middot;cos(2&pi;x) &minus; 0.09&middot;sin(3&pi;x) &minus; 0.02&middot;cos(3&pi;x)). It <b>folds</b> (damps) where it hits the SVG lines + a <b>secondary fold mask</b> = the lines shifted LEFT by the avg line width (~foldOffset bricks). Open in a FOREGROUND tab to see the ripple + the glitches. Sliders: the wave amplitude, the fold line-threshold, the fold offset, + the glitch cadence.</p>
+<div class="sld"><label>waveAmp (noise-units)</label><input id="waveAmp" type="range" min="0" max="20" value="6"><span class="v" id="waveAmpv">6</span></div>
+<div class="sld"><label>lineFoldThr (0..1)</label><input id="lineFoldThr" type="range" min="10" max="90" value="50"><span class="v" id="lineFoldThrv">0.50</span></div>
+<div class="sld"><label>foldOffset (bricks left)</label><input id="foldOffset" type="range" min="0" max="4" value="1"><span class="v" id="foldOffsetv">1</span></div>
 <div class="sld"><label>glitchEvery (frames)</label><input id="gEvery" type="range" min="20" max="300" value="90"><span class="v" id="gEveryv">90</span></div>
 <div class="sld"><label>glitchLen (frames)</label><input id="gLen" type="range" min="2" max="40" value="10"><span class="v" id="gLenv">10</span></div>
+<div class="sld"><label>ditherFloor</label><input id="floor" type="range" min="0" max="90" value="40"><span class="v" id="floorv">0.40</span></div>
 <canvas id="c" width="480" height="506"></canvas>
 <script>
 const IYH_J = {
@@ -28,6 +30,9 @@ const IYH_J = {
   ditherDriftX: 12,    // dither mask drift, X (bricks/sec; features crawl, the face visibly shimmers)
   ditherDriftY: 8,     // dither mask drift, Y (bricks/sec; DIFFERENT from X -> NON-diagonal)
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
+  waveAmp: 6,          // v20 the WAVE-FORMULA offset-mask amplitude (noise-units): how far the dither field ripples in the wave shape (iihyJWave)
+  foldOffset: 1,      // v20 the SECONDARY fold mask = the SVG lines shifted LEFT by this many pooled bricks (~1 ≈ 10px ≈ the avg line width); the fold band that prevents mess
+  lineFoldThr: 0.5,   // v20 coverage (0..1) at/above which the wave FOLDS (damps) at a brick -> crisp lines, no mess near the SVG lines
   glitchEvery: 90,    // v19 the GLITCH burst cadence: frames between glitch bursts (~7.5s at 12fps)
   glitchLen: 10,       // v19 how long a glitch burst lasts, in frames (~0.83s) -> a brief rip, then snap-back
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
@@ -66,6 +71,13 @@ function iihyJNoise(nx, ny, seed, feat) {
   const ab = a + (b - a) * sx, cd = c + (d - c) * sx
   return ab + (cd - ab) * sy
 }
+function iihyJWave(x) {
+  const PI = Math.PI
+  return 0.54
+    + 0.12 * Math.sin(PI * x) - 0.15 * Math.cos(PI * x)
+    + 0.22 * Math.sin(2 * PI * x) - 0.23 * Math.cos(2 * PI * x)
+    - 0.09 * Math.sin(3 * PI * x) - 0.02 * Math.cos(3 * PI * x)
+}
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1
   if (c <= 0) return 0
@@ -82,8 +94,10 @@ function draw(f){
   const bw=IYH_J.bw*pool,bh=IYH_J.bh*pool,pn=Math.ceil(cn/pool),pm=Math.ceil(rn/pool)
   const sc=Math.min(480/720,506/760),offX=(480-720*sc)/2,offY=(506-760*sc)/2
   const bwS=bw*sc,bhS=bh*sc,gapX=bwS*p,gapY=bhS*p
-  const feat=+$('feat').value,dFloor=+$('floor').value/100
+  const feat=8,dFloor=+$('floor').value/100
+  const waveAmp=+$('waveAmp').value,foldOff=+$('foldOffset').value,lineFoldThr=+$('lineFoldThr').value/100
   const gEvery=+$('gEvery').value,gLen=+$('gLen').value
+  const dOffX=(f/12)*(IYH_J.ditherDriftX||0.5),dOffY=(f/12)*(IYH_J.ditherDriftY||0.35)
   const gActive=(f%(gEvery+gLen))<gLen,gIdx=Math.floor(f/(gEvery+gLen))
   let gBand=0,gH=0,gShift=0,gColor=null
   if(gActive){
@@ -92,27 +106,30 @@ function draw(f){
     gShift=(Math.floor(iihyJHash(gIdx*13+5,gIdx*11+6,IYH_J.ditherSeed+98)*13)-6)*bwS
     gColor='#ff2d95'
   }
-  const accCol=ACC   // the accent; the glitch band overrides it (magenta stays confined to the band)
+  const accCol=ACC
   for(let prr=0;prr<pm;prr++)for(let pc=0;pc<pn;pc++){
     let cvv=0,found=false
     for(let yy=0;yy<pool;yy++)for(let xx=0;xx<pool;xx++){const c0=pc*pool+xx,r0=prr*pool+yy;if(c0>=cn||r0>=rn)continue;const v=IYH_FACE_COV_BYTES[r0*cn+c0];if(v>cvv)cvv=v;found=true}
     if(!found||cvv<IYH_FACE_COV.thr)continue
     const contrast=iiyhJContrast(cvv/255)
-    const dv=iihyJNoise(pc,prr,IYH_J.ditherSeed,feat)
-    let a=contrast*(dFloor+(1-dFloor)*dv)
+    let cvvL=0
+    if(pc>=foldOff){const cc=pc-foldOff;for(let yy2=0;yy2<pool;yy2++)for(let xx2=0;xx2<pool;xx2++){const c0=cc*pool+xx2,r0=prr*pool+yy2;if(c0>=cn||r0>=rn)continue;const v2=IYH_FACE_COV_BYTES[r0*cn+c0];if(v2>cvvL)cvvL=v2}}
+    const foldDamp=Math.min(1,Math.max(cvv,cvvL)/(lineFoldThr*255))
+    const waveOff=(iihyJWave(pc/Math.max(1,pn-1))-0.5)*waveAmp*(1-foldDamp)
+    let a=contrast*(dFloor+(1-dFloor)*iihyJNoise(pc+dOffX,prr+dOffY+waveOff,IYH_J.ditherSeed,feat))
     if(a<=0.02)continue
     const inBand=gActive&&prr>=gBand&&prr<gBand+gH
     let gx=offX+pc*bwS+gapX/2,ga=a
-    if(inBand){ gx+=gShift+Math.sin(f*0.9+prr*1.3)*bwS*0.3; ga=Math.min(1,Math.max(a,0.85)*(0.6+0.4*iihyJHash(pc*7+f,gIdx,IYH_J.ditherSeed+90))) }
-    g.fillStyle=inBand?gColor:accCol   // the magenta stays IN the band; everything else is the accent
+    if(inBand){gx+=gShift+Math.sin(f*0.9+prr*1.3)*bwS*0.3;ga=Math.min(1,Math.max(a,0.85)*(0.6+0.4*iihyJHash(pc*7+f,gIdx,IYH_J.ditherSeed+90)))}
+    g.fillStyle=inBand?gColor:accCol
     g.globalAlpha=ga
-    g.fillRect(gx, offY+prr*bhS+gapY/2, Math.max(0.5,bwS-gapX), Math.max(0.5,bhS-gapY))
+    g.fillRect(gx,offY+prr*bhS+gapY/2,Math.max(0.5,bwS-gapX),Math.max(0.5,bhS-gapY))
   }
   g.globalAlpha=1
 }
-let frame=0
-for(const el of ['feat','floor','gEvery','gLen']){const inp=$(el),out=$(el+'v');inp.oninput=()=>{out.textContent=el==='floor'?(inp.value/100).toFixed(2):inp.value}}
+let frame=0,_iv=null
+for(const el of ['waveAmp','lineFoldThr','foldOffset','gEvery','gLen','floor']){const inp=$(el),out=$(el+'v');inp.oninput=()=>{out.textContent=el==='floor'||el==='lineFoldThr'?(inp.value/100).toFixed(2):inp.value}}
 draw(0)
-window.__setFrame=function(f){frame=f;draw(f);return f}
-setInterval(()=>{frame++;draw(frame)},1000/12)
+window.__setFrame=function(f){if(_iv){clearInterval(_iv);_iv=null}frame=f;draw(f);return f}
+_iv=setInterval(()=>{frame++;draw(frame)},1000/12)
 </script></body></html>

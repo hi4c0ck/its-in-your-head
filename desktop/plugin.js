@@ -2183,10 +2183,20 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     if (!found || cvv < IYH_FACE_COV.thr) continue
     const vc = cvv / 255                                       // brick "confidence" 0..1
     const contrast = iiyhJContrast(vc)                          // acos spline: [0,1], full at accentConf (0.83+)
-    // v18: the DITHER MASK (value-noise field fit to the image) drifts NON-diagonally; each face
-    // brick's opacity = its base brightness (contrast) * the drifting mask value -> the face shimmers
-    // with the drift. No per-brick state: the mask value at the brick's drifting position IS the drift.
-    const dv = iihyJNoise(pc + dOffX, prr + dOffY, IYH_J.ditherSeed, IYH_J.ditherFeat)
+    // v20: the SECONDARY fold mask = the SVG lines shifted LEFT by foldOff pooled bricks (≈ the
+    // avg line width) -> the fold band that keeps the ripple from getting messy near the lines.
+    let cvvL = 0
+    if (pc >= foldOff) {
+      const cc = pc - foldOff
+      for (let yy2 = 0; yy2 < pool; yy2++) for (let xx2 = 0; xx2 < pool; xx2++) {
+        const c0 = cc * pool + xx2, r0 = prr * pool + yy2
+        if (c0 >= cn || r0 >= rn) continue
+        const v2 = cov[r0 * cn + c0]; if (v2 > cvvL) cvvL = v2
+      }
+    }
+    const foldDamp = Math.min(1, Math.max(cvv, cvvL) / lineFoldThr)   // 1 = on a line / in the fold band -> the wave FOLDS
+    const waveOff = (iihyJWave(pc / Math.max(1, pn - 1)) - 0.5) * waveAmp * (1 - foldDamp)  // the per-column wave offset, damped at the lines
+    const dv = iihyJNoise(pc + dOffX, prr + dOffY + waveOff, IYH_J.ditherSeed, IYH_J.ditherFeat)
     const a = contrast * (IYH_J.ditherFloor + (1 - IYH_J.ditherFloor) * dv) * (focusShift ? 1.05 : 1)
     if (a <= 0.02) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
@@ -2202,7 +2212,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   }
   ctx.globalAlpha = 1
 }
-// iiyhJCanvas v19: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + DITHER-MASK DRIFT (v18, THE SIMPLE model): face position FIXED; each face brick's opacity = its base brightness * a DRIFTING value-noise DITHER MASK (fit to the image size via IYH_J.ditherFeat, drifting NON-diagonally via ditherDriftX/Y) -> the face shimmers with the drift, no per-brick state, no thin-line sim, no impulse arrays. + contain-fit + PULSE fills remaining height. Tune IYH_J.ditherFeat/ditherFloor/ditherDriftX/ditherDriftY/ditherSeed + glitchEvery/glitchLen (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
+// iiyhJCanvas v20: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + DITHER-MASK DRIFT (v18, THE SIMPLE model): face position FIXED; each face brick's opacity = its base brightness * a DRIFTING value-noise DITHER MASK (fit to the image size via IYH_J.ditherFeat, drifting NON-diagonally via ditherDriftX/Y) -> the face shimmers with the drift, no per-brick state, no thin-line sim, no impulse arrays. + contain-fit + PULSE fills remaining height. Tune IYH_J.ditherFeat/ditherFloor/ditherDriftX/ditherDriftY/ditherSeed + waveAmp/foldOffset/lineFoldThr (v20 wave-formula fold) + glitchEvery/glitchLen (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
 // Self-driven 12fps canvas renderer. The pane's OWN rAF loop (throttled to
 // IYH_BRICK_FPS) draws the field each frame — not a static image. Started when
 // active, re-fit on resize, stopped on cleanup. Returns the <canvas> ref to attach.
