@@ -110,8 +110,10 @@ assert.ok(strip.length > 0, 'Strip region found')
 // the REST fetch handle into PulseLanes (rest prop) so it can issue
 // targeted /pulse?tool_name=&after_event_id= flushes of a visible
 // tool's unconsumed backlog (which lives in the DB, not renderer memory).
-// Intentional strip edit.
-const STRIP_SHA_S16_MOTION = 'e13b98928d7815d86118228934e87114423c068c63e1e46d248b5c2fdcdf157b'
+// Re-baselined at v0.1.12 (PULSE space pass): the I/O readout column now
+// carries the lane-box chrome (1px border + 3px padding + 2px radius) so it
+// suits the four bordered lane boxes. Intentional strip edit.
+const STRIP_SHA_S16_MOTION = 'c4e9eb09294ceb2a06225bed0bbd5f4cf5512278ba88054c0559346480f084cf'
 assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_S16_MOTION,
   '96px strip source byte-identical to the S16 motion-grammar baseline')
 ok(true, 'strip byte-identity snapshot pinned')

@@ -295,5 +295,15 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   ok3(!lanesSrc.includes('state-lamp'), 'no phantom leading lamp dot (presence is the floor, not a 13th dot)')
   ok3(!lanesSrc.includes('markerColor'), 'no separate marker color (one dot-language, no second hue)')
   console.log('ok ' + (++n) + ' - v0.1.11 presence floor (C) carried by the meter; phantom lamp dropped')
+  // v0.1.12 PULSE space pass: each lane is a bordered box that fills its 1fr
+  // column (fluid on resize), tiny padding, a reserved bubble-spawn strip at
+  // the surface bottom; the I/O readout column suits the same box language.
+  ok3(lanesSrc.includes("border: '1px solid var(--ui-border, var(--border, transparent))'"),
+    'each lane is a bordered box (fills its 1fr column)')
+  ok3(lanesSrc.includes('PULSE_BOARD_PAD'), 'lane boxes carry tiny internal padding (margins)')
+  ok3(src.includes('PULSE_SPAWN_SPACE'), 'a reserved bubble-spawn strip is defined')
+  ok3(src.includes('pulseReserve: PULSE_SPAWN_SPACE + PULSE_BOARD_CHROME'),
+    'the Strip opts the spawn strip + box chrome into the row capacity')
+  console.log('ok ' + (++n) + ' - v0.1.12 space pass: bordered lane boxes + reserved spawn strip + suited I/O column')
 }
 console.log('PASS pulse: ' + n + ' assertions')

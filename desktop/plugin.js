@@ -1919,6 +1919,9 @@ const IYH_J = {
   ditherDriftX: 12,    // dither mask drift, X (bricks/sec; features crawl, the face visibly shimmers)
   ditherDriftY: 8,     // dither mask drift, Y (bricks/sec; DIFFERENT from X -> NON-diagonal)
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
+  waveAmp: 6,          // v20 the WAVE-FORMULA offset-mask amplitude (noise-units): how far the dither field ripples in the wave shape (iihyJWave)
+  foldOffset: 1,      // v20 the SECONDARY fold mask = the SVG lines shifted LEFT by this many pooled bricks (~1 ≈ 10px ≈ the avg line width); the fold band that prevents mess
+  lineFoldThr: 0.5,   // v20 coverage (0..1) at/above which the wave FOLDS (damps) at a brick -> crisp lines, no mess near the SVG lines
   glitchEvery: 90,    // v19 the GLITCH burst cadence: frames between glitch bursts (~7.5s at 12fps)
   glitchLen: 10,       // v19 how long a glitch burst lasts, in frames (~0.83s) -> a brief rip, then snap-back
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
@@ -2037,6 +2040,16 @@ function iihyJNoise(nx, ny, seed, feat) {
   const ab = a + (b - a) * sx, cd = c + (d - c) * sx
   return ab + (cd - ab) * sy
 }
+// v20: the user's wave-formula OFFSET mask (x in 0..1): y = 0.54 + 0.12 sin(πx) - 0.15 cos(πx)
+// + 0.22 sin(2πx) - 0.23 cos(2πx) - 0.09 sin(3πx) - 0.02 cos(3πx). Drives the per-column mask
+// offset -> the dither field ripples in this wave shape across the face (the "impress" drift).
+function iihyJWave(x) {
+  const PI = Math.PI
+  return 0.54
+    + 0.12 * Math.sin(PI * x) - 0.15 * Math.cos(PI * x)
+    + 0.22 * Math.sin(2 * PI * x) - 0.23 * Math.cos(2 * PI * x)
+    - 0.09 * Math.sin(3 * PI * x) - 0.02 * Math.cos(3 * PI * x)
+}
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1
   if (c <= 0) return 0
@@ -2151,6 +2164,13 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     gColor = '#ff2d95'   // the RGB-split glitch color: a strong MAGENTA (unmistakable against the base cyan)
   }
   const accentColor = iiyhJResolveAccent()                     // pane accent (cached); alpha via globalAlpha; the glitch band overrides it
+  // v20: the WAVE-FORMULA offset mask (iihyJWave) + the LINE-FOLD damping. The wave ripples the
+  // dither field per-column; it FOLDS (damps) where a brick sits ON the SVG lines (cvv) or in the
+  // SECONDARY fold band (the lines shifted LEFT by foldOff -> cvvL) -> the ripple is full in open
+  // areas, calm at the lines (no mess).
+  const waveAmp = IYH_J.waveAmp || 6
+  const foldOff = IYH_J.foldOffset || 1
+  const lineFoldThr = (IYH_J.lineFoldThr || 0.5) * 255
   for (let prr = 0; prr < pm; prr++) for (let pc = 0; pc < pn; pc++) {
     let cvv = 0, found = false
     for (let yy = 0; yy < pool; yy++) for (let xx = 0; xx < pool; xx++) {
@@ -3031,7 +3051,13 @@ function capacityForComposition(box, composition, opts) {
   // halving apply to it; only the legacy outer-Strip path keeps the
   // 48px reserve + sidebar half.
   var chrome = o.measured ? 0 : 48;
-  var avail = h - chrome;
+  // v0.1.12 space pass: the PULSE module's caller opts its reserved bottom
+  // strip (bubble-spawn) + lane-box top chrome in via `pulseReserve`; the
+  // generic composition path (and any caller that omits it) reserves 0,
+  // keeping the legacy row budget. Kept generic: this function is shared by
+  // PORTRAIT + PULSE and is unit-evaluated without PULSE constants.
+  var reserve = o.measured ? (Number(o.pulseReserve) > 0 ? Number(o.pulseReserve) : 0) : 0;
+  var avail = h - chrome - reserve;
   if (!Number.isFinite(avail) || avail <= 0) avail = o.measured ? 24 : 48;
   if (composition === 'sidebar' && !o.measured) {
     // Sidebar splits PORTRAIT/PULSE ~50/50: PULSE gets roughly half.
@@ -3478,14 +3504,23 @@ var PULSE_DOT_GRID_W = 19; // 4 dot columns x 4px + 3 gaps x 1px
 var PULSE_ROW_PITCH = 16; // 14px row (dot-grid driven) + 2px gap
 var PULSE_ROW_CENTER_OFF = 7; // half the 14px row
 var PULSE_LANDING_BEFORE_DOT = false;
+// v0.1.12 PULSE space pass: each lane is a bordered box; a strip at the
+// surface bottom is reserved for the bubble sprite to spawn into.
+var PULSE_BOARD_BORDER = 1; // 1px box border (defines each lane box)
+var PULSE_BOARD_PAD = 3;    // internal box padding (tiny margins)
+var PULSE_BOARD_CHROME = PULSE_BOARD_BORDER + PULSE_BOARD_PAD; // 4px inner inset
+var PULSE_BOARD_GAP = 6;    // margin BETWEEN boxes (normal); 3 when narrow
+var PULSE_SPAWN_SPACE = 12; // reserved bottom strip the sprite flies up through
 // Destination lane's dot-column x, surface-relative (the first-dot
 // column of the row's right-pinned 19px dot grid).
 function pulseDotColumnX(box, laneIdx, narrow) {
   var w = box && Number.isFinite(Number(box.width)) ? Number(box.width) : 0;
-  var colGap = narrow ? 2 : 3; // the lane grid's column gap (PulseLanes)
+  var colGap = narrow ? 3 : PULSE_BOARD_GAP; // the lane box's column gap
   var laneW = (w - 3 * colGap) / PULSE_LANE_ORDER.length;
   var laneLeft = laneIdx * (laneW + colGap);
-  var dotLeft = laneLeft + laneW - PULSE_DOT_GRID_W;
+  // Each box is border-box: the dot grid right-pins to the inner right
+  // edge, inset by PULSE_BOARD_CHROME (border + padding).
+  var dotLeft = laneLeft + laneW - PULSE_BOARD_CHROME - PULSE_DOT_GRID_W;
   return dotLeft - (PULSE_LANDING_BEFORE_DOT ? 6 : 0);
 }
 // Surface-relative path: spawn at the surface's bottom edge (under the
@@ -3499,7 +3534,8 @@ function pulseBubblePath(box, metric, slotIndex, capacity, narrow) {
   if (laneIdx < 0) laneIdx = 0;
   var slot = Math.max(0, Number(slotIndex) || 0);
   var dotLeft = pulseDotColumnX(box, laneIdx, narrow);
-  var rowCenter = PULSE_ROW_PITCH * slot + PULSE_ROW_CENTER_OFF;
+  // Rows start below the lane box's top chrome (border + padding).
+  var rowCenter = PULSE_BOARD_CHROME + PULSE_ROW_PITCH * slot + PULSE_ROW_CENTER_OFF;
   return {
     spawn: { x: dotLeft, y: h },
     target: { x: dotLeft, y: rowCenter },
@@ -4140,8 +4176,9 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
     style: {
       display: 'grid',
       gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-      gap: narrow ? '1px 2px' : '2px 3px',
+      gap: narrow ? '3px' : PULSE_BOARD_GAP + 'px',
       flex: 1, minWidth: 0, minHeight: 0, position: 'relative',
+      boxSizing: 'border-box',
     },
     children: [order.map(function (lane) {
       var entries = lanes && Array.isArray(lanes[lane]) ? lanes[lane].slice(0, cap) : [];
@@ -4149,8 +4186,14 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
         key: lane,
         'data-lane': lane,
         style: {
-          display: 'flex', flexDirection: 'column', gap: 2,
-          minWidth: 0, minHeight: 0, overflow: 'hidden',
+          display: 'flex', flexDirection: 'column', justifyContent: 'flex-start', gap: 2,
+          minWidth: 0, minHeight: 0, overflow: 'hidden', boxSizing: 'border-box',
+          // v0.1.12 space pass: each lane is a bordered box that fills its
+          // 1fr column (fluid on resize); rows top-pack so the bottom
+          // PULSE_SPAWN_SPACE strip stays clear for the bubble sprite.
+          border: '1px solid var(--ui-border, var(--border, transparent))',
+          borderRadius: 2,
+          padding: PULSE_BOARD_PAD,
         },
         children: [
           jsxs('div', {
@@ -5477,7 +5520,12 @@ function Strip({ source, rest, portraitPreferences }) {
   // v0.1.10 (review fix 7): measured PULSE module drives capacity
   // (chrome-free); the legacy outer-box path stays for first paint.
   const capacity = pulseMeasured
-    ? capacityForComposition(pulseBox, composition, { measured: true })
+    ? capacityForComposition(pulseBox, composition, {
+        measured: true,
+        // v0.1.12 space pass: reserve the PULSE module's bubble-spawn strip
+        // + lane-box top chrome so the last row stops above the sprite space.
+        pulseReserve: PULSE_SPAWN_SPACE + PULSE_BOARD_CHROME,
+      })
     : capacityForComposition(box, composition)
   const activateFocus = (id) => setTab((cur) => nextFocusFor(cur, id))
 
@@ -5685,7 +5733,15 @@ function Strip({ source, rest, portraitPreferences }) {
       ...(!narrow
         ? [jsxs('div', {
             className: 'flex flex-col justify-end overflow-hidden',
-            style: { width: IO_WIDTH, gap: 2, flexShrink: 0 },
+            style: {
+              width: IO_WIDTH, gap: 2, flexShrink: 0, boxSizing: 'border-box',
+              // v0.1.12 space pass: the I/O readout suits the lane boxes —
+              // same 1px border + 3px padding + 2px radius, so it reads as
+              // a matching 5th board beside the four lanes.
+              border: '1px solid var(--ui-border, var(--border, transparent))',
+              borderRadius: 2,
+              padding: PULSE_BOARD_PAD,
+            },
             children: [
               recent.length > 0
                 ? recent.map((ev, i) => jsx(IoLine, { key: i, ev }))

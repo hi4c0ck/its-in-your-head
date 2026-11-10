@@ -180,7 +180,7 @@ eq(pulseSlotId('goal', 0), 'goal|0', 'visual slot identity metric|slotIndex')
   eq(q.spawn.y, 800, 'tall sidebar surface: spawn scales with measured height (no hardcode)')
   ok(q.target.x !== p.target.x, 'coordinates derive from the measured box, not constants')
   ok(typeof p.dotLeft === 'number' && p.target.x === p.dotLeft, 'path exposes the dot-column x (flight + stamp derive from it)')
-  eq(p.rowCenter, 23, 'top-packed row center: 16px pitch x slot 1 + 7 (row geometry, not cell center)')
+  eq(p.rowCenter, 27, 'board-chrome top-packed row center: 4 + 16px pitch x slot 1 + 7 = 27 (row geometry, not cell center)')
 }
 
 // v0.1.10 (review fix 4): a NEW tool enters the visible top three while
@@ -373,17 +373,17 @@ eq(pulseSlotId('goal', 0), 'goal|0', 'visual slot identity metric|slotIndex')
   // first-dot column), not the abstract cell centerline (animation
   // pass v2: top-packed 16px rows, right-pinned 19px dot grid).
   const f = pulseBubbleFlight({ width: 400, height: 96 }, 'live', 0, 4, true)
-  eq(f.left, 80, 'sprite aligned on the tool first-dot column (narrow: laneW 98.5; 98.5-19=79.5 -> 80, whole pixel)')
+  eq(f.left, 75, 'sprite aligned on the tool first-dot column (narrow: laneW 97.75; 97.75 - 4 chrome - 19 = 74.75 -> 75, whole pixel)')
   eq(f.top, 84, 'spawn bottom-flush on the surface edge (96 - 12px sprite height)')
-  eq(f.dy, -83, 'landing on the tool top-packed row (rowCenter 7; 7 - 6 - 84)')
-  eq(f.animationName, 'iyh-bubble-travel-83-21', 'animation name pairs with the generated keyframe')
+  eq(f.dy, -79, 'landing on the tool top-packed row (rowCenter 11 = 4 chrome + 7; 11 - 6 - 84 = -79)')
+  eq(f.animationName, 'iyh-bubble-travel-79-20', 'animation name pairs with the generated keyframe')
   ok(f.keyframes === pulseTravelKeyframes(f.dy), 'element keyframes and animation name derive from the same flight (no drift)')
   const f2 = pulseBubbleFlight({ width: 400, height: 96 }, 'friction', 2, 4, true)
-  eq(f2.left, 381, 'fourth lane dot column (301.5+98.5-19=381, whole pixel)')
+  eq(f2.left, 377, 'fourth lane dot column (302.25 + 97.75 - 4 chrome - 19 = 377, whole pixel)')
   eq(f2.top, 84, 'every flight spawns bottom-flush regardless of destination')
-  eq(f2.dy, -51, 'deeper slot -> shorter climb (rowCenter 39; 39 - 6 - 84)')
+  eq(f2.dy, -47, 'deeper slot -> shorter climb (rowCenter 43 = 4+32+7; 43 - 6 - 84 = -47)')
   const fW = pulseBubbleFlight({ width: 400, height: 96 }, 'live', 0, 4, false)
-  eq(fW.left, 79, 'wide composition (colGap 3): dot column 78.75 -> 79')
+  eq(fW.left, 73, 'wide composition (colGap 6 = PULSE_BOARD_GAP): laneW 95.5; 95.5 - 4 chrome - 19 = 72.5 -> 73')
   eq(fW.animationName, f.animationName, 'step count is width-independent (driven by |dy| only)')
 }
 
