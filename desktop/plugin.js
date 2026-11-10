@@ -2991,9 +2991,21 @@ function createPulseBubbleCoordinator(opts) {
   var state = { seq: 0, committed: null, latest: null, active: [], queued: [],
                 flashSlotId: null, flashes: {}, flashOwner: {}, hydrated: false };
   function promote() {
+    var promoted = [];
+    var j = 0;
     while (state.active.length < cap && state.queued.length > 0) {
-      state.active.push(state.queued.shift());
+      var p = state.queued.shift();
+      // A promoted ball starts traveling NOW: its delay is stable for
+      // its lifetime (0, S, 2S... among the ones promoted at once),
+      // assigned once here — never re-derived from the render index
+      // (that would rewrite in-flight animation strings and restart
+      // them, so siblings rewound to spawn on every arrival).
+      p.staggerMs = BUBBLE_STAGGER_MS * j;
+      j += 1;
+      state.active.push(p);
+      promoted.push(p);
     }
+    return promoted;
   }
   return {
     ingest: function (lanes, capacity, ingestOpts) {
@@ -3009,10 +3021,19 @@ function createPulseBubbleCoordinator(opts) {
         state.flashes = {}; state.flashOwner = {}; state.flashSlotId = null;
         return { transitions: found, active: state.active, queued: state.queued, immediate: true, committed: state.committed };
       }
+      var newActiveIdx = 0;
       found.forEach(function (t) {
         state.active = state.active.filter(function (a) { return a.semanticId !== t.semanticId; });
         state.queued = state.queued.filter(function (a) { return a.semanticId !== t.semanticId; });
-        if (state.active.length < cap) state.active.push(t); else state.queued.push(t);
+        if (state.active.length < cap) {
+          // A new flight starts NOW with a stable, once-assigned
+          // delay — independent of later active-list shifts.
+          t.staggerMs = BUBBLE_STAGGER_MS * newActiveIdx;
+          newActiveIdx += 1;
+          state.active.push(t);
+        } else {
+          state.queued.push(t);
+        }
       });
       // Exits: an occupied slot that is now empty and whose occupant is
       // not handled by a transition or still in flight left the visible
@@ -3043,8 +3064,9 @@ function createPulseBubbleCoordinator(opts) {
       state.flashes[t.slotId] = true;
       state.flashOwner[t.slotId] = t.sequence;
       state.flashSlotId = t.slotId;
-      promote();
-      return { arrived: true, transition: t, committed: state.committed, flashSlotId: state.flashSlotId };
+      var promoted = promote();
+      return { arrived: true, transition: t, committed: state.committed,
+               flashSlotId: state.flashSlotId, promoted: promoted };
     },
     clearFlash: function (slotId, owner) {
       if (slotId == null) {
@@ -3162,6 +3184,37 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available }) {
     setTick5(function (v) { return v + 1; });
   }, [cap]);
 
+  // Travel timer + CSS delay share ONE value: the coordinator assigns
+  // each transition its staggerMs ONCE at flight start (ingest push or
+  // queue promotion) — never the render index. A sibling's arrival
+  // re-renders the active list; a re-derived delay would rewrite the
+  // in-flight animation string and restart it (ball rewinds to spawn,
+  // timer unmounts it mid-second-flight: the "balls never reach" bug).
+  var scheduleArrival = function (t) {
+    if (timersRef.current[t.sequence]) return;
+    var wait = BUBBLE_TRAVEL_MS + (t.staggerMs != null ? t.staggerMs : 0);
+    timersRef.current[t.sequence] = setTimeout(function () {
+      delete timersRef.current[t.sequence];
+      var arr = coord.arrive(t.sequence);
+      setTick5(function (v) { return v + 1; });
+      if (!arr.arrived) return;
+      // A ball promoted from the queue just started its travel: it
+      // owns no timer yet (this effect only re-runs on content
+      // change), so schedule it now — otherwise it would fly, stick
+      // at the fill-mode end, and its lane would never commit.
+      (arr.promoted || []).forEach(scheduleArrival);
+      if (!flashTimersRef.current[t.sequence]) {
+        flashTimersRef.current[t.sequence] = setTimeout(function () {
+          delete flashTimersRef.current[t.sequence];
+          // Ownership guard inside the coordinator: a stale timer can
+          // never clear a newer arrival's flash on the same slot.
+          coord.clearFlash(t.slotId, t.sequence);
+          setTick5(function (v) { return v + 1; });
+        }, BUBBLE_ARRIVAL_MS);
+      }
+    }, wait);
+  };
+
   // Snapshot ingest + arrival scheduling, effect-only: re-runs when
   // the visible lane content or capacity changes, never per render.
   useEffect(function () {
@@ -3171,24 +3224,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available }) {
       return;
     }
     var active = (res.active || []).slice();
-    active.forEach(function (t, idx) {
-      if (timersRef.current[t.sequence]) return;
-      var wait = BUBBLE_TRAVEL_MS + BUBBLE_STAGGER_MS * idx;
-      timersRef.current[t.sequence] = setTimeout(function () {
-        delete timersRef.current[t.sequence];
-        var arr = coord.arrive(t.sequence);
-        setTick5(function (v) { return v + 1; });
-        if (arr.arrived && !flashTimersRef.current[t.sequence]) {
-          flashTimersRef.current[t.sequence] = setTimeout(function () {
-            delete flashTimersRef.current[t.sequence];
-            // Ownership guard inside the coordinator: a stale timer can
-            // never clear a newer arrival's flash on the same slot.
-            coord.clearFlash(t.slotId, t.sequence);
-            setTick5(function (v) { return v + 1; });
-          }, BUBBLE_ARRIVAL_MS);
-        }
-      }, wait);
-    });
+    active.forEach(scheduleArrival);
   }, [laneKey, cap]);
 
   // Unmount: cancel every pending travel/flash timer.
@@ -3313,7 +3349,11 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available }) {
           left: Math.max(0, path.spawn.x) + 'px',
           top: Math.max(0, path.spawn.y - 8) + 'px',
           '--dx': dx + 'px', '--dy': dy + 'px',
-          animation: 'iyh-bubble-travel ' + BUBBLE_TRAVEL_MS + 'ms linear ' + (BUBBLE_STAGGER_MS * idx) + 'ms 1 both',
+          // Stable per-transition delay (coordinator-assigned): re-
+          // renders of the active list can never rewrite this string,
+          // so an in-flight animation is never restarted.
+          animation: 'iyh-bubble-travel ' + BUBBLE_TRAVEL_MS + 'ms linear '
+            + (t.staggerMs != null ? t.staggerMs : 0) + 'ms 1 both',
         },
       });
     }).concat(Object.keys(flashes).map(function (slotId) {

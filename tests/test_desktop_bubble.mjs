@@ -292,6 +292,31 @@ eq(pulseSlotId('goal', 0), 'goal|0', 'visual slot identity metric|slotIndex')
      'sub-hysteresis noise shares the key (no effect churn)')
 }
 
+// v0.1.10+4 (live bug "balls never reach"): the travel delay is the
+// coordinator-assigned, per-transition STABLE staggerMs — never the
+// render index. Sibling arrivals re-render the active list; a
+// re-derived delay would rewrite the in-flight animation string and
+// restart it (ball rewinds to spawn; the timer unmounts it mid-flight).
+{
+  const c = createPulseBubbleCoordinator()
+  const mk = (k) => Array.from({ length: k }, (_, i) => entry(200 + i, 'tool' + i, i + 1, 0.5, 'weak'))
+  c.ingest(lanesOf(mk(6)), 6)
+  c.ingest(lanesOf(mk(6).map((e, i) => ({ ...e, value: 0.9, level: 'strong' }))), 6)
+  const act = c.getState().active.slice()
+  eq(act.map(t => t.staggerMs), act.map((_, i) => BUBBLE_STAGGER_MS * i),
+    'new flights carry a stable staggerMs (0, S, 2S, ...)')
+  eq(c.getState().queued.length, 6 - MAX_CONCURRENT_BUBBLES, 'overflow stays queued')
+  const s0 = c.getState().active[0].sequence
+  const rest = c.getState().active.slice(1).map(t => t.staggerMs)
+  const arr = c.arrive(s0)
+  eq(c.getState().active.map(t => t.staggerMs), rest.concat(arr.promoted.map(t => t.staggerMs)),
+    'sibling arrival rewrites NO in-flight staggerMs (promoted ball joins at delay 0)')
+  ok(Array.isArray(arr.promoted), 'arrive reports the promoted transitions')
+  eq(arr.promoted.length, 1, 'one queued ball promoted')
+  eq(arr.promoted[0].staggerMs, 0, 'promoted ball travels from now (delay 0, stable)')
+  ok(typeof arr.promoted[0].sequence === 'number', 'promoted ball carries its sequence (timer target)')
+}
+
 // v0.1.10 (review P0: React unmount while timers are active): surface
 // loss cancels every pending transition and commits the latest
 // snapshot immediately. A stale travel timer that fires AFTER
@@ -328,6 +353,10 @@ eq(pulseSlotId('goal', 0), 'goal|0', 'visual slot identity metric|slotIndex')
     'unmount effect cancels every travel/flash timer (timers live in refs)')
   ok(lanesSrc.includes("'--dx': dx + 'px'") && lanesSrc.includes("'--dy': dy + 'px'"),
     'the travel transform is px (--dx/--dy from the measured pulseBubblePath, no px/% mix)')
+  ok(lanesSrc.includes('t.staggerMs != null ? t.staggerMs : 0'),
+    'animation delay + travel timer share the stable staggerMs (no render-index rewrite, no animation restart)')
+  ok(lanesSrc.includes('(arr.promoted || []).forEach(scheduleArrival)'),
+    'promoted (queue->active) balls get their own travel timers (no frozen fill-mode ball)')
   ok(!/fetch\(|XMLHttpRequest/.test(block), 'transition layer is pure UI (no I/O)')
   // Imports invariant: only SDK + react.
   const imports = src.match(/^import .*$/gm) || []
