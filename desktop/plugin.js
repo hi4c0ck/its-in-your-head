@@ -1910,9 +1910,11 @@ const IYH_J = {
   shiftHoldMs: 1300,   // normal phase (main lines in focus) before the focus shift
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
-  crawlRate: 1.0,     // v15 tint-vocabulary crawl speed (tint shifts per second, slow) — the dither is the source of the tints
-    tintVocab: 5,       // number of discrete tint levels in the crawling vocabulary
-  ditherDepth: 0.7,    // v15 the crawl depth: how hard the tint-vocabulary levels modulate each brick's opacity (0=steady, 1=full)
+  maskRateH: 2.0,     // v16 the dither MASK drift: H light-bands sweep DOWN at this many bricks/sec (the bricks' LIGHTING comes from the mask)
+  maskRateV: 1.5,     // V light-bands sweep RIGHT at this many bricks/sec (a different rate -> NON-diagonal)
+  maskPeriod: 10,     // light-band spacing in bricks (a bright H/V band every 10 bricks)
+  maskWidth: 3,       // light-band half-width in bricks (the sweep's "hit" band is ~2*maskWidth bricks wide)
+  maskDim: 0.12,      // dim factor BETWEEN bands: a brick sits at maskDim*its-base where no band crosses -> the sweep reads clearly
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
   lift: 0.06,             // brightness lift -> effFloor = floor + lift
   tint: 0.10,             // gamma: pow(v.c, 1 + 1.5*tint)
@@ -2012,17 +2014,20 @@ function iiyhBrickDriftX(frame, vw) {
 // Arccosine contrast spline: input "confidence" c in [0,1] (the brick's pooled
 // coverage) -> contrast in [0,1], smooth ease-out that reaches FULL (1.0) at
 // c >= IYH_J.accentConf (0.83+). Higher-confidence bricks read brighter.
-// v15: the DITHER is the source of the TINT VOCABULARY — a small set of discrete opacity levels
-// that CRAWLS slowly + non-diagonally (a hash step, not a diagonal scroll). Each brick keeps its
-// SHAPE (from the coverage); only its tint (an opacity level from the vocabulary) re-assigns, step
-// by step. step is in "seconds" (frame/12); vocab = the number of discrete tint levels.
-function iiyhJCrawlTint(pc, prr, step, vocab) {
-  let h = (pc * 2654435761) ^ (prr * 40503) ^ ((step | 0) * 2246822519)
-  h = Math.abs(h) >>> 0
-  h = ((h ^ (h >>> 13)) * 0x5bd1e996) >>> 0
-  const t = (h % 100000) / 100000
-  const v = vocab > 1 ? vocab : 2
-  return 1 - Math.floor(t * v) / (v - 1)   // snap to a discrete tint level (the vocabulary)
+// v16: the DITHER MASK — the bricks' LIGHTING comes from a grid of light bands (H + V) that DRIFTS.
+// H-bands sweep down at IYH_J.maskRateH, V-bands sweep right at IYH_J.maskRateV (different rates ->
+// NON-diagonal). iiyhJMaskHit(pc, prr, frame) = 1 where a band crosses this brick right now, 0
+// between bands. As the bands drift, the "hit" regions crawl across the face -> a REAL, visible drift
+// (the face shape stays fixed; only the mask's light sweeps). frame is in 12fps ticks.
+function iiyhJMaskHit(pc, prr, frame, spec) {
+  const P = spec.maskPeriod || 8, W = spec.maskWidth || 2
+  const dh0 = (frame / 12) * (spec.maskRateH || 0)   // H bands sweep down (prr axis): how far, in bricks
+  const dv0 = (frame / 12) * (spec.maskRateV || 0)   // V bands sweep right (pc axis)
+  const dh = ((prr - dh0) % P + P) % P; const hd = Math.min(dh, P - dh)
+  const hHit = hd <= W ? 1 - hd / (W + 0.5) : 0       // 1 at a H band, fades over W bricks
+  const dv = ((pc - dv0) % P + P) % P; const vd = Math.min(dv, P - dv)
+  const vHit = vd <= W ? 1 - vd / (W + 0.5) : 0       // 1 at a V band
+  return Math.max(hHit, vHit)                          // on a band -> a "hit" (the brick lights)
 }
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1
@@ -2119,8 +2124,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const offX = (W - 720 * scale) / 2, offY = (H - 760 * scale) / 2
   const bwS = bw * scale, bhS = bh * scale
   const gapX = bwS * p, gapY = bhS * p                         // grout gap (px), proportional to brick
-  const drift = 0                                             // v15: face position FIXED (no whole-picture sway); the drift is the crawling TINT vocabulary
-  const crawlStep = Math.floor((frame / 12) * (IYH_J.crawlRate || 0))   // frame is 12fps ticks -> step = seconds * crawlRate (slow, non-diagonal)
+  const drift = 0                                             // v16: face position FIXED (no whole-picture sway); the DRIFT = the dither mask's light bands sweeping the face
   ctx.fillStyle = iiyhJResolveAccent()                           // pane accent; alpha via globalAlpha
   for (let prr = 0; prr < pm; prr++) for (let pc = 0; pc < pn; pc++) {
     let cvv = 0, i0 = -1, found = false
@@ -2138,11 +2142,11 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     const isMain = vc >= 0.5                                    // the darker strokes -> FULL intensity (pop vs the body)
     const floor = focusShift ? IYH_J.focusFloor : IYH_J.canvasFloor   // focus shift: lift the faint parts into focus (NO inversion / no folding)
     const level = isMain ? IYH_J.soft : Math.max(floor, contrast * iiyhJShim(i0, seed))   // steady base opacity
-    // v15: the DITHER is the source of the TINT VOCABULARY — each brick keeps its SHAPE; a small set of
-    // discrete opacity levels CRAWLS slowly + non-diagonally (a hash step), re-assigning this brick's tint
-    const depthF = IYH_J.ditherDepth || 0
-    const t = iiyhJCrawlTint(pc, prr, crawlStep, IYH_J.tintVocab || 5)
-    let a = level * (1 - depthF + depthF * t)                  // face fixed; only the tints crawl (opacity)
+    // v16: the DITHER MASK drives this brick's opacity — a grid of light bands DRIFTS across the face;
+    // where a band crosses this brick it lights up (a "hit"), between bands it dims to IYH_J.maskDim.
+    // As the bands drift, the "hit" regions crawl -> a REAL, visible drift (the face shape stays fixed).
+    const mh = iiyhJMaskHit(pc, prr, frame, IYH_J)
+    let a = level * ((IYH_J.maskDim || 0) + (1 - (IYH_J.maskDim || 0)) * mh)
     if (a <= 0.01) continue
     ctx.globalAlpha = a
     ctx.fillRect(offX + pc * bwS + drift + gapX / 2, offY + prr * bhS + gapY / 2,
@@ -2150,7 +2154,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   }
   ctx.globalAlpha = 1
 }
-// iiyhJCanvas v15: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + CRAWLING TINT-VOCABULARY DRIFT: face position is FIXED (no whole-picture sway); the DITHER is the source of a small TINT VOCABULARY — discrete opacity levels that crawl slowly + non-diagonally (a hash step) re-assigning each brick's tint (IYH_J.crawlRate steps/second + IYH_J.ditherDepth crawl depth + IYH_J.tintVocab vocabulary size) -> the picture holds, only the tints shimmer + contain-fit + PULSE fills remaining height. Tune IYH_J.crawlRate/ditherDepth/tintVocab (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
+// iiyhJCanvas v16: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + DITHER-MASK DRIFT (v16, the CORRECT model): face position is FIXED; the bricks' LIGHTING comes from a DRIFTING dither mask — a grid of H+V light bands that sweep the face (IYH_J.maskRateH down + IYH_J.maskRateV right, different rates -> non-diagonal; IYH_J.maskPeriod band spacing + IYH_J.maskWidth band half-width + IYH_J.maskDim dim-between-bands). Where a band crosses a brick it lights up; as the bands drift the 'hit' regions crawl -> a real, visible drift, not static shading + contain-fit + PULSE fills remaining height. Tune IYH_J.maskRateH/maskRateV/maskPeriod/maskWidth/maskDim (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
 // Self-driven 12fps canvas renderer. The pane's OWN rAF loop (throttled to
 // IYH_BRICK_FPS) draws the field each frame — not a static image. Started when
 // active, re-fit on resize, stopped on cleanup. Returns the <canvas> ref to attach.
