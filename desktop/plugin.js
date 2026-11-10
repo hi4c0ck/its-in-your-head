@@ -1910,7 +1910,8 @@ const IYH_J = {
   shiftHoldMs: 1300,   // normal phase (main lines in focus) before the focus shift
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
-  ditherDrift: 1.0,    // offsetting dither mask: the IYH_J_TONE grain tiles scroll this many cells/frame -> the visible drift
+  ditherDrift: 1.0,    // offsetting dither mask: the IYH_J_TONE tiles scroll this many cells/frame (the OPACITY drift)
+  ditherDepth: 0.7,    // how hard the scrolling opacity mask modulates each brick's alpha (0=steady, 1=full)
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
   lift: 0.06,             // brightness lift -> effFloor = floor + lift
   tint: 0.10,             // gamma: pow(v.c, 1 + 1.5*tint)
@@ -2105,7 +2106,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const offX = (W - 720 * scale) / 2, offY = (H - 760 * scale) / 2
   const bwS = bw * scale, bhS = bh * scale
   const gapX = bwS * p, gapY = bhS * p                         // grout gap (px), proportional to brick
-  const drift = iiyhBrickDriftX(frame, 720) * scale            // field sway (px)
+  const drift = 0                                             // face position FIXED (no whole-picture sway); the drift is the scrolling opacity mask below
   const dOff = (frame * (IYH_J.ditherDrift || 0)) | 0          // offsetting dither mask: scroll the grain tiles -> drift
   ctx.fillStyle = iiyhJResolveAccent()                           // pane accent; alpha via globalAlpha
   for (let prr = 0; prr < pm; prr++) for (let pc = 0; pc < pn; pc++) {
@@ -2120,12 +2121,13 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     }
     if (!found || cvv < IYH_FACE_COV.thr) continue
     const vc = cvv / 255                                       // brick "confidence" 0..1
-    const gn = IYH_J_TONE[(pc + dOff) % IYH_J_SPEC.bw][(prr + dOff) % IYH_J_SPEC.bh]   // offsetting dither tile (drifts as dOff advances)
+    const gn = IYH_J_TONE[(pc + dOff) % IYH_J_SPEC.bw][(prr + dOff) % IYH_J_SPEC.bh]   // the drifting OPACITY-mask tile
     const contrast = iiyhJContrast(vc)                          // acos spline: [0,1], full at accentConf (0.83+)
-    const grain = 0.5 + 0.8 * gn                               // wider dither range so the offsetting drift is visible
     const isMain = vc >= 0.5                                    // the darker strokes -> FULL intensity (pop vs the body)
-    const floor = focusShift ? IYH_J.focusFloor : IYH_J.canvasFloor   // focus shift: lift the faint parts into focus (NO polarity inversion / no folding)
-    let a = isMain ? IYH_J.soft : Math.max(floor, contrast * grain * iiyhJShim(i0, seed))
+    const floor = focusShift ? IYH_J.focusFloor : IYH_J.canvasFloor   // focus shift: lift the faint parts into focus (NO inversion / no folding)
+    const level = isMain ? IYH_J.soft : Math.max(floor, contrast * iiyhJShim(i0, seed))   // steady base opacity
+    const mask = 1 - (IYH_J.ditherDepth || 0) * (1 - gn)        // the scrolling OPACITY mask -> the texture drifts, the picture holds
+    let a = level * mask                                        // position fixed; only the opacity drifts
     if (a <= 0.01) continue
     ctx.globalAlpha = a
     ctx.fillRect(offX + pc * bwS + drift + gapX / 2, offY + prr * bhS + gapY / 2,
@@ -2133,7 +2135,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   }
   ctx.globalAlpha = 1
 }
-// iiyhJCanvas v13: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode (no atob) + baked fallback + grout + arccos contrast + accent (read off the canvas; the pane sets --ui-accent on its mounted container, not body) + template-following DARKNESS raster (rasterGain 2.0 / canvasFloor .35 / isMain gate, bright) + FOCUS-SHIFT flicker (normal shiftHoldMs -> focus-shift shiftMs -> revert: the FAINT parts lift to focusFloor while main lines STAY full — NO polarity inversion / no folding) + OFFSETTING DITHER-DRIFT (IYH_J.ditherDrift scrolls the IYH_J_TONE tiles -> visible drift) + contain-fit (aspectRatio, no stretch) + PULSE fills remaining height. The 850ms model poll stays untouched.
+// iiyhJCanvas v14: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + OPACITY-MASK DRIFT: face position is FIXED (no whole-picture sway); the drift = the scrolling IYH_J_TONE opacity mask modulating each brick's alpha (IYH_J.ditherDrift scroll rate + IYH_J.ditherDepth modulation depth) -> the texture drifts, the picture holds + contain-fit + PULSE fills remaining height. Tune IYH_J.ditherDrift/ditherDepth (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
 // Self-driven 12fps canvas renderer. The pane's OWN rAF loop (throttled to
 // IYH_BRICK_FPS) draws the field each frame — not a static image. Started when
 // active, re-fit on resize, stopped on cleanup. Returns the <canvas> ref to attach.
