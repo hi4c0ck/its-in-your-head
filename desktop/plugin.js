@@ -1,4 +1,8 @@
-// It's in Your Head — desktop half: a 96px signal strip under the conversation.
+// v18: the DITHER MASK — a value-noise field fit to the image size (~IYH_J.ditherFeat features
+// across the face, NOT a scaled-up tiny grain), drifting NON-diagonally (x + y at different slow
+// rates: IYH_J.ditherDriftX / ditherDriftY). Each face brick's opacity = its base brightness
+// (iiyhJContrast) * (ditherFloor + (1 - ditherFloor) * the drifting mask value) -> the face
+// shimmers with the drift. No per-brick state, no thin-line sim./ It's in Your Head — desktop half: a 96px signal strip under the conversation.
 //
 // Contract (Desktop Plugin SDK):
 // - imports: ONLY @hermes/plugin-sdk + react / react/jsx-runtime; jsx() calls,
@@ -1910,12 +1914,11 @@ const IYH_J = {
   shiftHoldMs: 1300,   // normal phase (main lines in focus) before the focus shift
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
-  maskRateH: 2.0,     // v17 the dither mask drift: H thin-lines sweep DOWN at this many bricks/sec (the bricks' LIGHTING comes from the mask)
-  maskRateV: 1.5,     // V thin-lines sweep RIGHT at this many bricks/sec (a different rate -> NON-diagonal)
-  maskPeriod: 8,      // thin-line spacing in bricks (a thin line every 8 bricks, not a broad band)
-  maskWidth: 1,      // thin-line half-width in bricks (a THIN ~2-brick line)
-  impulseGain: 1.2,   // the IMPULSE strength when a brick CATCHES a face line + a thin mask line (the flash)
-  impulseDecay: 0.34, // the decay: how long a caught brick stays lit (0.34 ~ a brief ~0.4s pulse; the flash crawls then fades)
+  ditherFeat: 8,       // v18 dither mask feature size, in BRICKS (~8 => ~27 features across the face; fit/cropped to the image size, not a scaled-up grain) -> the bricks visibly shimmer as it drifts
+  ditherFloor: 0.4,    // a face brick's opacity where the dither mask is 0 (the floor, so the face holds its shape)
+  ditherDriftX: 12,    // dither mask drift, X (bricks/sec; features crawl, the face visibly shimmers)
+  ditherDriftY: 8,     // dither mask drift, Y (bricks/sec; DIFFERENT from X -> NON-diagonal)
+  ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
   lift: 0.06,             // brightness lift -> effFloor = floor + lift
   tint: 0.10,             // gamma: pow(v.c, 1 + 1.5*tint)
@@ -2015,24 +2018,22 @@ function iiyhBrickDriftX(frame, vw) {
 // Arccosine contrast spline: input "confidence" c in [0,1] (the brick's pooled
 // coverage) -> contrast in [0,1], smooth ease-out that reaches FULL (1.0) at
 // c >= IYH_J.accentConf (0.83+). Higher-confidence bricks read brighter.
-// v16: the DITHER MASK — the bricks' LIGHTING comes from a grid of light bands (H + V) that DRIFTS.
-// H-bands sweep down at IYH_J.maskRateH, V-bands sweep right at IYH_J.maskRateV (different rates ->
-// NON-diagonal). iiyhJMaskHit(pc, prr, frame) = 1 where a band crosses this brick right now, 0
-// between bands. As the bands drift, the "hit" regions crawl across the face -> a REAL, visible drift
-// (the face shape stays fixed; only the mask's light sweeps). frame is in 12fps ticks.
-// v17: per-brick IMPULSE STATE — persists across the 12fps rAF frames. Each brick's lit value is a
-// decaying flash: it spikes when the brick catches a face line + a thin drifting mask line, then
-// decays. Reset when the coverage/template (a different face) changes.
-let IYH_J_IMP = null, IYH_J_IMP_DIM = ''
-function iiyhJMaskHit(pc, prr, frame, spec) {
-  const P = spec.maskPeriod || 8, W = spec.maskWidth || 2
-  const dh0 = (frame / 12) * (spec.maskRateH || 0)   // H bands sweep down (prr axis): how far, in bricks
-  const dv0 = (frame / 12) * (spec.maskRateV || 0)   // V bands sweep right (pc axis)
-  const dh = ((prr - dh0) % P + P) % P; const hd = Math.min(dh, P - dh)
-  const hHit = hd <= W ? 1 - hd / (W + 0.5) : 0       // 1 at a H band, fades over W bricks
-  const dv = ((pc - dv0) % P + P) % P; const vd = Math.min(dv, P - dv)
-  const vHit = vd <= W ? 1 - vd / (W + 0.5) : 0       // 1 at a V band
-  return Math.max(hHit, vHit)                          // on a band -> a "hit" (the brick lights)
+// v18: the DITHER MASK = a deterministic value-noise field, fit to the image size (~ditherFeat
+// features across the face, NOT a scaled-up tiny grain) + drifting NON-diagonally. No per-brick state.
+function iihyJHash(ix, iy, seed) {
+  let h = (ix * 374761393 + iy * 668265263 + seed * 974711) | 0
+  h = (h ^ (h >>> 13)) * 1274126177 | 0
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296
+}
+function iihyJNoise(nx, ny, seed, feat) {
+  const x = nx / feat, y = ny / feat
+  const ix = x | 0, iy = y | 0
+  const tx = x - ix, ty = y - iy
+  const sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty)
+  const a = iihyJHash(ix, iy, seed), b = iihyJHash(ix + 1, iy, seed)
+  const c = iihyJHash(ix, iy + 1, seed), d = iihyJHash(ix + 1, iy + 1, seed)
+  const ab = a + (b - a) * sx, cd = c + (d - c) * sx
+  return ab + (cd - ab) * sy
 }
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1
@@ -2130,11 +2131,10 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const bwS = bw * scale, bhS = bh * scale
   const gapX = bwS * p, gapY = bhS * p                         // grout gap (px), proportional to brick
   const drift = 0                                             // v17: face position FIXED (no whole-picture sway); the DRIFT = the dither mask's thin lines sweeping the face
-  // v17: the per-brick IMPULSE STATE (decaying flash memory) + this frame's decay factor. Re-allocated
-  // when the face (coverage/template) changes; otherwise it persists across frames.
-  const impKey = pn + 'x' + pm + '_' + (cov ? cov.length : 0)
-  if (IYH_J_IMP_DIM !== impKey){ IYH_J_IMP = new Float32Array(pn * pm); IYH_J_IMP_DIM = impKey }
-  const impDecay = Math.pow(IYH_J.impulseDecay || 0.5, 12 / 60)
+  // v18: the DITHER MASK drift offsets — a value-noise field fit to the image size, drifting
+  // NON-diagonally (x + y at different slow rates). No per-brick state (the mask drives the bricks).
+  const dOffX = (frame / 12) * (IYH_J.ditherDriftX || 0.5)
+  const dOffY = (frame / 12) * (IYH_J.ditherDriftY || 0.35)
   ctx.fillStyle = iiyhJResolveAccent()                           // pane accent; alpha via globalAlpha
   for (let prr = 0; prr < pm; prr++) for (let pc = 0; pc < pn; pc++) {
     let cvv = 0, i0 = -1, found = false
@@ -2149,23 +2149,19 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     if (!found || cvv < IYH_FACE_COV.thr) continue
     const vc = cvv / 255                                       // brick "confidence" 0..1
     const contrast = iiyhJContrast(vc)                          // acos spline: [0,1], full at accentConf (0.83+)
-    // v17: the DITHER MASK (thin drifting lines) drives a per-brick IMPULSE + DECAY — each brick's lit
-    // value is a decaying flash. When the brick CATCHES a face line + a thin mask line this frame it
-    // flashes; between catches the flash DECAYS. As the thin lines drift, the flashes crawl along the
-    // face lines -> a real, alive drift (an EMPTY brick that catches a line stays empty -> "it's gone").
-    const ic = prr * pn + pc
-    IYH_J_IMP[ic] *= impDecay
-    const mh = iiyhJMaskHit(pc, prr, frame, IYH_J)
-    if (mh > 0.15) IYH_J_IMP[ic] = Math.max(IYH_J_IMP[ic], Math.min(1, mh * vc * IYH_J.impulseGain * (focusShift ? 1.25 : 1)))
-    const a = IYH_J_IMP[ic]
-    if (a <= 0.01) continue
+    // v18: the DITHER MASK (value-noise field fit to the image) drifts NON-diagonally; each face
+    // brick's opacity = its base brightness (contrast) * the drifting mask value -> the face shimmers
+    // with the drift. No per-brick state: the mask value at the brick's drifting position IS the drift.
+    const dv = iihyJNoise(pc + dOffX, prr + dOffY, IYH_J.ditherSeed, IYH_J.ditherFeat)
+    const a = contrast * (IYH_J.ditherFloor + (1 - IYH_J.ditherFloor) * dv) * (focusShift ? 1.05 : 1)
+    if (a <= 0.02) continue
     ctx.globalAlpha = a
     ctx.fillRect(offX + pc * bwS + drift + gapX / 2, offY + prr * bhS + gapY / 2,
                  Math.max(0.5, bwS - gapX), Math.max(0.5, bhS - gapY))
   }
   ctx.globalAlpha = 1
 }
-// iiyhJCanvas v17: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + DITHER-MASK IMPULSE+DECAY DRIFT (v17, THE CORRECT model): face position is FIXED; each brick's lit value is a decaying IMPULSE driven by a DRIFTING dither mask of thin H+V lines. A brick that CATCHES a face line + a thin mask line flashes (impulse) then DECAYS (IYH_J.maskRateH/maskRateV drift, non-diagonal; IYH_J.maskPeriod/maskWidth thin lines; IYH_J.impulseGain flash + IYH_J.impulseDecay fade). As the thin lines drift, the flashes crawl along the face lines -> a real, alive drift, not static shading or stripes. Per-brick impulse state persists across frames (IYH_J_IMP), reset on template/coverage change. An EMPTY brick that catches a line stays empty ('it's gone'). + contain-fit + PULSE fills remaining height. Tune IYH_J.maskRateH/maskRateV/maskPeriod/maskWidth/impulseGain/impulseDecay (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
+// iiyhJCanvas v18: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + DITHER-MASK DRIFT (v18, THE SIMPLE model): face position FIXED; each face brick's opacity = its base brightness * a DRIFTING value-noise DITHER MASK (fit to the image size via IYH_J.ditherFeat, drifting NON-diagonally via ditherDriftX/Y) -> the face shimmers with the drift, no per-brick state, no thin-line sim, no impulse arrays. + contain-fit + PULSE fills remaining height. Tune IYH_J.ditherFeat/ditherFloor/ditherDriftX/ditherDriftY/ditherSeed (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
 // Self-driven 12fps canvas renderer. The pane's OWN rAF loop (throttled to
 // IYH_BRICK_FPS) draws the field each frame — not a static image. Started when
 // active, re-fit on resize, stopped on cleanup. Returns the <canvas> ref to attach.
