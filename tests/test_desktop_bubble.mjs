@@ -292,6 +292,28 @@ eq(pulseSlotId('goal', 0), 'goal|0', 'visual slot identity metric|slotIndex')
      'sub-hysteresis noise shares the key (no effect churn)')
 }
 
+// v0.1.10 (review P0: React unmount while timers are active): surface
+// loss cancels every pending transition and commits the latest
+// snapshot immediately. A stale travel timer that fires AFTER
+// unmount has no transition left to arrive — arrive() is a no-op and
+// creates no new flash; the renderer's unmount effect clears the
+// timers themselves (pinned in the source block below).
+{
+  const c = createPulseBubbleCoordinator()
+  c.ingest(lanesOf([entry(12, 'terminal', 1, 0.5, 'weak')]), 3)
+  c.ingest(lanesOf([entry(12, 'terminal', 1, 0.9, 'strong')]), 3)
+  const staleSeq = c.getState().active[0].sequence
+  const rs = c.resize({ width: 400, height: 800 })
+  eq(rs.cancelled, 1, 'surface loss cancels the in-flight transition')
+  eq(c.visibleLanes(3).goal[0].value, 0.9, 'the latest snapshot commits immediately (no obsolete landing)')
+  const arr = c.arrive(staleSeq)
+  eq(arr.arrived, false, 'a stale sequence fired after unmount cannot commit')
+  eq(c.getState().flashSlotId, null, 'a stale timer creates no new flash')
+  eq(c.visibleLanes(3).goal[0].value, 0.9, 'visible content is unchanged by the stale arrival')
+  c.clearFlash(c.getState().flashSlotId)
+  eq(c.getState().flashes, {}, 'stale clearFlash stays a no-op')
+}
+
 // Source pins: wired into PulseLanes, UI-only (no backend schema fields).
 {
   const lanesSrc = src.slice(src.indexOf('function PulseLanes'), src.indexOf('function IoLine'))
@@ -302,6 +324,10 @@ eq(pulseSlotId('goal', 0), 'goal|0', 'visual slot identity metric|slotIndex')
   ok(!lanesSrc.includes('destination_slot'), 'no destination_slot in lane UI (desktop resolves slot, backend schema clean)')
   ok(src.includes('iyh-bubble-travel'), 'bubble travel keyframes present (bottom-edge -> cell, one px coordinate system)')
   ok(!src.includes('iyh-bubble-rise'), 'old 24px local-hop keyframe removed')
+  ok(/Unmount/.test(lanesSrc) && lanesSrc.includes('clearTimeout'),
+    'unmount effect cancels every travel/flash timer (timers live in refs)')
+  ok(lanesSrc.includes("'--dx': dx + 'px'") && lanesSrc.includes("'--dy': dy + 'px'"),
+    'the travel transform is px (--dx/--dy from the measured pulseBubblePath, no px/% mix)')
   ok(!/fetch\(|XMLHttpRequest/.test(block), 'transition layer is pure UI (no I/O)')
   // Imports invariant: only SDK + react.
   const imports = src.match(/^import .*$/gm) || []

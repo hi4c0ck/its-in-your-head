@@ -158,6 +158,87 @@ def test_concurrent_first_reads_do_not_double_load(env, monkeypatch):
         f"load_pulse_state_checked called {len(calls)} times")
 
 
+def test_failed_hydration_retries_until_success(env, monkeypatch):
+    """v0.1.10 (P0-1): a failed database read must NOT permanently mark
+    the engine hydrated. The first failure arms a bounded backoff; reads
+    inside the window skip the DB; after the window expires the next
+    eligible read retries and a successful load restores the state."""
+    eng, db = env
+    _feed(eng, time.time())
+    fresh = Engine()
+    seq = {"i": 0}
+    real = persistence.load_pulse_state_checked
+
+    def flaky():
+        seq["i"] += 1
+        if seq["i"] == 1:
+            return None, False  # first database read fails
+        return real()
+
+    monkeypatch.setattr(persistence, "load_pulse_state_checked", flaky)
+    fresh.ensure_pulse_hydrated()
+    assert fresh._pulse_hydrated is False, \
+        "a failed load must not mark the engine hydrated"
+    assert fresh.protos.tools() == []
+    assert fresh._pulse_retry_at > time.monotonic(), \
+        "failed load arms a bounded retry backoff"
+    # Inside the backoff window: no second database read.
+    fresh.ensure_pulse_hydrated()
+    assert seq["i"] == 1, "reads inside the backoff window skip the DB"
+    # Window expires: the next read retries and succeeds.
+    fresh._pulse_retry_at = 0.0
+    fresh.ensure_pulse_hydrated()
+    assert seq["i"] == 2, "after the backoff the load is retried"
+    assert fresh._pulse_hydrated is True
+    assert set(fresh.protos.tools()) == set(eng.protos.tools())
+    view = fresh.pulse_view()
+    assert view["available"] is True
+
+
+def test_reset_during_inflight_hydration_stays_empty(env, monkeypatch):
+    """v0.1.10 (P0-1): a reset must not be overtaken by an in-flight
+    restore. reset() acquires the same hydration lock (outermost, same
+    order as ensure_pulse_hydrated), so a blocked load may finish its
+    merge, but the reset then clears the merged state and marks the
+    engine hydrated — the in-flight restore cannot repopulate a
+    wiped profile."""
+    eng, db = env
+    _feed(eng, time.time())
+    fresh = Engine()
+    real = persistence.load_pulse_state_checked
+    in_flight = threading.Event()
+    block = threading.Event()
+
+    def blocked_load():
+        in_flight.set()
+        assert block.wait(timeout=5), "load must be unblocked"
+        return real()
+
+    monkeypatch.setattr(persistence, "load_pulse_state_checked",
+                        blocked_load)
+    t = threading.Thread(target=fresh.ensure_pulse_hydrated,
+                         daemon=True)
+    t.start()
+    assert in_flight.wait(timeout=5), \
+        "hydration load started (blocked inside the hydration lock)"
+    # Unblock the in-flight load so its restore+merge COMPLETES while
+    # still holding the hydration lock; reset() then waits for that
+    # merge and wipes the just-restored state.
+    block.set()
+    fresh.reset()
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert fresh.protos.tools() == []
+    assert fresh.capsule_state() == {}
+    assert fresh._goal_vector is None
+    # The reset permanently marked the engine hydrated: subsequent
+    # reads must not reload the (now-cleared) database state.
+    fresh.ensure_pulse_hydrated()
+    fresh.pulse_view()
+    assert fresh.protos.tools() == []
+    assert fresh._goal_vector is None
+
+
 def test_reset_stays_empty(env, monkeypatch):
     eng, db = env
     _feed(eng, time.time())

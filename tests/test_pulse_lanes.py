@@ -35,17 +35,23 @@ class _FakeRegistry:
 class _FakeProtos:
     """Bank-by-tool fixture with per-category readiness attrs."""
 
-    def __init__(self, banks, min_labeled=3):
+    def __init__(self, banks, min_labeled=3, metas=None):
         self._banks = banks
+        self._metas = metas or {}
         self.min_labeled = min_labeled
-        self.goal_min_references = None
-        self.good_min_samples = None
-        self.user_friction_min_samples = None
-        self.objective_friction_min_samples = None
+        self.goal_min_references: int | None = None
+        self.good_min_samples: int | None = None
+        self.user_friction_min_samples: int | None = None
+        self.objective_friction_min_samples: int | None = None
 
     def bank(self, tool):
         return dict(self._banks.get(
             tool, {"good": [], "friction": [], "objective_friction": []}))
+
+    def bank_meta(self, tool):
+        """v0.1.10 provenance: label -> (backend, model_version) | None
+        (None = legacy record without identifiable provenance)."""
+        return dict(self._metas.get(tool, {}))
 
     def state(self, tool):
         return "learning"
@@ -296,3 +302,106 @@ def test_envelope_additive_rows_unchanged(tmp_path, monkeypatch):
         assert entries[0]["tool_name"] == "terminal"
     engine._engine = None
     database.set_override(None)
+
+
+# --- v0.1.10 (review P0-2): vector-space provenance gate -------------------
+# Persisted vectors carry (backend, model_version) provenance. In an
+# active embedding space, dimension-compatible vectors are SCORED but
+# only KNOWN provenance equal to the active space counts toward
+# readiness SUPPORT; legacy records (unknown provenance) are never
+# silently assumed compatible. Legacy callers (no active space) keep
+# the pre-gate behavior. This is the "numeric weak score with a ready
+# state, despite an invalid comparison" defect class — pinned dead.
+
+SKETCH_SPACE = {"id": "sketch", "model_version": 1, "dim": 4}
+MINILM_SPACE = {"id": "minilm", "model_version": 2, "dim": 4}
+
+
+def _lane_tool(lanes, lane, tool):
+    return {e["tool_name"]: e for e in lanes[lane]}[tool]
+
+
+def test_vector_space_provenance_gate():
+    reg = _FakeRegistry([_row("terminal", 1), _row("read_file", 2)])
+    banks = {
+        "terminal": {"good": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]],
+                     "friction": [], "objective_friction": []},
+        "read_file": {"good": [], "friction": [], "objective_friction": []},
+    }
+    metas = {"terminal": {"good": ("sketch", 1)}}
+    protos = _FakeProtos(banks, min_labeled=3, metas=metas)
+    goal_vec = [1, 0, 0, 0]
+    capsules = {"read_file": [
+        {"vector": [1, 0, 0, 0], "backend": "sketch", "model_version": 1},
+        {"vector": [0, 0, 1, 0], "backend": "minilm", "model_version": 2},
+        {"vector": [0, 1, 0, 0]},  # legacy record: no provenance tag
+    ]}
+
+    def run(space, backend=None):
+        return build_lanes(reg, protos, goal_vector=goal_vec,
+                           capsules_by_tool=capsules,
+                           vector_space=space, goal_backend=backend)
+
+    # Legacy: no active space identified — every dimension-comparable
+    # vector scores AND supports (pre-gate behavior preserved).
+    lanes = run(None)
+    g = _lane_tool(lanes, "good", "terminal")
+    assert g["value"] is not None and g["state"] == "ready"
+    assert g["support"]["count"] == 3
+    gl = _lane_tool(lanes, "goal", "read_file")
+    assert gl["evidence"]["source"] == "recent_capsules"
+    assert gl["evidence"]["capsule_count"] == 3
+    assert gl["state"] == "ready"
+    gt = _lane_tool(lanes, "goal", "terminal")
+    assert gt["evidence"]["source"] == "prototype_banks"
+    assert gt["evidence"]["prototype_count"] == 3
+
+    # Active space = sketch: the good bank's vectors share the sketch
+    # label provenance (provenance is per-label in the store) — all
+    # support; the capsule fallback only supports the sketch-tagged
+    # capsule (unknown + minilm-tagged never count).
+    lanes = run(SKETCH_SPACE)
+    g = _lane_tool(lanes, "good", "terminal")
+    assert g["state"] == "ready" and g["support"]["count"] == 3
+    gl = _lane_tool(lanes, "goal", "read_file")
+    assert gl["support"]["count"] == 1, \
+        "only the sketch-tagged capsule supports (unknown + minilm never)"
+    assert gl["state"] == "provisional", "1/3 support: numeric score, NOT ready"
+    # Provisional short-fall: raise the readiness minimum — known
+    # support (3) stays below it while the numeric score persists.
+    protos.good_min_samples = 4
+    lanes = run(SKETCH_SPACE)
+    g = _lane_tool(lanes, "good", "terminal")
+    assert g["value"] is not None, "comparable vectors still produce a score"
+    assert g["state"] == "provisional", \
+        "3/4 support: NOT ready (the old ready-with-invalid-comparison hole)"
+    protos.good_min_samples = None
+
+    # Encoder switch to minilm: the sketch-provenanced vectors lose ALL
+    # support but remain dimension-comparable — they score without
+    # ever counting. The minilm-tagged capsule now supports.
+    lanes = run(MINILM_SPACE)
+    g = _lane_tool(lanes, "good", "terminal")
+    assert g["value"] is not None, "same-dim foreign-space vectors still score"
+    assert g["support"]["count"] == 0
+    assert g["state"] == "learning", \
+        "zero support in the active space: learning, not ready"
+    gl = _lane_tool(lanes, "goal", "read_file")
+    assert gl["support"]["count"] == 1, \
+        "the minilm-tagged capsule now supports; sketch/legacy do not"
+
+    # Goal-vector gate: a goal vector from a KNOWN different encoder
+    # is not comparable at all — gated out before any lane is built.
+    lanes = run(SKETCH_SPACE, backend="minilm")
+    assert _lane_tool(lanes, "goal", "terminal")["state"] == "empty"
+    assert _lane_tool(lanes, "goal", "read_file")["state"] == "empty"
+    assert _lane_tool(lanes, "good", "terminal")["state"] == "empty"
+    assert _lane_tool(lanes, "friction", "terminal")["state"] == "empty"
+
+    # Dimension mismatch: an 8-dim vector in a 4-dim space is excluded
+    # from scoring and support alike (its label provenance is moot).
+    banks["terminal"]["good"].append([0.1] * 8)
+    lanes = run(SKETCH_SPACE)
+    g = _lane_tool(lanes, "good", "terminal")
+    assert g["support"]["count"] == 3, \
+        "the 8-dim vector contributes nothing to the 4-dim space"
