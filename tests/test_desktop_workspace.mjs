@@ -61,8 +61,8 @@ ok(src.includes('const IYH_PORTRAIT = (() =>'), 'portrait engine inline bundle p
 ok(src.includes('id: \'neutral-pencil\'') && src.includes('id: \'angular-pencil\'') && src.includes('id: \'soft-flow-study\''),
   'all three drawing templates registered in the engine')
 ok(src.includes('IYH_PORTRAIT.buildPortraitSvg'), 'the engine buildPortraitSvg API is consumed')
-ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48 })'),
-  'compact PORTRAIT renders the engine compact view at the 48px dock budget')
+ok(src.includes("jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: narrow })"),
+  'compact PORTRAIT renders the engine compact view at the 48px dock budget (fill: narrow stretches the square in the tall sidebar)')
 ok(src.includes('jsx(IyhPortraitStudio, { data, preferences })'),
   'expanded PORTRAIT renders the engine studio view')
 ok(src.includes('createIyhPortraitTemplatePreferences(ctx)'),
@@ -75,8 +75,8 @@ ok(src.includes("const WS_WORKSPACE_ID = 'its-in-your-head-workspace'"),
   'stable workspace id (re-fronts the existing tab, never duplicates)')
 ok(src.includes('host.openWorkspace(WS_WORKSPACE_ID, {'),
   'expand click calls host.openWorkspace with the stable id')
-ok(src.includes("jsx(ExpandedWorkspace, { source: source, rest: rest, portraitPreferences })"),
-  'workspace render passes the pane ctx bridge + the shared portrait-template store')
+ok(src.includes("jsx(ExpandedWorkspace, { source: source, rest: rest, portraitPreferences, onCollapse: closeIyhWorkspace })"),
+  'workspace render passes the pane ctx bridge + the shared portrait-template store + the collapse callback (expand/collapse symmetry, 32aab6e)')
 ok(src.includes("name: 'expand'") && src.includes('IYH_IC'),
   'expand icon is the plugin atlas symbol (iyh expand, tintable) — not the SDK set')
 ok(!src.includes('icons.Maximize'), 'SDK icons namespace retired in favor of the custom atlas')
@@ -89,7 +89,7 @@ eq(count("[source, 'iyh-pulse']"), 2, 'pulse query defined in exactly two places
 eq(count("[source, 'iyh-metrics']"), 2, 'metrics query defined in exactly two places')
 eq(count("[source, 'iyh-portrait']"), 2, 'portrait query defined in exactly two places')
 eq(count("[source, 'iyh-drift']"), 2, 'drift query defined in exactly two places')
-eq(count("rest('/pulse')"), 2, 'no extra /pulse route consumers')
+eq(count("rest('/pulse'"), 2, 'no extra /pulse route consumers (both queryFns ride the cursor suffix: rest("/pulse" + pulseActivityQuerySuffix()))')
 eq(count("rest('/portrait')"), 2, 'no extra /portrait route consumers')
 ok(!src.includes("rest('/pulse?'"), 'no invented route variants')
 
@@ -99,7 +99,7 @@ ok(src.includes('const PULSE_MAX_ROWS = 4'), 'compact lane still shows up to 4 t
 ok(src.includes('rows.map((row, ri)'), 'expanded PULSE walks ALL tool rows (uncapped)')
 ok(src.includes("gridTemplateColumns: 'repeat(4, minmax(0, 1fr))'"),
   'compact lanes keep equal-width 4-column tracks (PulseLanes; old row-table removed)')
-ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48 })'), 'compact PORTRAIT renders the engine compact view at 48px')
+ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: narrow })'), 'compact PORTRAIT renders the engine compact view at 48px (fill: narrow in the tall sidebar)')
 ok(src.includes("'PORTRAIT · no data yet — evidence empty'"),
   'honest compact empty-state placeholder retained (the studio view carries its own)')
 

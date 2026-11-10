@@ -92,20 +92,27 @@ assert.ok(src.includes('pulseBand'), 'semantic cells use the discrete 3-band enc
 assert.ok(src.includes('buildPulseVerdict'), 'worded verdict helper is wired into the pane')
 assert.ok(src.includes('color: isLive ? V_SEC : V_QUAT'),
   'live rows highlighted vs muted tool labels (no new colors)')
-assert.ok(!src.includes("getContext('2d')"), 'canvas painting retired')
-assert.ok(!src.includes('drawPulse'), 'drawPulse removed')
-assert.ok(!src.includes('resolveColors'), 'resolveColors removed')
-assert.equal((src.match(/new ResizeObserver/g) || []).length, 1,
-  'exactly ONE ResizeObserver: frame-orientation read on the root div (narrow dock); drawing surfaces stay fixed-size')
-assert.equal((src.match(/useEffect\(/g) || []).length, 4,
-  'mount-once effects only: Strip orientation observer + EncoderSwitcher engine-status poll + pet affection hold cleanup + portrait template subscription (useIyhPortraitTemplate) — no per-frame / no-interval redraw loops')
+// Canvas surfaces are PORTRAIT-ONLY now (the engine's offscreen morph
+// buffer + the ambient particles layer, committed with the portrait
+// engine work): PULSE/DOM painting stays canvas-free — the PULSE-era
+// canvas path (drawPulse/resolveColors) is gone for good.
+assert.ok(src.includes("off.getContext('2d')"), 'portrait offscreen morph canvas (engine work)')
+assert.ok(!src.includes('drawPulse'), 'drawPulse removed (PULSE never canvas-painted)')
+assert.ok(!src.includes('resolveColors'), 'resolveColors removed (PULSE never canvas-painted)')
+// Four ResizeObservers, each a MOUNTED-SURFACE read (no per-frame
+// loops): 2165 portrait fit, 3707 PulseLanes grid measure, 5094/5118
+// the two Strip composition measures (bottom + sidebar surfaces).
+assert.equal((src.match(/new ResizeObserver/g) || []).length, 4,
+  'four surface-measure ResizeObservers (portrait fit, PulseLanes grid, two Strip composition reads) — no per-frame redraw')
+assert.equal((src.match(/setInterval\(/g) || []).length, 0,
+  'no setInterval anywhere: polling runs through useQuery refetchInterval')
 assert.ok(src.includes('pulse.columns'), 'server columns still consumed (via pulseColumns)')
 assert.ok(src.includes('tool_name'), 'pulse rows stay dynamic (tool_name)')
 assert.ok(src.includes('NARROW_W'), 'narrow-dock threshold defined (sidebar frame)')
 assert.ok(src.includes('PULSE_GLOW_CSS'), 'bubble keyframes: theme-var rise on value change (Stage 6: glow retired with PulseMatrix, bubble rise kept for PulseLanes)')
 assert.ok(!src.includes('iyh-glow-warn'), 'Stage 6: friction glow keyframe retired with dead PulseMatrix')
 assert.ok(!src.includes("className: g ? 'iyh-glow'"), 'Stage 6: changed-cell glow class retired with dead PulseMatrix')
-assert.ok(src.includes('iyh-bubble-rise'), 'bubble keyframes still present for PulseLanes')
+assert.ok(src.includes('iyh-bubble-travel'), 'bubble keyframes still present for PulseLanes (travel: bottom-edge -> destination cell, the rise keyframe was superseded by the measured-surface travel)')
 assert.ok(src.includes("flex: narrow ? '1 1 30%' : undefined"),
   'drift wraps 3x2 in the narrow dock (labels to tooltip, numbers stay)')
 assert.ok(src.indexOf('...(!narrow') > -1,
@@ -241,7 +248,7 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   const ok3 = (c, label) => { assert.ok(c, label); console.log('ok ' + (++n) + ' - ' + label) }
   const lanesSrc = src.slice(src.indexOf('function PulseLanes'), src.indexOf('function IoLine'))
   ok3(lanesSrc.includes("gridTemplateColumns: 'repeat(4, minmax(0, 1fr))'"), 'four equal-width lanes (repeat(4, minmax(0,1fr)))')
-  ok3(lanesSrc.includes('slice(0, 12)'), 'every visible cell owns its truncated tool name')
+  ok3(lanesSrc.includes('slice(0, cap)'), 'every visible cell owns its truncated tool name (rows capped by the measured capacity, the fixed 12 was retired with the measured-box capacity)')
   ok3(lanesSrc.includes("'empty-' + i"), 'empty slots stay empty (no neighbor expansion)')
   ok3(!lanesSrc.includes('lbl-'), 'no separate tool-name rail inside PulseLanes')
   ok3(lanesSrc.includes('threshold ') && lanesSrc.includes('evidence: ') && lanesSrc.includes('support '),

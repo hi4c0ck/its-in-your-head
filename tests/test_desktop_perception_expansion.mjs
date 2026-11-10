@@ -97,7 +97,12 @@ assert.ok(strip.length > 0, 'Strip region found')
 // Re-baselined at v0.1.10+2: the right-zone sidebar registration is
 // restored (the user's working surface) and openWs captures the
 // host close handle for the expanded view's collapse button.
-const STRIP_SHA_S16_MOTION = '52a6f7de34aa41cf524c35713cb600aae35b333c5aef31d3d2a62297c6a806ab'
+// Re-baselined at v0.1.10+3 (Continuous Tool Activity): the Strip now
+// threads the PULSE response's persisted tool_start batch into
+// PulseLanes (activityEvents prop) and the PULSE queryFns ride the
+// cursor suffix; the portrait canvas pass (offscreen morph buffer +
+// particles) landed in the same window. Intentional strip edit.
+const STRIP_SHA_S16_MOTION = 'ee7725d5885c4a284449880fdbf37c8778bec07309bd56c29fe9f37a8c83a8fe'
 assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_S16_MOTION,
   '96px strip source byte-identical to the S16 motion-grammar baseline')
 ok(true, 'strip byte-identity snapshot pinned')

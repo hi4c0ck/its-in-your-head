@@ -90,7 +90,7 @@ assert.ok(src.includes('0.12 + 0.88 * v'), 'heat cells use accent alpha over the
 
 // 3. Semantic rendering (P1 lane 3): the pane is driven by the semantic
 // routes, not by the legacy hourly lane; it never invents values.
-assert.ok(src.includes("rest('/pulse')"), 'pane fetches /pulse as its primary view')
+assert.ok(src.includes("rest('/pulse'"), 'pane fetches /pulse as its primary view (cursor suffix rides the same route: rest("/pulse" + pulseActivityQuerySuffix()))')
 assert.ok(!src.includes("'/heatmap"), 'legacy hourly lane is not the pane primary view')
 assert.ok(src.includes("rest('/portrait')"), 'pane fetches /portrait')
 assert.ok(src.includes("rest('/drift')"), 'pane fetches /drift')

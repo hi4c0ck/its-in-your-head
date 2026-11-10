@@ -255,6 +255,61 @@ def _query(sql: str, params: tuple = ()):
         conn.close()
 
 
+def _pulse_activity_events(after_event_id: int | None = None,
+                           limit: int = 256) -> dict:
+    """Cursor-based PULSE activity batch (v0.1.10 spec §3.3).
+
+    Returns newly persisted tool_start EVENT METADATA only (id, ts,
+    tool_name, tool_call_id) — never tool content. Without a cursor the
+    database high-water mark is established and NO historical events are
+    returned (nothing pre-hydration may animate). With a cursor:
+    tool_start events with ids greater than the cursor, ascending event
+    id order, one bounded page, has_more on a truncated page.
+    Fault-isolated: any DB fault maps to an empty page at the caller's
+    cursor — the /pulse route never 500s on activity fetch."""
+    limit = max(1, int(limit))
+    # Unusable cursor (unresolved FastAPI Query default in direct
+    # calls, None, junk) degrades to the baseline: high-water mark,
+    # no history — never a fault.
+    after = None
+    if after_event_id is not None:
+        try:
+            after = int(after_event_id)
+        except (TypeError, ValueError):
+            after = None
+    try:
+        conn = _database.connect()
+        conn.execute("PRAGMA busy_timeout=2000")  # cross-process WAL reads
+    except Exception:
+        return {"events": [], "next_cursor": after or 0,
+                "has_more": False}
+    try:
+        _migration.schema_bootstrap(conn, _DDL)
+        hi = conn.execute("SELECT MAX(id) FROM events").fetchone()[0]
+        high_water = int(hi) if hi is not None else 0
+        if after is None:
+            return {"events": [], "next_cursor": high_water, "has_more": False}
+        rows = conn.execute(
+            "SELECT id, ts, tool_name, tool_call_id FROM events"
+            " WHERE id > ? AND type = 'tool_start'"
+            " ORDER BY id ASC LIMIT ?",
+            (after, limit + 1)).fetchall()
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        return {
+            "events": [
+                {"id": int(r[0]), "ts": r[1], "tool_name": r[2],
+                 "tool_call_id": r[3]} for r in page],
+            "next_cursor": int(page[-1][0]) if page else after,
+            "has_more": has_more,
+        }
+    except sqlite3.Error:
+        return {"events": [], "next_cursor": after or 0,
+                "has_more": False}
+    finally:
+        conn.close()
+
+
 @router.get("/metrics")
 async def metrics():
     """Aggregate totals. Response shape (contract for the desktop half):
@@ -1299,13 +1354,19 @@ def _reset_dataset() -> dict:
 
 
 @router.get("/pulse")
-async def pulse():
+async def pulse(after_event_id: int | None = Query(default=None)):
     """Pulse matrix (rows x 4 columns) + additive v2 lanes envelope:
     the live in-process engine view when the agent half holds rows;
     otherwise the profile-DB fallback (isolated dashboard child).
     Rows/columns are byte-compatible legacy projections; `lanes` is
     authoritative for new consumers. Empty banks stay neutral and
-    persisted tool rows are never hidden by an empty engine. Never 500s."""
+    persisted tool rows are never hidden by an empty engine. Never 500s.
+
+    v0.1.10 (spec §3.3): additive `activity_events` — a cursor-based
+    page of persisted tool_start event metadata (no content). No
+    cursor -> baseline high-water mark, no history; cursor -> new
+    events after it. `rows`, `lanes`, `lane_order`, `schema_version`
+    are untouched."""
     view = _pulse_live_view()
     if view is not None:
         if "lanes" not in view or view.get("schema_version") != 2:
@@ -1325,8 +1386,11 @@ async def pulse():
                 "lanes": _pulse_lanes_from_rows(view.get("rows"),
                                                 thresholds or None),
             }
-        return view
-    return _pulse_shape()
+        result = view
+    else:
+        result = _pulse_shape()
+    result["activity_events"] = _pulse_activity_events(after_event_id)
+    return result
 
 
 def _portrait_live_view() -> dict | None:

@@ -214,3 +214,62 @@ def test_flush_timeout_reports_pending(tmp_path):
     finally:
         gate.release.set()
         metrics.stop_worker()
+
+
+def test_worker_order_engine_feed_before_tick(tmp_path):
+    """v0.1.10 spec §3.2: batch order is persist -> engine feed -> tick.
+
+    The tick is what triggers the desktop's targeted /pulse refresh; the
+    registry must already be updated by then, so the engine processes the
+    batch BEFORE the notification. (The scrub stays last — embed first,
+    purge last — but is not part of this ordering pin.)"""
+    import time
+    metrics, db = _fresh(tmp_path)
+    log = []
+    log_lock = threading.Lock()
+    gate = _Gate(metrics)
+    gated_persist = metrics._persist_batch
+
+    def recorded_persist(batch):
+        r = gated_persist(batch)  # includes the gate release
+        with log_lock:
+            log.append("persist")
+        return r
+
+    metrics._persist_batch = recorded_persist
+    orig_tick = metrics._flush_tick
+
+    def recorded_tick(n):
+        r = orig_tick(n)
+        with log_lock:
+            log.append("tick")
+        return r
+
+    metrics._flush_tick = recorded_tick
+    fed = []
+
+    class _FakeEngine:
+        def on_events(self, batch):
+            with log_lock:
+                log.append("engine")
+            fed.append(list(batch))
+
+    metrics._engine = _FakeEngine()
+    metrics.start_worker()
+    try:
+        metrics.enqueue(_ev(0))
+        assert gate.entered.wait(10), "worker never entered persist"
+        gate.release.set()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            with log_lock:
+                if len(log) >= 3:
+                    break
+            time.sleep(0.01)
+        with log_lock:
+            seq = list(log)
+        assert seq == ["persist", "engine", "tick"], f"batch order was {seq}"
+        assert fed, "the engine must process the batch"
+    finally:
+        gate.release.set()
+        metrics.stop_worker()

@@ -287,16 +287,19 @@ def _worker_main() -> None:
             _batches += 1
             if _batches % PRUNE_EVERY == 0:
                 _prune()
-            _flush_tick(len(batch))
-            # Engine feed (pulse capsules, portrait update) — worker side
-            # only, never on the hot path. A fault here drops engine
-            # state, not the persisted events.
+            # Engine feed BEFORE the tick notification (v0.1.10 spec
+            # §3.2): the desktop's next /pulse refresh is triggered by
+            # the tick, so the pulse_tools registry must already be
+            # updated — a tick that fires first makes the client read a
+            # stale snapshot. The scrub below stays LAST (embed first,
+            # purge last — the invariant from v0.1.3).
             if _engine is not None:
                 try:
                     _engine.on_events(batch)
                 except Exception:
                     logger.exception(
                         "its-in-your-head: engine feed failed (state dropped)")
+            _flush_tick(len(batch))
             # Privacy scrub (v0.1.3 P0), AFTER the engine feed: raw
             # prompt/reasoning text lives in memory only — embed FIRST
             # (reasoning via the engine-side configured backend during

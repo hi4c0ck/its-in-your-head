@@ -126,13 +126,15 @@ eq(adaptPulseToLanes({ rows: [], columns: [] }).available, false, 'no tools -> a
 eq(adaptPulseToLanes(null).lanes.goal, [], 'null payload -> empty lanes, never omits lanes')
 
 // 6. Stage 6 gap-fill (§15 criterion 11): sidebar proportional shrink.
-// v0.1.10 (review fix 7): EQUAL flexible basis on both modules — the
-// old '1 1 50%' (portrait) vs 'flex: 1' (pulse) pair split ~75/25;
-// both '1 1 0%' genuinely divide the sidebar 50/50.
+// v0.1.10 (review fix 7, as committed 3fe0b6b): PULSE holds a FIXED
+// basis in sidebar mode ('0 0 auto' + maxHeight 42%) while PORTRAIT
+// takes the flexible '1 1 0%' basis — the sidebar is the portrait
+// working surface; in bottom mode the reverse (PULSE flexes, PORTRAIT
+// is fixed). The old '1 1 50%' pair split ~75/25 and is gone.
+ok(src.includes("flex: composition === 'sidebar' ? '0 0 auto' : 1"),
+  'sidebar pulse module is flex 0 0 auto in sidebar mode (fixed basis, portrait takes the flex)')
 ok(src.includes("flex: composition === 'sidebar' ? '1 1 0%' : '0 0 auto'"),
-  'sidebar portrait module is flex 1 1 0% (equal basis)')
-ok(src.includes("flex: composition === 'sidebar' ? '1 1 0%' : 1"),
-  'sidebar pulse module is flex 1 1 0% in sidebar mode (equal basis)')
+  'sidebar portrait module is flex 1 1 0% in sidebar mode (equal basis, the 50/75 split is gone)')
 ok(!/flex: composition === 'sidebar' \? '1 1 50%'/.test(src), 'no functional 50%-basis flex left (the 75/25 split is gone)')
 ok(src.includes("'data-composition': 'sidebar'"), 'sidebar composition hook present')
 ok(src.includes("className: 'flex flex-1 flex-col'") && src.includes("gap: 4, minHeight: 0, overflow: 'hidden'"),
