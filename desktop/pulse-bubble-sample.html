@@ -61,6 +61,10 @@
     <button id="btn-ba">before / after</button>
     <button id="btn-resize">resize mid-flight</button>
     <button id="btn-rm">reduced motion</button>
+  <button id="btn-srep">strip: repeated ×3</button>
+  <button id="btn-sconc">strip: 4 concurrent</button>
+  <button id="btn-sovf">strip: overflow ×7 (cap 4)</button>
+  <button id="btn-spromote" disabled>STRIP PROMOTE held (FIFO)</button>
   </div>
   <div id="rm-note" class="hint" style="display:none">reduced-motion: commit lands instantly, no travel, no stamp.</div>
 </div>
@@ -319,8 +323,38 @@ window.PULSE_SAMPLE = {
   },
   reducedMotion: function () {
     clearAll();
-    launch(holders.side,  'live', 0, 0, { reduced: true }); // instant commit, no stamp
+    launch(side, 'live', 0, 0, { reduced: true }); // instant commit, no stamp
     document.getElementById('rm-note').style.display = 'block';
+  },
+  // --- strip composition battery (400x96 cap4): the compact bottom surface ---
+  stripRepeated: function () {
+    clearAll();
+    for (let i = 0; i < 3; i++) launch(holders.strip, 'good', 0, i * BUBBLE_STAGGER_MS);
+  },
+  stripConcurrent: function () {
+    clearAll();
+    // four lanes, slots 0..3 — note slot 3 is the SPAWN row (dy=0 degenerate)
+    PULSE_LANE_ORDER.forEach(function (l, i) { launch(holders.strip, l, i, i * BUBBLE_STAGGER_MS); });
+  },
+  stripOverflow: function () {
+    clearAll();
+    const queued = [];
+    for (let i = 0; i < 7; i++) {
+      const l = PULSE_LANE_ORDER[i % 4], s = i % 4;
+      if (i < MAX_CONCURRENT_BUBBLES) launch(holders.strip, l, s, i * BUBBLE_STAGGER_MS);
+      else queued.push({ l: l, s: s });
+    }
+    this._squeued = queued;
+    const b = document.getElementById('btn-spromote');
+    b.disabled = false;
+    b.textContent = 'STRIP PROMOTE ' + queued.length + ' held';
+  },
+  stripPromote: function () {
+    const q = this._squeued || [];
+    q.forEach(function (t, i) { launch(holders.strip, t.l, t.s, i * BUBBLE_STAGGER_MS); });
+    this._squeued = [];
+    const b = document.getElementById('btn-spromote');
+    b.disabled = true; b.textContent = 'STRIP PROMOTE held (FIFO)';
   },
 };
 document.getElementById('btn-single').onclick = PULSE_SAMPLE.single;
@@ -332,6 +366,10 @@ document.getElementById('btn-both').onclick = PULSE_SAMPLE.stripVsSide;
 document.getElementById('btn-ba').onclick = PULSE_SAMPLE.beforeAfter;
 document.getElementById('btn-resize').onclick = PULSE_SAMPLE.resizeDuringTravel;
 document.getElementById('btn-rm').onclick = PULSE_SAMPLE.reducedMotion;
+document.getElementById('btn-srep').onclick = PULSE_SAMPLE.stripRepeated;
+document.getElementById('btn-sconc').onclick = PULSE_SAMPLE.stripConcurrent;
+document.getElementById('btn-sovf').onclick = PULSE_SAMPLE.stripOverflow;
+document.getElementById('btn-spromote').onclick = PULSE_SAMPLE.stripPromote;
 // Deterministic frame-capture hook (scrub travel animations, spawn stamps on demand)
 window.PULSE_DEBUG = { spawnStamp: spawnStamp, flight: pulseBubbleFlight,
   scrub: function (ms, kind) {
