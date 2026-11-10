@@ -1,0 +1,205 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IiYH Brick Mask — SVG source (stable J grid)</title>
+<style>
+:root{--accent:#35C8FF;--mut:#5a5a70;--line:#1a2436}
+*{box-sizing:border-box}
+body{margin:0;background:#101014;color:#8888a0;font:13px/1.5 system-ui,sans-serif}
+main{display:flex;gap:18px;flex-wrap:wrap;padding:24px;max-width:940px;margin:0 auto}
+.stage{text-align:center}
+#svg{display:block;width:480px;height:506px;margin:0 auto;border-radius:6px}
+.caption{margin-top:12px;color:var(--mut);font-size:11px;max-width:480px;margin-left:auto;margin-right:auto}
+.panel{width:290px;font-size:11px}
+.card{border:1px solid var(--line);border-radius:6px;padding:10px;margin-bottom:10px}
+.card h2{font-size:9px;letter-spacing:1.4px;color:var(--accent);margin:0 0 6px}
+.row{display:flex;justify-content:space-between;align-items:center;margin:4px 0}
+.row b{font-variant-numeric:tabular-nums;font-weight:600}
+.mut{color:var(--mut)} .win{color:#37e08b}
+input[type=range]{flex:1;accent-color:var(--accent);height:13px}
+button{background:#111927;border:1px solid var(--line);border-radius:4px;padding:6px 8px;
+  color:#cfd6e2;font:inherit;cursor:pointer;width:100%;margin-bottom:5px}
+button.on{border-color:var(--accent);color:var(--accent)}
+code{color:var(--accent);font-size:10px}
+textarea{width:100%;height:56px;background:#0a1220;color:#cfd6e2;border:1px solid var(--line);
+  border-radius:4px;font:10px/1.4 monospace;padding:6px;resize:vertical}
+</style></head><body>
+<main>
+<div class="stage">
+  <!-- YOUR SVG GOES IN THE SLOT. The J brick grid is the MASK: a stable,
+       fixed-count curtain of white bricks whose opacity bit-steps. The
+       portrait shows through wherever a brick is lit (see-through). -->
+  <svg id="svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 506"
+       shape-rendering="geometricPrecision" role="img" aria-label="IiYH brick mask pane">
+    <defs>
+      <mask id="brick-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="480" height="506">
+        <rect width="480" height="506" fill="black"/>
+        <g id="mask-bricks"></g>
+      </mask>
+    </defs>
+    <g mask="url(#brick-mask)" id="slot"></g>
+  </svg>
+  <div class="caption">J brick grid masks any SVG · stable brick count (fixed grid) ·
+    portrait shows through lit bricks · brightness bit-steps (shimmer @ 900 ms) ·
+    the grid is a real SVG <code>&lt;mask&gt;</code> you can lift for integration</div>
+</div>
+
+<div class="panel">
+  <div class="card"><h2>CONTENT</h2>
+    <textarea id="svgInput" placeholder="paste any SVG (transparent bg) — the bricks mask it…"></textarea>
+    <button class="on" onclick="__apply()">insert SVG</button>
+    <button onclick="__demo()">load demo portrait</button>
+  </div>
+  <div class="card"><h2>LIVE</h2>
+    <div class="row"><span class="mut">bricks (stable)</span><b id="lit">0</b></div>
+    <div class="row"><span class="mut">writes/step</span><b id="wr">0</b></div>
+    <div class="row"><span class="mut">step (med)</span><b id="ms" class="win">0.00 ms</b></div>
+    <div class="row"><span class="mut">cadence</span><b>900 ms</b></div>
+    <button id="bStep" class="on">bit-step: on</button>
+  </div>
+  <div class="card"><h2>CONTROLS</h2>
+    <div class="row"><span class="mut">brick</span><input id="size" type="range" min="6" max="48" value="12"></div>
+    <div class="row"><span class="mut">aspect</span><input id="ws" type="range" min="50" max="200" value="120"></div>
+    <div class="row"><span class="mut">lift</span><input id="lift" type="range" min="0" max="40" value="10"></div>
+    <div class="row"><span class="mut">grain</span><input id="grain" type="range" min="0" max="40" value="30"></div>
+  </div>
+  <div class="card"><h2>INTEGRATION</h2>
+    <button onclick="__copyMask()">copy <code>&lt;mask&gt;</code></button>
+    <button onclick="__copyUrl()">copy CSS <code>mask-image</code></button>
+  </div>
+</div>
+</main>
+
+<script>
+"use strict";
+/* J grain grid: 32x16 blocks, 18 seeded values (the real IiYH SPEC). This is
+   what shades each brick so the curtain has texture, not a flat grid. */
+const SPEC={bw:32,bh:16,blocks:[[0,0,32,16,.133],[32,0,32,16,.321],[64,0,32,16,.131],[96,0,32,16,.462],[0,16,32,16,.557],[32,16,32,16,.116],[96,16,32,16,.279],[0,32,32,16,.38],[32,32,32,16,.572],[64,32,32,16,.522],[96,32,32,16,.697],[0,48,32,16,0],[32,48,32,16,.368],[64,48,32,16,.216],[96,48,32,16,.208],[0,64,32,8,1],[32,64,32,8,.309],[64,64,32,8,.863],[96,64,32,8,.835]]};
+const tone=(()=>{const t=[];for(let i=0;i<SPEC.bw;i++)t.push(new Float32Array(SPEC.bh).fill(.5));
+  for(const b of SPEC.blocks){const bi=Math.round(b[0]/(128/SPEC.bw)),bj=Math.round(b[1]/(72/SPEC.bh));
+    if(bi>=0&&bi<SPEC.bw&&bj>=0&&bj<SPEC.bh)t[bi][bj]=b[4];}return t;})();
+
+const VW=480,VH=506,NS="http://www.w3.org/2000/svg";
+const g=document.getElementById("mask-bricks"),slot=document.getElementById("slot");
+const $=id=>document.getElementById(id);
+
+const p={size:12,ws:1.2,lift:.1};
+/* per-brick shimmer: seeded from brick index (stable), re-rolled each step */
+let bricks=[];    // {bi,bj,el,lv}
+const shimOf=(i,seed)=>{ // deterministic base + re-roll amount
+  const n=Math.sin((i+1)*seed)*43758.5453; return .72+.28*(n-Math.floor(n));
+};
+let seed=1;
+const LVL=[.10,.35,.60,.92]; // 4 quantized reveal levels -> bit-step
+let grainStr=(+$("grain").value/100)||.3;
+
+/* STABLE grid: full viewport tiled at `size`. Count only changes when
+   size/aspect change — never random, never 51k/319. */
+function build(){
+  while(g.firstChild)g.removeChild(g.firstChild);
+  bricks.length=0;
+  const bw=p.size*p.ws, bh=p.size;           // aspect scales width only
+  const cn=Math.ceil(VW/bw), rn=Math.ceil(VH/bh);
+  for(let r=0;r<rn;r++)for(let c=0;c<cn;c++){
+    const bi=((c%SPEC.bw)+SPEC.bw)%SPEC.bw, bj=((r%SPEC.bh)+SPEC.bh)%SPEC.bh;
+    const el=document.createElementNS(NS,"rect");
+    el.setAttribute("x",(c*bw).toFixed(1));el.setAttribute("y",(r*bh).toFixed(1));
+    el.setAttribute("width",bw.toFixed(1));el.setAttribute("height",bh.toFixed(1));
+    el.setAttribute("fill","#fff");el.setAttribute("opacity","0");
+    g.appendChild(el);
+    bricks.push({bi,bj,el,lv:-1});
+  }
+  paint(true);
+  $("lit").textContent=bricks.length;
+}
+
+/* per-brick reveal: J grain value x shimmer, quantized. Diff-write only. */
+function val(i){
+  const b=bricks[i], gn=tone[b.bi][b.bj];
+  const gr=(1-grainStr)+grainStr*(.3+.7*gn);
+  return Math.min(1, gr*shimOf(i,seed));
+}
+function paint(first){
+  const minLv=Math.min(LVL.length-1,Math.round((p.lift||0)/.4*(LVL.length-1)));
+  let wr=0;
+  for(let i=0;i<bricks.length;i++){
+    const b=bricks[i];
+    let lv=0;for(let L=0;L<LVL.length;L++)if(val(i)>=LVL[L])lv=L;
+    lv=Math.max(lv,minLv);
+    if(first||lv!==b.lv){b.lv=lv;b.el.setAttribute("opacity",LVL[lv].toFixed(2));wr++;}
+  }
+  if(!first)$("wr").textContent=wr;
+}
+
+/* bit-step: re-roll the shimmer seed -> re-tint only changed-level bricks */
+let stepping=true,times=[];
+setInterval(()=>{
+  if(!stepping||!bricks.length)return;
+  const t0=performance.now();
+  seed=1+Math.floor(Math.random()*100000);
+  paint(false);
+  times.push(performance.now()-t0);if(times.length>60)times.shift();
+  const s=times.slice().sort((a,b)=>a-b);$("ms").textContent=s[s.length>>1].toFixed(2)+" ms";
+},900);
+
+/* controls */
+$("size").value=p.size;$("size").oninput=e=>{p.size=+e.target.value;build();};
+$("ws").value=Math.round(p.ws*100);$("ws").oninput=e=>{p.ws=+e.target.value/100;build();};
+$("lift").value=Math.round(p.lift*100);$("lift").oninput=e=>{p.lift=+e.target.value/100;paint(true);};
+$("grain").oninput=e=>{grainStr=+e.target.value/100;paint(true);};
+$("bStep").onclick=()=>{stepping=!stepping;$("bStep").classList.toggle("on",stepping);$("bStep").textContent="bit-step: "+(stepping?"on":"off");};
+
+/* your SVG in the slot, masked by the stable J grid */
+function setSvg(s){
+  slot.textContent="";
+  const d=new DOMParser().parseFromString(s,"image/svg+xml");
+  if(d.querySelector("parsererror")){console.error("SVG parse failed");return;}
+  const r=d.querySelector("svg"),c=r.cloneNode(true);
+  c.setAttribute("width","480");c.setAttribute("height","506");
+  c.setAttribute("preserveAspectRatio","xMidYMid meet");
+  if(!c.getAttribute("viewBox"))c.setAttribute("viewBox","0 0 720 760");
+  slot.appendChild(c);
+}
+window.__setPortraitSvg=setSvg;
+window.__apply=()=>{const s=$("svgInput").value;if(s.trim())setSvg(s);};
+
+/* integration: lift the J grid as a portable <mask> */
+window.__getMaskSvg=()=>{
+  const m=document.createElementNS(NS,"mask");
+  m.setAttribute("maskUnits","userSpaceOnUse");m.setAttribute("width",VW);m.setAttribute("height",VH);
+  const bg=document.createElementNS(NS,"rect");bg.setAttribute("width",VW);bg.setAttribute("height",VH);bg.setAttribute("fill","black");m.appendChild(bg);
+  const grp=document.createElementNS(NS,"g");
+  for(const b of bricks){
+    const r=document.createElementNS(NS,"rect");
+    r.setAttribute("x",b.el.getAttribute("x"));r.setAttribute("y",b.el.getAttribute("y"));
+    r.setAttribute("width",b.el.getAttribute("width"));r.setAttribute("height",b.el.getAttribute("height"));
+    r.setAttribute("fill","white");r.setAttribute("opacity",b.el.getAttribute("opacity"));
+    grp.appendChild(r);
+  }
+  m.appendChild(grp);return new XMLSerializer().serializeToString(m);
+};
+window.__copyMask=()=>navigator.clipboard.writeText(window.__getMaskSvg());
+window.__copyUrl=()=>navigator.clipboard.writeText('url("data:image/svg+xml,'+encodeURIComponent(window.__getMaskSvg())+'")');
+
+/* demo portrait: cute face, transparent bg, so the curtain reads cleanly */
+const DEMO=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 506">
+  <circle cx="240" cy="190" r="110" fill="#e8eae6"/>
+  <path d="M130 170 C140 90 210 60 270 70 C330 80 350 150 340 190 C320 165 290 158 260 165 C220 175 175 190 130 170 Z" fill="#3a4a5e"/>
+  <ellipse cx="200" cy="200" rx="14" ry="10" fill="#1a2a3a"/>
+  <ellipse cx="280" cy="200" rx="14" ry="10" fill="#1a2a3a"/>
+  <circle cx="203" cy="197" r="4" fill="#fff"/>
+  <circle cx="283" cy="197" r="4" fill="#fff"/>
+  <path d="M180 178 Q200 168 224 180" stroke="#1a2a3a" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M256 180 Q280 168 300 178" stroke="#1a2a3a" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M238 220 L236 255 Q240 262 248 258" stroke="#b0b5b0" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path d="M214 290 Q240 302 266 290" stroke="#a04040" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <rect x="205" y="300" width="70" height="60" fill="#c8cab5"/>
+  <path d="M110 506 C130 380 210 350 240 350 C270 350 350 380 370 506 Z" fill="#4a6a8a"/>
+  <text x="240" y="430" text-anchor="middle" font-family="system-ui" font-size="24" fill="#35C8FF" font-weight="600">IT'S IN YOUR HEAD</text>
+</svg>`;
+window.__demo=()=>{$("svgInput").value=DEMO;setSvg(DEMO);};
+
+/* boot */
+build();
+__demo();
+</script>
+</body></html>

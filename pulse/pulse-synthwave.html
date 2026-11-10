@@ -1,0 +1,352 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>PULSE — synthwave tool organism (prototype)</title>
+<style>
+:root{--accent:#35C8FF;--mut:#5a6a80;--line:#1a2436}
+*{box-sizing:border-box}
+body{margin:0;background:#05060f;color:#9aa4bd;font:13px/1.5 system-ui,sans-serif}
+main{display:flex;gap:18px;flex-wrap:wrap;padding:20px;max-width:1400px;margin:0 auto}
+.stage{position:relative}
+#svg{display:block;width:1064px;max-width:100%;background:#05060f;border-radius:8px}
+/* synthwave: scanlines + floor glow (CSS only, zero JS cost) */
+.scan{position:absolute;inset:0;border-radius:8px;pointer-events:none;
+  background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(0,0,0,.15) 3px 4px)}
+.floor{position:absolute;left:0;right:0;bottom:0;height:40%;border-radius:0 0 8px 8px;pointer-events:none;
+  background:radial-gradient(ellipse 70% 90% at 50% 100%,rgba(53,200,255,.12),transparent 70%)}
+.caption{margin-top:10px;color:var(--mut);font-size:11px;max-width:100%}
+.panel{width:300px;font-size:11px}
+.card{border:1px solid var(--line);border-radius:6px;padding:10px;margin-bottom:10px}
+.card h2{font-size:9px;letter-spacing:1.4px;color:var(--accent);margin:0 0 6px}
+.row{display:flex;justify-content:space-between;align-items:center;margin:4px 0}
+.row b{font-variant-numeric:tabular-nums;font-weight:600}
+.mut{color:var(--mut)} .win{color:#37e08b}
+button{background:#111927;border:1px solid var(--line);border-radius:4px;padding:6px 8px;
+  color:#cfd6e2;font:inherit;cursor:pointer;width:100%;margin-bottom:5px}
+button.on{border-color:var(--accent);color:var(--accent)}
+input{width:100%;background:#0a1220;border:1px solid var(--line);border-radius:4px;
+  color:#cfd6e2;font:10px/1.4 monospace;padding:6px;margin-bottom:5px}
+#ticker{font:10px/1.6 monospace;color:var(--mut);min-height:56px}
+#ticker .t{color:var(--accent)}
+/* glide between rank slots; brightness stays stepped */
+.zone{transition:transform .6s cubic-bezier(.2,.8,.2,1)}
+.zone .brk{transition:none}
+.zone.surging .ring{opacity:.9}
+.zone.surging .brk{filter:drop-shadow(0 0 5px rgba(53,200,255,.85))}
+text{font-family:ui-monospace,Menlo,Consolas,monospace}
+</style></head><body>
+<main id="mainEl">
+<div class="stage">
+  <svg id="svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1064 126">
+    <g id="floorG" stroke="#35C8FF" opacity=".07"></g>
+    <g id="zones"></g>
+  </svg>
+  <div class="scan"></div><div class="floor"></div>
+  <div class="caption" id="caption"></div>
+</div>
+
+<div class="panel">
+  <div class="card"><h2>LAYOUT</h2>
+    <button id="bBar">form: bottom bar (long strip 7×1)</button>
+    <button id="bSquare">form: sidebar (≈square 3×3)</button>
+  </div>
+  <div class="card"><h2>LIVE</h2>
+    <div class="row"><span class="mut">tools</span><b id="nTools">0</b></div>
+    <div class="row"><span class="mut">pings (total)</span><b id="nPings">0</b></div>
+    <div class="row"><span class="mut">writes/step</span><b id="wr">0</b></div>
+    <div class="row"><span class="mut">step (med)</span><b id="ms" class="win">0.00 ms</b></div>
+    <div class="row"><span class="mut">cadence</span><b>900 ms</b></div>
+  </div>
+  <div class="card"><h2>LLM FEED</h2>
+    <button id="bSim" class="on">simulate LLM tool-calls: on</button>
+    <button id="bStorm">intensity: normal</button>
+    <div id="ticker"></div>
+  </div>
+  <div class="card"><h2>REAL DATA</h2>
+    <input id="apiUrl" placeholder="http://127.0.0.1:PORT/pulse  (poll real dashboard)">
+    <button id="bPoll">poll real /pulse</button>
+    <input id="json" placeholder="or paste /pulse JSON (rows[].tool_name + momentum.value)">
+    <button id="bJson">apply JSON</button>
+  </div>
+  <div class="card"><h2>FRAME</h2>
+    <button onclick="__copySvg()">copy current frame (SVG)</button>
+  </div>
+</div>
+</main>
+
+<script>
+"use strict";
+/* =====================================================================
+   PULSE synthwave prototype. Uses ONLY project quantities:
+   momentum = recent_share - cumulative_share (mirror of pulse/momentum.py:
+   value in [0,1], 0.5 = steady, band ±0.02 -> surging/cooling).
+   /pulse row shape: rows[].tool_name + rows[].momentum.{value,surge,state}
+   Encoding (the answer to "which quantity does the cell carry"):
+     POSITION   <- rank by momentum.value (surging tools float to the front)
+     BRIGHTNESS <- quantized momentum.value x per-brick grain (4-level bit-step)
+     PING       <- LLM tool-call flashes the cluster full-bright for 2 steps
+   Two display forms (host containers):
+     bar    <- bottom bar: long narrow metric strip (7 slots x 1 row)
+     square <- sidebar: roughly square (3 slots x 3 rows)
+   Rank beyond the visible cap stays parked (hidden), never wraps.
+   ===================================================================== */
+const NS="http://www.w3.org/2000/svg";
+const svg=document.getElementById("svg");
+const zonesG=document.getElementById("zones");
+const floorG=document.getElementById("floorG");
+const $=id=>document.getElementById(id);
+
+/* ---- host form factors ------------------------------------------------ */
+/* bar:    long narrow strip  (продольная узкая полоска)                  */
+/* square: ~square sidebar  (что-то вроде квадрата)                        */
+const LAYOUTS={
+  bar:{
+    caption:"PULSE · bottom-bar form · each cell = a real tool · top-7 by momentum · LLM tool-calls ping its cluster · position(rank) = momentum.value · brightness = 4-level bit-step @ 900 ms",
+    cols:7,rows:1,
+    x0:14,y0:22,slotW:148,slotH:74,
+    bcols:4,brows:4,bpw:10,bph:9,bw:7,bh:6,
+    nameY:50,stateY:61,nameFs:10,stateFs:8,
+    cssW:1064,mainW:1400,
+    floorYs:[88,98,110,118],
+    viewW:1064,viewH:126
+  },
+  square:{
+    caption:"PULSE · sidebar form · each cell = a real tool · top-9 by momentum · LLM tool-calls ping its cluster · position(rank) = momentum.value · brightness = 4-level bit-step @ 900 ms",
+    cols:3,rows:3,
+    x0:14,y0:16,slotW:140,slotH:140,
+    bcols:5,brows:5,bpw:11,bph:10,bw:8,bh:7,
+    nameY:66,stateY:79,nameFs:12,stateFs:9,
+    cssW:450,mainW:800,
+    floorYs:[356,378,402,428],
+    viewW:450,viewH:450
+  }
+};
+let LAY=LAYOUTS.bar;
+
+const LVL=[.14,.40,.70,1.0];      // 4 brightness levels (bit-step)
+const CAD=900;
+
+const tools=new Map();           // name -> tool
+let oidCounter=0, stepNo=0, pingsTotal=0;
+
+/* deterministic per-brick grain (stable per tool, no flicker) */
+const grain=(a,b)=>{const x=Math.sin(a*127.1+b*311.7)*43758.5453;return x-Math.floor(x);};
+
+/* rebuild one tool's cluster DOM at the CURRENT layout size */
+function buildZone(t){
+  const oid=t.oid;
+  const g=document.createElementNS(NS,"g");
+  g.setAttribute("class","zone");
+  const ring=document.createElementNS(NS,"rect");
+  ring.setAttribute("class","ring");
+  ring.setAttribute("x",-4);ring.setAttribute("y",-4);
+  ring.setAttribute("width",LAY.bcols*LAY.bpw+8);
+  ring.setAttribute("height",LAY.brows*LAY.bph+8);
+  ring.setAttribute("fill","none");ring.setAttribute("stroke","#35C8FF");
+  ring.setAttribute("stroke-width","1");ring.setAttribute("opacity","0");
+  g.appendChild(ring);
+  const bricks=[];
+  for(let r=0;r<LAY.brows;r++)for(let c=0;c<LAY.bcols;c++){
+    const b=document.createElementNS(NS,"rect");
+    b.setAttribute("class","brk");
+    b.setAttribute("x",(c*LAY.bpw).toFixed(1));
+    b.setAttribute("y",(r*LAY.bph).toFixed(1));
+    b.setAttribute("width",LAY.bw);b.setAttribute("height",LAY.bh);
+    b.setAttribute("fill","#35C8FF");b.setAttribute("opacity","0");
+    b._gi=r*LAY.bcols+c;b._lv=-1;
+    g.appendChild(b);bricks.push(b);
+  }
+  const nm=document.createElementNS(NS,"text");
+  nm.setAttribute("x",0);nm.setAttribute("y",LAY.nameY);
+  nm.setAttribute("fill","#35C8FF");nm.setAttribute("font-size",LAY.nameFs);
+  nm.textContent=t.name;
+  const st=document.createElementNS(NS,"text");
+  st.setAttribute("x",0);st.setAttribute("y",LAY.stateY);
+  st.setAttribute("fill","#5a6a80");
+  st.setAttribute("font-size",LAY.stateFs);st.textContent="steady";
+  g.appendChild(nm);g.appendChild(st);
+  zonesG.appendChild(g);
+  t.zone={g,bricks,stEl:st,ring};
+}
+
+function addTool(name){
+  name=String(name);
+  if(tools.has(name))return tools.get(name);
+  const oid=oidCounter++;
+  const t={name,oid,cum:0,recent:0,pingUntil:-1,rank:-1,zone:null};
+  buildZone(t);
+  tools.set(name,t);
+  return t;
+}
+
+/* switch host form factor: re-size viewBox + CSS, rebuild floor lines
+   and every cluster at the new brick size, re-place immediately */
+function setLayout(mode){
+  LAY=LAYOUTS[mode];
+  svg.setAttribute("viewBox","0 0 "+LAY.viewW+" "+LAY.viewH);
+  svg.style.width=LAY.cssW+"px";
+  document.getElementById("mainEl").style.maxWidth=LAY.mainW+"px";
+  document.getElementById("caption").textContent=LAY.caption;
+  $("bBar").classList.toggle("on",mode==="bar");
+  $("bSquare").classList.toggle("on",mode==="square");
+  floorG.textContent="";
+  for(const fy of LAY.floorYs){
+    const l=document.createElementNS(NS,"line");
+    l.setAttribute("x1",0);l.setAttribute("y1",fy);
+    l.setAttribute("x2",LAY.viewW);l.setAttribute("y2",fy);
+    floorG.appendChild(l);
+  }
+  zonesG.textContent="";
+  for(const t of tools.values())buildZone(t);
+  step();
+}
+
+/* PROJECT FORMULA — mirror of pulse/momentum.py surge_values:
+   per-tool surge = recent_share - cum_share over the whole set.
+   value clamps to [0,1]; 0.5 = steady; ±0.02 band -> surging/cooling. */
+function momentumOf(){
+  let rt=0,ct=0;
+  for(const o of tools.values()){rt+=o.recent;ct+=o.cum;}
+  const out=new Map();
+  for(const o of tools.values()){
+    const rs=rt?o.recent/rt:0, cs=ct?o.cum/ct:0;
+    const surge=rs-cs;
+    const value=Math.min(1,Math.max(0,.5+.5*surge));
+    const state=surge>=.02?"surging":surge<=-.02?"cooling":"steady";
+    out.set(o.name,{value,surge,state});
+  }
+  return out;
+}
+
+/* one bit-step: decay "recent", re-rank, glide positions, re-tint changed bricks */
+function step(){
+  stepNo++;
+  for(const t of tools.values())t.recent*=.8;          // half-life of "recent"
+  const mom=momentumOf();
+  const ranked=[...tools.values()].sort((a,b)=>{
+    const ma=mom.get(a.name), mb=mom.get(b.name);
+    const dv=(mb&&ma?mb.value-ma.value:0);
+    return dv||String(a.name).localeCompare(String(b.name));
+  });
+  const cap=LAY.cols*LAY.rows;
+  let wr=0;
+  ranked.forEach((t,i)=>{
+    const m=mom.get(t.name);
+    t.rank=i;
+    const g=t.zone.g;
+    if(i>=cap){                                   // beyond visible slots: parked
+      if(g.style.display!=="none"){g.style.display="none";wr++;}
+      return;
+    }
+    if(g.style.display==="none"){g.style.display="";wr++;}
+    const col=i%LAY.cols,row=Math.floor(i/LAY.cols)%LAY.rows;
+    const tx=LAY.x0+col*LAY.slotW, ty=LAY.y0+row*LAY.slotH;
+    const tf="translate("+tx+" "+ty+")";
+    if(g.getAttribute("transform")!==tf){g.setAttribute("transform",tf);wr++;}
+    const hot=stepNo<t.pingUntil;
+    g.classList.toggle("surging",hot||m.state==="surging");
+    t.zone.stEl.textContent=m.state;
+    /* brightness: quantized value, pings force the top level */
+    const v=hot?1:m.value;
+    let baseLv=Math.min(LVL.length-1,Math.floor(v*LVL.length));
+    if(v>=.15)baseLv=Math.max(baseLv,1);               // never fully dark while active
+    for(const b of t.zone.bricks){
+      let lv=baseLv;
+      if(!hot&&grain(t.oid,b._gi)<.34&&baseLv>0)lv=baseLv-1; // dark grain bricks drop
+      if(lv!==b._lv){b._lv=lv;b.setAttribute("opacity",LVL[lv].toFixed(2));wr++;}
+    }
+  });
+  $("wr").textContent=wr;
+  $("nTools").textContent=tools.size;
+}
+const times=[];
+setInterval(()=>{
+  if(!tools.size)return;
+  const t0=performance.now();step();
+  times.push(performance.now()-t0);if(times.length>60)times.shift();
+  const s=times.slice().sort((a,b)=>a-b);$("ms").textContent=s[s.length>>1].toFixed(2)+" ms";
+},CAD);
+
+/* ---- LLM tool-call pings ---- */
+function ping(name){
+  const t=addTool(name);
+  t.recent+=1;t.cum+=1;t.pingUntil=stepNo+2;pingsTotal++;
+  $("nPings").textContent=pingsTotal;
+  ticker("@ "+(performance.now()/1000).toFixed(1)+"s  tool_call &rarr; <span class=\"t\">"+escapeHtml(t.name)+"</span>");
+}
+function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+function ticker(html){
+  const d=document.createElement("div");d.innerHTML=html;
+  const tk=$("ticker");tk.prepend(d);
+  while(tk.children.length>4)tk.lastChild.remove();
+}
+
+/* simulated feed: rich-get-richer weighted pick (matches the surge math),
+   occasional new-tool discovery */
+const BASE=["shell","search","read","write","edit","web_search","analyze","image_search","read_webpage","run"];
+let simOn=true, storm=1, simTimer=null;
+function simLoop(){
+  simTimer=setTimeout(()=>{
+    if(simOn){
+      let pick;
+      if(Math.random()<.05){pick="tool_"+Math.floor(Math.random()*9);}
+      else{
+        const pool=[...tools.values()];
+        const ws=pool.map(t=>1+Math.max(0,t.recent));
+        let total=0;for(const w of ws)total+=w;
+        let r=Math.random()*total,idx=0;
+        while(r>ws[idx]){r-=ws[idx++];idx=Math.min(idx,pool.length-1);}
+        pick=pool[idx].name;
+      }
+      ping(pick);
+    }
+    simLoop();
+  },420+Math.random()*1400/storm);
+}
+$("bSim").onclick=()=>{simOn=!simOn;$("bSim").classList.toggle("on",simOn);
+  $("bSim").textContent="simulate LLM tool-calls: "+(simOn?"on":"off");};
+$("bStorm").onclick=()=>{storm=storm===1?(storm===2?1:2):(storm===.5?2:.5);
+  $("bStorm").textContent="intensity: "+(storm===2?"storm":storm===.5?"calm":"normal");};
+
+/* layout toggles */
+$("bBar").onclick=()=>setLayout("bar");
+$("bSquare").onclick=()=>setLayout("square");
+
+/* ---- real data: same contract as dashboard/plugin_api.py /pulse ---- */
+function ingestRows(rows){
+  for(const row of rows){
+    const name=row.tool_name||row.tool; if(!name)continue;
+    const m=row.momentum||{};
+    const v=(m.value!=null)?m.value:.5;
+    const t=addTool(name);
+    t.cum=Math.round(10+v*40);
+    t.recent=Math.round(Math.abs(v-.5)*20)+(m.state==="surging"?8:2);
+    if(m.state==="surging")t.pingUntil=stepNo+2;
+  }
+}
+$("bPoll").onclick=async()=>{
+  const url=$("apiUrl").value.trim(); if(!url)return;
+  try{
+    const r=await fetch(url);const j=await r.json();
+    const rows=(j.lanes&&j.lanes.rows)||j.rows||[];
+    ingestRows(rows);
+    ticker("real /pulse &rarr; "+rows.length+" tools");
+  }catch(e){ticker("poll failed: "+escapeHtml(e.message));}
+};
+$("bJson").onclick=()=>{
+  const s=$("json").value.trim(); if(!s)return;
+  try{
+    const j=JSON.parse(s);
+    const rows=(j.lanes&&j.lanes.rows)||j.rows||[];
+    ingestRows(rows);
+    ticker("JSON &rarr; "+rows.length+" tools");
+  }catch(e){ticker("JSON parse: "+escapeHtml(e.message));}
+};
+
+/* ---- frame export ---- */
+window.__copySvg=()=>navigator.clipboard.writeText(new XMLSerializer().serializeToString(document.getElementById("svg")));
+
+/* boot: seed the baseline toolset, apply default form (bottom bar), start */
+BASE.forEach(n=>{const t=addTool(n);t.cum=8+Math.random()*30;t.recent=1+Math.random()*5;});
+setLayout("bar");
+simLoop();
+</script>
+</body></html>

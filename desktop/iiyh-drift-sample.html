@@ -1,39 +1,39 @@
-<!doctype html><html><head><meta charset="utf-8"><title>IiYH brick-mosaic — opacity-mask drift</title>
+<!doctype html><html><head><meta charset="utf-8"><title>IiYH brick-mosaic — crawling tint drift</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#101218;color:#e8e6e2;font:14px/1.4 system-ui,Segoe UI,sans-serif}
 .wrap{display:flex;gap:24px;flex-wrap:wrap;padding:24px;max-width:1100px}
 .card{background:#171a20;border:1px solid #2a2f38;border-radius:10px;padding:16px}
 .stage{flex:1 1 460px;display:flex;flex-direction:column;gap:12px}
 canvas{width:100%;height:auto;aspect-ratio:720/760;background:#0f1116;border:1px solid #2a2f38;border-radius:8px}
-.ctl{flex:1 1 300px}
+.ctl{flex:1 1 320px}
 .ctl h3{margin:0 0 10px;font-size:13px;color:#9aa4b2;text-transform:uppercase;letter-spacing:.05em}
 .row{display:flex;align-items:center;gap:10px;margin:8px 0}
-.row label{flex:0 0 150px;font-size:13px;color:#c7ccd3}
+.row label{flex:0 0 170px;font-size:13px;color:#c7ccd3}
 .row input[type=range]{flex:1}
-.row .val{flex:0 0 52px;text-align:right;font-variant-numeric:tabular-nums;color:#7fd6ff}
+.row .val{flex:0 0 48px;text-align:right;font-variant-numeric:tabular-nums;color:#7fd6ff}
 .toggle{display:flex;align-items:center;gap:8px;margin:10px 0}
 .toggle input{transform:scale(1.2)}
 .phase{font-size:12px;padding:4px 8px;border-radius:6px;display:inline-block;margin-top:6px}
 .phase.normal{background:#1d2b34;color:#7fd6ff}
 .phase.shift{background:#3a2a1a;color:#ffb467}
 .note{font-size:12px;color:#8a9099;margin-top:12px;line-height:1.5}
-.fixed{color:#7fd6ff}
 </style></head>
 <body>
-<h2 style="padding:20px 24px 0">IiYH brick-mosaic — opacity-mask drift</h2>
+<h2 style="padding:20px 24px 0">IiYH brick-mosaic — crawling tint drift</h2>
 <div class="wrap">
   <div class="card stage">
     <canvas id="cv" width="480" height="506"></canvas>
     <div><span>Phase: </span><span id="phase" class="phase normal">NORMAL</span></div>
-    <div class="note">The face is drawn at a <span class="fixed">FIXED position</span>. The drift comes ONLY from the scrolling <b>opacity mask</b> (the <code>IYH_J_TONE</code> dither tiles) modulating each brick's alpha — so the texture drifts/shimmers while the picture holds. No whole-image translation.</div>
+    <div class="note">The face SHAPE (which bricks are lit + their base shade) is 100% from the coverage. The drift is a <b>crawling tint vocabulary</b>: a small set of opacity levels that slowly re-assigns to each brick (a hash crawl step), so the tints drift to neighbours while the picture holds. No diagonal, no whole-picture move.</div>
   </div>
   <div class="card ctl">
-    <h3>Opacity-mask drift</h3>
-    <div class="row"><label>Drift speed ×</label><input type="range" id="speed" min="0" max="8" step="0.5" value="5"><span class="val" id="speedv">5.0×</span></div>
-    <div class="row"><label>Drift depth %</label><input type="range" id="depth" min="0" max="100" step="5" value="100"><span class="val" id="depthv">100%</span></div>
+    <h3>Crawling tint drift</h3>
+    <div class="row"><label>Crawl rate (steps / sec)</label><input type="range" id="rate" min="0" max="2" step="0.1" value="0.5"><span class="val" id="ratev">0.5</span></div>
+    <div class="row"><label>Drift depth %</label><input type="range" id="depth" min="0" max="100" step="5" value="55"><span class="val" id="depthv">55%</span></div>
+    <div class="row"><label>Tint vocabulary (levels)</label><input type="range" id="voc" min="2" max="10" step="1" value="5"><span class="val" id="vocv">5</span></div>
     <h3 style="margin-top:18px">Focus shift</h3>
     <div class="toggle"><input type="checkbox" id="fshift" checked><label for="fshift">enable 1.3s → 0.4s focus shift</label></div>
-    <p class="note">Drift speed = how fast the opacity mask scrolls. Drift depth = how hard it modulates each brick's opacity (0% = steady image, no drift; 100% = full dither range). Tell me the two values that look right and I'll bake them into the plugin's IYH_J.</p>
+    <p class="note">Crawl rate = steps/second a tint re-assigns. 0.5 = a tint shift every 2s (a slow, subtle crawl). Lower = slower. Depth = how hard the vocabulary modulates opacity. Levels = the tint vocabulary size. Tell me the three values that read right and I'll bake them into IYH_J.</p>
   </div>
 </div>
 <script>
@@ -1790,7 +1790,8 @@ const IYH_J = {
   shiftHoldMs: 1300,   // normal phase (main lines in focus) before the focus shift
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
-  ditherDrift: 1.0,    // offsetting dither mask: the IYH_J_TONE grain tiles scroll this many cells/frame -> the visible drift
+  ditherDrift: 1.0,    // offsetting dither mask: the IYH_J_TONE tiles scroll this many cells/frame (the OPACITY drift)
+  ditherDepth: 0.7,    // how hard the scrolling opacity mask modulates each brick's alpha (0=steady, 1=full)
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
   lift: 0.06,             // brightness lift -> effFloor = floor + lift
   tint: 0.10,             // gamma: pow(v.c, 1 + 1.5*tint)
@@ -1985,7 +1986,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const offX = (W - 720 * scale) / 2, offY = (H - 760 * scale) / 2
   const bwS = bw * scale, bhS = bh * scale
   const gapX = bwS * p, gapY = bhS * p                         // grout gap (px), proportional to brick
-  const drift = iiyhBrickDriftX(frame, 720) * scale            // field sway (px)
+  const drift = 0                                             // face position FIXED (no whole-picture sway); the drift is the scrolling opacity mask below
   const dOff = (frame * (IYH_J.ditherDrift || 0)) | 0          // offsetting dither mask: scroll the grain tiles -> drift
   ctx.fillStyle = iiyhJResolveAccent()                           // pane accent; alpha via globalAlpha
   for (let prr = 0; prr < pm; prr++) for (let pc = 0; pc < pn; pc++) {
@@ -2000,12 +2001,13 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     }
     if (!found || cvv < IYH_FACE_COV.thr) continue
     const vc = cvv / 255                                       // brick "confidence" 0..1
-    const gn = IYH_J_TONE[(pc + dOff) % IYH_J_SPEC.bw][(prr + dOff) % IYH_J_SPEC.bh]   // offsetting dither tile (drifts as dOff advances)
+    const gn = IYH_J_TONE[(pc + dOff) % IYH_J_SPEC.bw][(prr + dOff) % IYH_J_SPEC.bh]   // the drifting OPACITY-mask tile
     const contrast = iiyhJContrast(vc)                          // acos spline: [0,1], full at accentConf (0.83+)
-    const grain = 0.5 + 0.8 * gn                               // wider dither range so the offsetting drift is visible
     const isMain = vc >= 0.5                                    // the darker strokes -> FULL intensity (pop vs the body)
-    const floor = focusShift ? IYH_J.focusFloor : IYH_J.canvasFloor   // focus shift: lift the faint parts into focus (NO polarity inversion / no folding)
-    let a = isMain ? IYH_J.soft : Math.max(floor, contrast * grain * iiyhJShim(i0, seed))
+    const floor = focusShift ? IYH_J.focusFloor : IYH_J.canvasFloor   // focus shift: lift the faint parts into focus (NO inversion / no folding)
+    const level = isMain ? IYH_J.soft : Math.max(floor, contrast * iiyhJShim(i0, seed))   // steady base opacity
+    const mask = 1 - (IYH_J.ditherDepth || 0) * (1 - gn)        // the scrolling OPACITY mask -> the texture drifts, the picture holds
+    let a = level * mask                                        // position fixed; only the opacity drifts
     if (a <= 0.01) continue
     ctx.globalAlpha = a
     ctx.fillRect(offX + pc * bwS + drift + gapX / 2, offY + prr * bhS + gapY / 2,
@@ -2013,14 +2015,12 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   }
   ctx.globalAlpha = 1
 }
-// iiyhJCanvas v13: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode (no atob) + baked fallback + grout + arccos contrast + accent (read off the canvas; the pane sets --ui-accent on its mounted container, not body) + template-following DARKNESS raster (rasterGain 2.0 / canvasFloor .35 / isMain gate, bright) + FOCUS-SHIFT flicker (normal shiftHoldMs -> focus-shift shiftMs -> revert: the FAINT parts lift to focusFloor while main lines STAY full — NO polarity inversion / no folding) + OFFSETTING DITHER-DRIFT (IYH_J.ditherDrift scrolls the IYH_J_TONE tiles -> visible drift) + contain-fit (aspectRatio, no stretch) + PULSE fills remaining height. The 850ms model poll stays untouched.
+// iiyhJCanvas v14: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + OPACITY-MASK DRIFT: face position is FIXED (no whole-picture sway); the drift = the scrolling IYH_J_TONE opacity mask modulating each brick's alpha (IYH_J.ditherDrift scroll rate + IYH_J.ditherDepth modulation depth) -> the texture drifts, the picture holds + contain-fit + PULSE fills remaining height. Tune IYH_J.ditherDrift/ditherDepth (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
 // Self-driven 12fps canvas renderer. The pane's OWN rAF loop (throttled to
 // IYH_BRICK_FPS) draws the field each frame — not a static image. Started when
 // active, re-fit on resize, stopped on cleanup. Returns the <canvas> ref to attach.
 
-// OPACITY-MASK drift: the face is drawn at a FIXED position; the scrolling dither mask
-// (IYH_J_TONE) modulates each brick's OPACITY, so the texture drifts while the picture holds.
-function drawTuned(ctx, W, H, frame, seed, cov, focusShift, ditherDrift, ditherDepth) {
+function drawTuned(ctx, W, H, crawlFrame, seed, cov, focusShift, crawlRate, depth, vocabSize) {
   ctx.clearRect(0, 0, W, H)
   cov = cov || IYH_FACE_COV_BYTES
   const cn = IYH_FACE_COV.cn, rn = IYH_FACE_COV.rn
@@ -2028,12 +2028,20 @@ function drawTuned(ctx, W, H, frame, seed, cov, focusShift, ditherDrift, ditherD
   const bw = IYH_J.bw * pool, bh = IYH_J.bh * pool
   const pn = Math.ceil(cn / pool), pm = Math.ceil(rn / pool)
   const scale = Math.min(W / 720, H / 760)
-  const offX = (W - 720 * scale) / 2, offY = (H - 760 * scale) / 2   // FIXED position (no whole-picture sway)
+  const offX = (W - 720 * scale) / 2, offY = (H - 760 * scale) / 2   // FIXED position
   const bwS = bw * scale, bhS = bh * scale
   const gapX = bwS * p, gapY = bhS * p
-  const dOff = (frame * (ditherDrift || 0)) | 0                    // scrolling opacity mask
-  const depth = (ditherDepth || 0) / 100                            // 0 = steady, 1 = full mask modulation
+  const step = Math.floor(crawlFrame * crawlRate)   // crawl step = elapsed(12fps)*rate -> rate in STEPS/SEC (slow)
+  const depthF = (depth || 0) / 100
+  const voc = Math.max(2, vocabSize || 5)      // the tint vocabulary size (discrete opacity levels)
   ctx.fillStyle = iiyhJResolveAccent()
+  function tint(pc, prr) {
+    // hash dither -> 0..1, changes as `step` advances (the crawl). Non-diagonal (hash, not a band).
+    let h = (pc * 2654435761) ^ (prr * 40503) ^ (step * 2246822519)
+    h = Math.abs(h) >>> 0
+    h = ((h ^ (h >>> 13)) * 0x5bd1e996) >>> 0
+    return (h % 100000) / 100000
+  }
   for (let prr = 0; prr < pm; prr++) for (let pc = 0; pc < pn; pc++) {
     let cvv = 0, i0 = -1, found = false
     for (let yy = 0; yy < pool; yy++) for (let xx = 0; xx < pool; xx++) {
@@ -2046,13 +2054,13 @@ function drawTuned(ctx, W, H, frame, seed, cov, focusShift, ditherDrift, ditherD
     }
     if (!found || cvv < IYH_FACE_COV.thr) continue
     const vc = cvv / 255
-    const gn = IYH_J_TONE[(pc + dOff) % IYH_J_SPEC.bw][(prr + dOff) % IYH_J_SPEC.bh]   // the drifting opacity mask tile
     const contrast = iiyhJContrast(vc)
     const isMain = vc >= 0.5
     const floor = focusShift ? IYH_J.focusFloor : IYH_J.canvasFloor
-    const level = isMain ? IYH_J.soft : Math.max(floor, contrast * iiyhJShim(i0, seed))   // steady base opacity
-    const mask = 1 - depth * (1 - gn)                                                      // opacity mask (scrolls -> drifts)
-    let a = level * mask
+    const level = isMain ? IYH_J.soft : Math.max(floor, contrast * iiyhJShim(i0, seed))   // signature base (coverage)
+    const t = tint(pc, prr)
+    const tintLevel = 1 - Math.floor(t * voc) / (voc - 1)      // snap to the tint VOCABULARY (a discrete opacity level)
+    const a = level * (1 - depthF + depthF * tintLevel)            // depth 0 = no crawl, depth 1 = full vocabulary drift
     if (a <= 0.01) continue
     ctx.globalAlpha = a
     ctx.fillRect(offX + pc*bwS + gapX/2, offY + prr*bhS + gapY/2, Math.max(0.5, bwS-gapX), Math.max(0.5, bhS-gapY))
@@ -2060,25 +2068,25 @@ function drawTuned(ctx, W, H, frame, seed, cov, focusShift, ditherDrift, ditherD
   ctx.globalAlpha = 1
 }
 
-let cov = null, frame = 0, t0 = performance.now()
+let cov = null, frame = 0, last = 0, t0 = performance.now()
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d')
 const $ = id => document.getElementById(id)
-$('speed').oninput=()=> $('speedv').textContent=(+$('speed').value).toFixed(1)+'×'
+$('rate').oninput=()=> $('ratev').textContent=+$('rate').value
 $('depth').oninput=()=> $('depthv').textContent=$('depth').value+'%'
+$('voc').oninput=()=> $('vocv').textContent=$('voc').value
 function focusAt(t){ const c=1700; return (t%c)>=1300 }
 (async () => {
   cov = await iiyhRasterizeTemplateCoverage('neutral-pencil')
   document.title='READY'
-  function loop(now){
-    const speed=+$('speed').value, depth=+$('depth').value
-    frame += speed*(1/60)                 // the opacity mask scrolls at Drift-speed (NO positional move)
+  function loop(){
+    const now = performance.now()
+    const rate=+$('rate').value, depth=+$('depth').value, voc=+$('voc').value
+    frame += 1                    // 12fps cadence -> crawlFrame = frame/12 = 1/second
     const fs = $('fshift').checked ? focusAt(now-t0) : false
-    drawTuned(ctx, cv.width, cv.height, frame, 7, cov, fs, speed, depth)   // speed also scales the mask scroll
-    const ph=$('phase'); ph.textContent = fs ? 'FOCUS-SHIFT (faint parts lifted)' : 'NORMAL (main lines focus)'
-    ph.className = 'phase ' + (fs?'shift':'normal')
-    requestAnimationFrame(loop)
+    drawTuned(ctx, cv.width, cv.height, frame/12, 7, cov, fs, rate, depth, voc)
+    if (now-last > 480){ const l=$('litout'); if(l) l.textContent = litCount(ctx) + ' lit bricks (fixed face, tints crawling)'; last=now }
   }
-  requestAnimationFrame(loop)
+  setInterval(loop, Math.round(1000/12))
 })()
 </script>
 </body></html>

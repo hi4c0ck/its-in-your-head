@@ -1910,8 +1910,9 @@ const IYH_J = {
   shiftHoldMs: 1300,   // normal phase (main lines in focus) before the focus shift
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
-  ditherDrift: 1.0,    // offsetting dither mask: the IYH_J_TONE tiles scroll this many cells/frame (the OPACITY drift)
-  ditherDepth: 0.7,    // how hard the scrolling opacity mask modulates each brick's alpha (0=steady, 1=full)
+  crawlRate: 1.0,     // v15 tint-vocabulary crawl speed (tint shifts per second, slow) — the dither is the source of the tints
+    tintVocab: 5,       // number of discrete tint levels in the crawling vocabulary
+  ditherDepth: 0.7,    // v15 the crawl depth: how hard the tint-vocabulary levels modulate each brick's opacity (0=steady, 1=full)
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
   lift: 0.06,             // brightness lift -> effFloor = floor + lift
   tint: 0.10,             // gamma: pow(v.c, 1 + 1.5*tint)
@@ -2011,6 +2012,18 @@ function iiyhBrickDriftX(frame, vw) {
 // Arccosine contrast spline: input "confidence" c in [0,1] (the brick's pooled
 // coverage) -> contrast in [0,1], smooth ease-out that reaches FULL (1.0) at
 // c >= IYH_J.accentConf (0.83+). Higher-confidence bricks read brighter.
+// v15: the DITHER is the source of the TINT VOCABULARY — a small set of discrete opacity levels
+// that CRAWLS slowly + non-diagonally (a hash step, not a diagonal scroll). Each brick keeps its
+// SHAPE (from the coverage); only its tint (an opacity level from the vocabulary) re-assigns, step
+// by step. step is in "seconds" (frame/12); vocab = the number of discrete tint levels.
+function iiyhJCrawlTint(pc, prr, step, vocab) {
+  let h = (pc * 2654435761) ^ (prr * 40503) ^ ((step | 0) * 2246822519)
+  h = Math.abs(h) >>> 0
+  h = ((h ^ (h >>> 13)) * 0x5bd1e996) >>> 0
+  const t = (h % 100000) / 100000
+  const v = vocab > 1 ? vocab : 2
+  return 1 - Math.floor(t * v) / (v - 1)   // snap to a discrete tint level (the vocabulary)
+}
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1
   if (c <= 0) return 0
@@ -2106,8 +2119,8 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const offX = (W - 720 * scale) / 2, offY = (H - 760 * scale) / 2
   const bwS = bw * scale, bhS = bh * scale
   const gapX = bwS * p, gapY = bhS * p                         // grout gap (px), proportional to brick
-  const drift = 0                                             // face position FIXED (no whole-picture sway); the drift is the scrolling opacity mask below
-  const dOff = (frame * (IYH_J.ditherDrift || 0)) | 0          // offsetting dither mask: scroll the grain tiles -> drift
+  const drift = 0                                             // v15: face position FIXED (no whole-picture sway); the drift is the crawling TINT vocabulary
+  const crawlStep = Math.floor((frame / 12) * (IYH_J.crawlRate || 0))   // frame is 12fps ticks -> step = seconds * crawlRate (slow, non-diagonal)
   ctx.fillStyle = iiyhJResolveAccent()                           // pane accent; alpha via globalAlpha
   for (let prr = 0; prr < pm; prr++) for (let pc = 0; pc < pn; pc++) {
     let cvv = 0, i0 = -1, found = false
@@ -2121,13 +2134,15 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     }
     if (!found || cvv < IYH_FACE_COV.thr) continue
     const vc = cvv / 255                                       // brick "confidence" 0..1
-    const gn = IYH_J_TONE[(pc + dOff) % IYH_J_SPEC.bw][(prr + dOff) % IYH_J_SPEC.bh]   // the drifting OPACITY-mask tile
     const contrast = iiyhJContrast(vc)                          // acos spline: [0,1], full at accentConf (0.83+)
     const isMain = vc >= 0.5                                    // the darker strokes -> FULL intensity (pop vs the body)
     const floor = focusShift ? IYH_J.focusFloor : IYH_J.canvasFloor   // focus shift: lift the faint parts into focus (NO inversion / no folding)
     const level = isMain ? IYH_J.soft : Math.max(floor, contrast * iiyhJShim(i0, seed))   // steady base opacity
-    const mask = 1 - (IYH_J.ditherDepth || 0) * (1 - gn)        // the scrolling OPACITY mask -> the texture drifts, the picture holds
-    let a = level * mask                                        // position fixed; only the opacity drifts
+    // v15: the DITHER is the source of the TINT VOCABULARY — each brick keeps its SHAPE; a small set of
+    // discrete opacity levels CRAWLS slowly + non-diagonally (a hash step), re-assigning this brick's tint
+    const depthF = IYH_J.ditherDepth || 0
+    const t = iiyhJCrawlTint(pc, prr, crawlStep, IYH_J.tintVocab || 5)
+    let a = level * (1 - depthF + depthF * t)                  // face fixed; only the tints crawl (opacity)
     if (a <= 0.01) continue
     ctx.globalAlpha = a
     ctx.fillRect(offX + pc * bwS + drift + gapX / 2, offY + prr * bhS + gapY / 2,
@@ -2135,7 +2150,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   }
   ctx.globalAlpha = 1
 }
-// iiyhJCanvas v14: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + OPACITY-MASK DRIFT: face position is FIXED (no whole-picture sway); the drift = the scrolling IYH_J_TONE opacity mask modulating each brick's alpha (IYH_J.ditherDrift scroll rate + IYH_J.ditherDepth modulation depth) -> the texture drifts, the picture holds + contain-fit + PULSE fills remaining height. Tune IYH_J.ditherDrift/ditherDepth (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
+// iiyhJCanvas v15: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + CRAWLING TINT-VOCABULARY DRIFT: face position is FIXED (no whole-picture sway); the DITHER is the source of a small TINT VOCABULARY — discrete opacity levels that crawl slowly + non-diagonally (a hash step) re-assigning each brick's tint (IYH_J.crawlRate steps/second + IYH_J.ditherDepth crawl depth + IYH_J.tintVocab vocabulary size) -> the picture holds, only the tints shimmer + contain-fit + PULSE fills remaining height. Tune IYH_J.crawlRate/ditherDepth/tintVocab (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
 // Self-driven 12fps canvas renderer. The pane's OWN rAF loop (throttled to
 // IYH_BRICK_FPS) draws the field each frame — not a static image. Started when
 // active, re-fit on resize, stopped on cleanup. Returns the <canvas> ref to attach.
