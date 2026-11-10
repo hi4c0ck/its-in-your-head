@@ -3472,6 +3472,30 @@ function pulseBubblePath(box, metric, slotIndex, capacity) {
   var y = h * ((Math.max(0, Number(slotIndex) || 0) + 0.5) / cap);
   return { spawn: { x: x, y: h }, target: { x: x, y: y } };
 }
+// One flight's integer-pixel geometry: the sprite is a 4px-wide column
+// (three 4px cells) SPAWNed bottom-flush on the surface edge and
+// landing CENTERED on the destination cell. Every coordinate is a
+// whole pixel (no subpixel start), and the animation name + keyframe
+// string derive from the same (dist, n) pair, so the element and its
+// keyframes can never drift apart.
+function pulseBubbleFlight(box, metric, slotIndex, capacity) {
+  var path = pulseBubblePath(box, metric, slotIndex, capacity);
+  var left = Math.round(path.spawn.x) - 2; // center the 4px column on the lane centerline
+  var top = Math.round(path.spawn.y) - 12; // bottom flush at the surface edge
+  var dy = Math.round(path.target.y - 6 - top); // end: column centered on the cell
+  var dist = Math.abs(dy);
+  var n = pulseTravelSteps(dist);
+  return {
+    left: Math.max(0, left),
+    top: Math.max(0, top),
+    dy: dy,
+    dist: dist,
+    steps: n,
+    targetY: path.target.y,
+    animationName: 'iyh-bubble-travel-' + dist + '-' + n,
+    keyframes: pulseTravelKeyframes(dy),
+  };
+}
 function prefersReducedMotion(media) {
   return !!(media && media.matches === true);
 }
@@ -3778,12 +3802,52 @@ function createPulseBubbleCoordinator(opts) {
   };
 }
 // STAGE5-END
-// Bubble-travel keyframes: the bubble SPAWNS at the measured surface
-// bottom edge and travels to its destination cell via a per-element
-// transform (--dx/--dy set inline from pulseBubblePath) — no 24px
-// local hop, no mixed px/% coordinates (review fix 5).
+// Pixel-step travel (animation pass): the bubble SPAWNS at the measured
+// surface bottom edge and climbs its lane centerline to the destination
+// cell. The motion is a STAIRCASE, not a slide: per travel distance a
+// dedicated keyframe is generated whose every stop is an INTEGER pixel
+// translate (4px hops, the instrument's dot-matrix pixel unit) and whose
+// every segment holds-then-jumps (steps(1,end)) — saccades in the
+// portrait motion-grammar sense: moments of movement, no subpixel
+// frames, no mid-flight scaling, no smooth generic glide.
+const PULSE_TRAVEL_STEP_PX = 4; // one hop = one 4px dot-matrix cell
+const PULSE_TRAVEL_MIN_STEPS = 4;
+const PULSE_TRAVEL_MAX_STEPS = 24;
+// Hop count for a |dist| travel: ~one 4px hop per 4px, clamped so
+// short climbs still read as a staircase and long ones stay bounded.
+function pulseTravelSteps(dist) {
+  var d = Math.abs(Math.round(Number(dist) || 0));
+  return Math.max(PULSE_TRAVEL_MIN_STEPS,
+    Math.min(PULSE_TRAVEL_MAX_STEPS, Math.round(d / PULSE_TRAVEL_STEP_PX)));
+}
+// dist = |dy| rounded; n hops of ~4px each (clamped). Every stop is an
+// integer so the 4px-wide sprite lands on whole pixels at every frame
+// boundary; the final stop is EXACTLY dy (the cell-centered landing).
+function pulseTravelKeyframes(dy) {
+  var dist = Math.abs(Math.round(Number(dy) || 0));
+  var n = pulseTravelSteps(dist);
+  var sign = (Number(dy) || 0) < 0 ? -1 : 1;
+  var lines = ['0%{transform:translate(0,0);animation-timing-function:steps(1,end)}'];
+  for (var i = 1; i < n; i++) {
+    var off = Math.round((dist * i) / n); // integer, monotone
+    lines.push(Math.round((i * 10000) / n) / 100 + '%{transform:translate(0,'
+      + (sign * off) + 'px);animation-timing-function:steps(1,end)}');
+  }
+  lines.push('100%{transform:translate(0,' + (sign * dist) + 'px)}');
+  // Name is stable per (dist, n) — re-renders regenerate the identical
+  // string, so in-flight animations are never replaced.
+  return '@keyframes iyh-bubble-travel-' + dist + '-' + n
+    + '{' + lines.join('') + '}';
+}
+// Arrival STAMP: one 4px pixel on the landing axis, below the arriving
+// column — the signal settles INTO the destination cell. Three discrete
+// opacity steps (bright -> dim -> off) over BUBBLE_ARRIVAL_MS, no blur,
+// no cell-wide glow, no residual (the element is removed by the owning
+// sequence's clearFlash).
 const PULSE_GLOW_CSS =
-  '@keyframes iyh-bubble-travel{from{transform:translate(0,0);opacity:.25}to{transform:translate(var(--dx,0),var(--dy,0));opacity:.9}}';
+  '@keyframes iyh-bubble-stamp{0%,50%{opacity:.95;animation-timing-function:steps(1,end)}'
+  + '50%,80%{opacity:.45;animation-timing-function:steps(1,end)}'
+  + '80%,100%{opacity:0}}';
 
 // Stage 4 lane matrix: four equal independent lanes, each cell owns
 // its tool name + compact dot matrix. Text/dots stay at the readability
@@ -4059,14 +4123,23 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
           }),
         ],
       });
-    }), active5.map(function (t, idx) {
-      var path = pulseBubblePath(box5, t.metric, t.destinationSlot, cap);
-      // Pixel coordinates end-to-end: the bubble SPAWNS at the surface
-      // bottom edge and travels to the destination cell via --dx/--dy
-      // (iyh-bubble-travel keyframes) — one coordinate system, no
-      // mixed px/% (review fix 5).
-      var dx = path.target.x - path.spawn.x;
-      var dy = path.target.y - path.spawn.y;
+    }), (function () {
+      // Per-flight staircase keyframes: the DETERMINISTIC union over
+      // the current active set (dedupe by SIGNED dy, ascending) —
+      // re-renders regenerate the identical style node, so in-flight
+      // animations are never replaced or restarted.
+      var dySeen = [];
+      active5.forEach(function (t) {
+        var d = pulseBubbleFlight(box5, t.metric, t.destinationSlot, cap).dy;
+        if (dySeen.indexOf(d) < 0) dySeen.push(d);
+      });
+      dySeen.sort(function (a, b) { return a - b; });
+      var css = dySeen.map(function (d) {
+        return pulseTravelKeyframes(d);
+      }).join('');
+      return css ? [jsx('style', { key: 'pulse-travel-css', children: css })] : [];
+    })().concat(active5.map(function (t) {
+      var f = pulseBubbleFlight(box5, t.metric, t.destinationSlot, cap);
       return jsx('span', {
         key: 'bubble-' + t.sequence,
         'data-testid': 'pulse-bubble',
@@ -4074,35 +4147,51 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
         'data-reason': t.reason,
         title: t.tool + ' · ' + t.reason,
         style: {
-          position: 'absolute', width: 8, height: 8, borderRadius: 4,
-          background: 'var(--ui-accent)', opacity: 0.9, pointerEvents: 'none',
-          left: Math.max(0, path.spawn.x) + 'px',
-          top: Math.max(0, path.spawn.y - 8) + 'px',
-          '--dx': dx + 'px', '--dy': dy + 'px',
+          position: 'absolute', width: 4, height: 12, pointerEvents: 'none',
+          // Whole-pixel spawn: bottom-flush on the measured surface
+          // edge, centered on the lane centerline.
+          left: f.left + 'px', top: f.top + 'px',
           // Stable per-transition delay (coordinator-assigned): re-
           // renders of the active list can never rewrite this string,
           // so an in-flight animation is never restarted.
-          animation: 'iyh-bubble-travel ' + BUBBLE_TRAVEL_MS + 'ms linear '
+          animation: f.animationName + ' ' + BUBBLE_TRAVEL_MS + 'ms linear '
             + (t.staggerMs != null ? t.staggerMs : 0) + 'ms 1 both',
         },
+        // The signal sprite: three 4px cells (the instrument's
+        // dot-matrix unit) — bright head, stepped tail. Sharp edges,
+        // stepped opacity, no gradient, no blur, no rounded corners.
+        children: [0.95, 0.55, 0.25].map(function (o, i) {
+          return jsx('span', {
+            key: i,
+            style: {
+              display: 'block', width: 4, height: 4,
+              background: 'var(--ui-accent)', opacity: o,
+            },
+          });
+        }),
       });
-    }).concat(Object.keys(flashes).map(function (slotId) {
-      // Arrival flash on the DESTINATION CELL only (stable data-slot
-      // identity), never the whole grid.
+    })).concat(Object.keys(flashes).map(function (slotId) {
+      // Arrival stamp: ONE 4px pixel on the landing axis — the lane
+      // centerline 6px below the cell center (just under where the
+      // sprite lands) — the signal settles INTO the destination cell,
+      // same pixel geometry as the sprite. Three-step blink, no
+      // cell-wide glow, no residual (removed by the owning sequence's
+      // clearFlash; stable data-slot identity).
       var parts = slotId.split('|');
       var laneIdx = PULSE_LANE_ORDER.indexOf(parts[0]); if (laneIdx < 0) laneIdx = 0;
       var slotIndex = Number(parts[1]) || 0;
-      var laneW = box5.width / PULSE_LANE_ORDER.length;
-      var cellH = box5.height / cap;
+      var f = pulseBubbleFlight(box5, PULSE_LANE_ORDER[laneIdx], slotIndex, cap);
       return jsx('span', {
         key: 'flash-' + slotId,
         'data-testid': 'pulse-arrival-flash',
         'data-slot': slotId,
         style: {
           position: 'absolute', pointerEvents: 'none',
-          left: laneIdx * laneW + 'px', top: slotIndex * cellH + 'px',
-          width: laneW + 'px', height: cellH + 'px',
-          boxShadow: 'inset 0 0 8px 2px var(--ui-accent)', opacity: 0.6,
+          width: 4, height: 4,
+          background: 'var(--ui-accent)',
+          left: f.left + 'px',
+          top: Math.round(f.targetY + 6) + 'px',
+          animation: 'iyh-bubble-stamp ' + BUBBLE_ARRIVAL_MS + 'ms steps(1,end) 1 both',
         },
       });
     })).concat(hasEntries ? [] : [jsx('div', {

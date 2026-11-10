@@ -14,15 +14,23 @@ const dir = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(dir, '..', 'desktop', 'plugin.js'), 'utf8')
 const block = src.slice(src.indexOf('// STAGE5-START'), src.indexOf('// STAGE5-END'))
 assert.ok(block.length > 0, 'STAGE5 markers found')
-const api = new Function(block + `\n;return { PULSE_HYSTERESIS, BUBBLE_TRAVEL_MS, BUBBLE_ARRIVAL_MS,
+// Animation-pass extraction: the staircase generator + pixel-step
+// constants (module level, outside the STAGE5 markers).
+const kfSrc = src.slice(src.indexOf('const PULSE_TRAVEL_STEP_PX'), src.indexOf('// Arrival STAMP'))
+assert.ok(kfSrc.length > 0, 'pixel-step travel generator found')
+// The STAGE5 flight helper calls pulseTravelSteps at module scope;
+// give the extracted API the same scope (generator first, then block).
+const api = new Function(kfSrc + block + `\n;return { PULSE_HYSTERESIS, BUBBLE_TRAVEL_MS, BUBBLE_ARRIVAL_MS,
   MAX_CONCURRENT_BUBBLES, BUBBLE_STAGGER_MS, pulseQuantizedScore, pulseSemanticId, pulseSlotId,
   pulseSnapshotFromLanes, pulseSlotMap, pulseCommitLane, pulseLanesKey, detectPulseTransitions,
-  pulseBubblePath, prefersReducedMotion, createPulseBubbleCoordinator };`)()
+  pulseBubblePath, pulseBubbleFlight, prefersReducedMotion, createPulseBubbleCoordinator,
+  pulseTravelSteps, pulseTravelKeyframes };`)()
 const { PULSE_HYSTERESIS, BUBBLE_TRAVEL_MS, BUBBLE_ARRIVAL_MS, MAX_CONCURRENT_BUBBLES,
   BUBBLE_STAGGER_MS, pulseQuantizedScore, pulseSemanticId, pulseSlotId,
   pulseSnapshotFromLanes, pulseSlotMap, pulseCommitLane, pulseLanesKey,
-  detectPulseTransitions, pulseBubblePath, prefersReducedMotion,
+  detectPulseTransitions, pulseBubblePath, pulseBubbleFlight, prefersReducedMotion,
   createPulseBubbleCoordinator } = api
+const kfApi = { pulseTravelSteps: api.pulseTravelSteps, pulseTravelKeyframes: api.pulseTravelKeyframes }
 
 let n = 0
 const eq = (a, e, label) => { assert.deepEqual(a, e, label + ' (got ' + JSON.stringify(a) + ')'); console.log('ok ' + (++n) + ' - ' + label) }
@@ -339,20 +347,64 @@ eq(pulseSlotId('goal', 0), 'goal|0', 'visual slot identity metric|slotIndex')
   eq(c.getState().flashes, {}, 'stale clearFlash stays a no-op')
 }
 
+// Pixel-step travel generator (animation pass): the staircase is the
+// instrument's motion — integer 4px hops, hold-then-jump saccades, a
+// bounded hop count, and an element whose animation name and keyframes
+// are generated from the SAME (dist, n) pair so they cannot drift.
+{
+  const { pulseTravelSteps, pulseTravelKeyframes } = kfApi
+  eq(pulseTravelSteps(84), 21, '84px travel -> 21 hops (~4px each)')
+  eq(pulseTravelSteps(8), 4, 'short climbs clamp to the 4-hop floor (still a staircase)')
+  eq(pulseTravelSteps(1200), 24, 'long climbs clamp to the 24-hop bound')
+  const css = pulseTravelKeyframes(-84)
+  ok(css.startsWith('@keyframes iyh-bubble-travel-84-21{'), 'keyframe name is stable per (dist, steps)')
+  ok(css.endsWith('100%{transform:translate(0,-84px)}}'), 'final stop is EXACTLY the distance (cell-centered landing)')
+  const stops = Array.from(css.matchAll(/translate\(0,(-?\d+)(?:px)?\)/g), (m) => Number(m[1]))
+  eq(stops[0], 0, 'staircase starts at the spawn (no offset)')
+  eq(stops[stops.length - 1], -84, 'staircase ends at the full distance')
+  ok(stops.every((v) => Number.isInteger(v)), 'every stop is a whole pixel (no subpixel frames)')
+  ok(stops.every((v, i) => i === 0 || v <= stops[i - 1]), 'stops are monotone upward (no backward jitter)')
+  ok(css.split('animation-timing-function:steps(1,end)').length - 1 === stops.length - 1,
+    'every segment is hold-then-jump (steps(1,end)) — saccades, not a glide')
+  // Flight geometry: whole-pixel spawn/landing derived from the measured box
+  const f = pulseBubbleFlight({ width: 400, height: 96 }, 'live', 0, 4)
+  eq(f.left, 48, 'sprite centered on the lane centerline (50 - 2px half-width, whole pixel)')
+  eq(f.top, 84, 'spawn bottom-flush on the surface edge (96 - 12px sprite height)')
+  eq(f.dy, -78, 'landing cell-centered (target.y 12; 12 - 6 - 84)')
+  eq(f.animationName, 'iyh-bubble-travel-78-20', 'animation name pairs with the generated keyframe')
+  ok(f.keyframes === pulseTravelKeyframes(f.dy), 'element keyframes and animation name derive from the same flight (no drift)')
+  const f2 = pulseBubbleFlight({ width: 400, height: 96 }, 'friction', 2, 4)
+  eq(f2.left, 348, 'fourth lane centerline (350 - 2px)')
+  eq(f2.top, 84, 'every flight spawns bottom-flush regardless of destination')
+  eq(f2.dy, -30, 'deeper slot -> shorter climb (target.y 60; 60 - 6 - 84)')
+}
+
 // Source pins: wired into PulseLanes, UI-only (no backend schema fields).
+// Animation pass (pixel-synthwave integration): the bubble is now a 4px
+// dot-matrix column sprite climbing a generated per-distance STAIRCASE
+// (integer 4px hops, steps(1,end) saccades) with a 4px arrival STAMP on
+// the landing axis — replacing the rounded 8px dot + linear slide +
+// whole-cell inset glow. Behaviour contracts below are unchanged.
 {
   const lanesSrc = src.slice(src.indexOf('function PulseLanes'), src.indexOf('function IoLine'))
   ok(lanesSrc.includes('createPulseBubbleCoordinator'), 'PulseLanes owns the coordinator')
   ok(lanesSrc.includes('prefers-reduced-motion'), 'reduced-motion read via matchMedia in PulseLanes')
-  ok(lanesSrc.includes('pulse-bubble') && lanesSrc.includes('pulseBubblePath'), 'bubble overlay rendered surface-relative')
+  ok(lanesSrc.includes('pulse-bubble') && lanesSrc.includes('pulseBubbleFlight'),
+    'bubble overlay rendered surface-relative (integer-pixel flight helper)')
   ok(lanesSrc.includes('BUBBLE_TRAVEL_MS') && lanesSrc.includes('BUBBLE_ARRIVAL_MS'), 'named timing constants used in PulseLanes')
   ok(!lanesSrc.includes('destination_slot'), 'no destination_slot in lane UI (desktop resolves slot, backend schema clean)')
-  ok(src.includes('iyh-bubble-travel'), 'bubble travel keyframes present (bottom-edge -> cell, one px coordinate system)')
+  ok(src.includes('iyh-bubble-travel'), 'bubble travel keyframe family present (bottom-edge -> cell, one px coordinate system)')
   ok(!src.includes('iyh-bubble-rise'), 'old 24px local-hop keyframe removed')
+  ok(src.includes('pulseTravelKeyframes') && src.includes('PULSE_TRAVEL_STEP_PX'),
+    'per-distance staircase keyframes are generated (4px pixel-unit hops, clamped hop count)')
+  ok(src.includes('steps(1,end)'), 'travel/stamp segments are hold-then-jump saccades (no smooth glide, no subpixel frames)')
+  ok(src.includes('iyh-bubble-stamp'), 'arrival stamp keyframes present')
+  ok(!lanesSrc.includes('inset 0 0 8px'), 'the old whole-cell inset glow is gone')
+  ok(!/pulse-bubble[\s\S]{0,400}?borderRadius/.test(lanesSrc), 'the bubble sprite has sharp edges (no rounded corners, no antialiased dot)')
   ok(/Unmount/.test(lanesSrc) && lanesSrc.includes('clearTimeout'),
     'unmount effect cancels every travel/flash timer (timers live in refs)')
-  ok(lanesSrc.includes("'--dx': dx + 'px'") && lanesSrc.includes("'--dy': dy + 'px'"),
-    'the travel transform is px (--dx/--dy from the measured pulseBubblePath, no px/% mix)')
+  ok(lanesSrc.includes('f.animationName') && lanesSrc.includes("left: f.left + 'px'"),
+    'spawn + travel are whole-pixel px (flight helper from the measured pulseBubblePath; no px/% mix, no CSS-variable transform)')
   ok(lanesSrc.includes('t.staggerMs != null ? t.staggerMs : 0'),
     'animation delay + travel timer share the stable staggerMs (no render-index rewrite, no animation restart)')
   ok(lanesSrc.includes('(arr.promoted || []).forEach(scheduleArrival)'),

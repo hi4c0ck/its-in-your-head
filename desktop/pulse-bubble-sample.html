@@ -1,0 +1,348 @@
+<!doctype html>
+<!--
+  desktop/pulse-bubble-sample.html — PULSE activity-bubble animation
+  verification harness (animation pass, pixel-synthwave integration).
+
+  Replicates the exact renderer from desktop/plugin.js (PulseLanes
+  bubble overlay + arrival stamp) at two compositions:
+    - STRIP:   400 x 96, capacity 4 (the compact bottom strip)
+    - SIDEBAR: 400 x 600, capacity 8 (the tall sidebar surface)
+  and the OLD renderer (8px rounded dot + linear slide + inset glow)
+  for the before/after comparison.
+
+  Copied-verbatim units (must stay in sync with desktop/plugin.js):
+    pulseBubblePath / pulseBubbleFlight / pulseTravelSteps /
+    pulseTravelKeyframes / PULSE_GLOW_CSS (iyh-bubble-stamp)
+    sprite cells [0.95, 0.55, 0.25] / travel 450ms / arrival 150ms /
+    cap 4 / stagger 60ms.
+  Run: open the file directly (no server needed).
+-->
+<style>
+  :root {
+    --ui-accent: #35C8FF;
+    --ui-bg: #0B0E1A;
+    --ui-panel: #101527;
+    --ui-stroke: #1E2740;
+    --ui-text: #8FA3C8;
+    --ui-text-dim: #3E4A66;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ui-bg); color: var(--ui-text);
+    font: 12px/1.4 ui-monospace, Consolas, monospace; padding: 20px; }
+  h1 { font-size: 13px; letter-spacing: .08em; color: #C8D6F0; margin: 0 0 4px; }
+  .row { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+  .panel { background: var(--ui-panel); border: 1px solid var(--ui-stroke);
+    padding: 10px; }
+  .panel h2 { font-size: 11px; margin: 0 0 8px; color: var(--ui-text);
+    letter-spacing: .1em; }
+  .surface { position: relative; overflow: hidden; background: #0D1120;
+    border: 1px solid var(--ui-stroke); }
+  .grid { display: grid; position: absolute; inset: 0; }
+  button { background: #141B31; color: #9FB4DE; border: 1px solid var(--ui-stroke);
+    font: inherit; padding: 5px 9px; cursor: pointer; }
+  button:hover { background: #1A2340; }
+  .hint { color: var(--ui-text-dim); margin: 8px 0; font-size: 11px; }
+  .tag { position: absolute; left: 4px; top: 2px; font-size: 9px;
+    color: var(--ui-text-dim); letter-spacing: .1em; pointer-events: none; }
+</style>
+<div class="panel">
+  <h1>PULSE — activity-bubble animation pass (pixel-synthwave)</h1>
+  <div class="hint">
+    NEW: 4px column sprite · 4px integer staircase (steps(1,end) saccades) · 4px landing stamp.
+    BEFORE panel (top-right): old 8px rounded dot · linear slide · whole-cell inset glow.
+  </div>
+  <div class="row">
+    <button id="btn-single">single bubble</button>
+    <button id="btn-rep">repeated (same tool ×3)</button>
+    <button id="btn-conc">4 concurrent (60ms stagger)</button>
+    <button id="btn-ovf">overflow ×7 (cap 4)</button>
+    <button id="btn-promote" disabled>PROMOTE held (FIFO)</button>
+    <button id="btn-both">strip + sidebar pair</button>
+    <button id="btn-ba">before / after</button>
+    <button id="btn-resize">resize mid-flight</button>
+    <button id="btn-rm">reduced motion</button>
+  </div>
+  <div id="rm-note" class="hint" style="display:none">reduced-motion: commit lands instantly, no travel, no stamp.</div>
+</div>
+<div class="row" style="margin-top:14px">
+  <div class="panel">
+    <h2>STRIP · 400×96 · cap 4 (compact bottom)</h2>
+    <div id="strip-new" class="surface"><div class="tag">NEW · strip</div></div>
+  </div>
+  <div class="panel">
+    <h2>SIDEBAR · 400×600 · cap 8 (tall)</h2>
+    <div id="side-new" class="surface"><div class="tag">NEW · sidebar</div></div>
+  </div>
+  <div class="panel">
+    <h2>BEFORE · old renderer (8px dot + inset glow)</h2>
+    <div id="old" class="surface"><div class="tag">OLD</div></div>
+  </div>
+</div>
+<script>
+'use strict';
+// ------------------------------------------------------------------
+// Verbatim units from desktop/plugin.js (animation pass)
+// ------------------------------------------------------------------
+const PULSE_TRAVEL_MS = 450, BUBBLE_ARRIVAL_MS = 150,
+      MAX_CONCURRENT_BUBBLES = 4, BUBBLE_STAGGER_MS = 60;
+const PULSE_LANE_ORDER = ['live', 'goal', 'good', 'friction'];
+const PULSE_TRAVEL_STEP_PX = 4;
+const PULSE_TRAVEL_MIN_STEPS = 4;
+const PULSE_TRAVEL_MAX_STEPS = 24;
+function pulseTravelSteps(dist) {
+  var d = Math.abs(Math.round(Number(dist) || 0));
+  return Math.max(PULSE_TRAVEL_MIN_STEPS,
+    Math.min(PULSE_TRAVEL_MAX_STEPS, Math.round(d / PULSE_TRAVEL_STEP_PX)));
+}
+function pulseTravelKeyframes(dy) {
+  var dist = Math.abs(Math.round(Number(dy) || 0));
+  var n = pulseTravelSteps(dist);
+  var sign = (Number(dy) || 0) < 0 ? -1 : 1;
+  var lines = ['0%{transform:translate(0,0);animation-timing-function:steps(1,end)}'];
+  for (var i = 1; i < n; i++) {
+    var off = Math.round((dist * i) / n);
+    lines.push(Math.round((i * 10000) / n) / 100 + '%{transform:translate(0,'
+      + (sign * off) + 'px);animation-timing-function:steps(1,end)}');
+  }
+  lines.push('100%{transform:translate(0,' + (sign * dist) + 'px)}');
+  return '@keyframes iyh-bubble-travel-' + dist + '-' + n
+    + '{' + lines.join('') + '}';
+}
+const PULSE_GLOW_CSS =
+  '@keyframes iyh-bubble-stamp{0%,50%{opacity:.95;animation-timing-function:steps(1,end)}'
+  + '50%,80%{opacity:.45;animation-timing-function:steps(1,end)}'
+  + '80%,100%{opacity:0}}';
+const OLD_TRAVEL_CSS =
+  '@keyframes iyh-bubble-travel-old{from{transform:translate(0,0);opacity:.25}to{transform:translate(var(--dx,0),var(--dy,0));opacity:.9}}';
+function pulseBubblePath(box, metric, slotIndex, capacity) {
+  var w = Number(box.width) || 0, h = Number(box.height) || 0;
+  var cap = Math.max(1, Math.floor(Number(capacity) || 1));
+  var laneIdx = PULSE_LANE_ORDER.indexOf(metric);
+  if (laneIdx < 0) laneIdx = 0;
+  var x = w * ((laneIdx + 0.5) / PULSE_LANE_ORDER.length);
+  var y = h * ((Math.max(0, Number(slotIndex) || 0) + 0.5) / cap);
+  return { spawn: { x: x, y: h }, target: { x: x, y: y } };
+}
+function pulseBubbleFlight(box, metric, slotIndex, capacity) {
+  var path = pulseBubblePath(box, metric, slotIndex, capacity);
+  var left = Math.round(path.spawn.x) - 2;
+  var top = Math.round(path.spawn.y) - 12;
+  var dy = Math.round(path.target.y - 6 - top);
+  var dist = Math.abs(dy);
+  var n = pulseTravelSteps(dist);
+  return { left: Math.max(0, left), top: Math.max(0, top), dy: dy, dist: dist,
+    steps: n, animationName: 'iyh-bubble-travel-' + dist + '-' + n,
+    keyframes: pulseTravelKeyframes(dy), targetY: path.target.y };
+}
+// ------------------------------------------------------------------
+// Scene: one PULSE surface (cells + label/dot content)
+// ------------------------------------------------------------------
+const TOOLS = {
+  live: ['terminal', 'execute_code', 'patch', 'read_file'],
+  goal: ['web_search', 'browser_exec', 'vision_analyze', 'skill_view'],
+  good: ['memory', 'kanban_create', 'clarify', 'text_to_speech'],
+  friction: ['git', 'cargo build', 'pytest', 'node --check'],
+};
+const DOT_VALUES = [0.75, 0.35, 0.0, 0.55, 0.9, 0.2, null, 0.4];
+
+function buildSurface(host, w, h, cap) {
+  host.innerHTML = '';
+  host.style.width = w + 'px'; host.style.height = h + 'px';
+  const grid = document.createElement('div');
+  grid.className = 'grid';
+  grid.style.cssText = 'display:grid;position:absolute;inset:0;grid-template-columns:repeat(4, minmax(0,1fr));gap:2px 3px;height:100%;';
+  PULSE_LANE_ORDER.forEach(function (lane, li) {
+    const col = document.createElement('div');
+    col.style.cssText = 'display:grid;grid-template-rows:repeat(' + cap + ',1fr);';
+    const names = TOOLS[lane];
+    for (let r = 0; r < cap; r++) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:4px;min-height:14px;overflow:hidden;position:relative;';
+      const label = document.createElement('span');
+      label.textContent = r < names.length ? names[r] : '';
+      label.style.cssText = 'flex:1 1 auto;font-size:9px;line-height:14px;color:var(--ui-text-secondary,#8FA3C8);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+      const dots = document.createElement('span');
+      dots.style.cssText = 'display:inline-grid;grid-template-columns:repeat(4,4px);gap:1px;flex-shrink:0;';
+      const v = r < DOT_VALUES.length ? DOT_VALUES[(li + r) % DOT_VALUES.length] : null;
+      const filled = v === null ? 0 : Math.round(v * 12);
+      for (let d = 0; d < 12; d++) {
+        const dot = document.createElement('span');
+        dot.style.cssText = 'width:4px;height:4px;border-radius:2px;background:var(--ui-accent);opacity:' + (d < filled ? 0.9 : 0.15) + ';';
+        dots.appendChild(dot);
+      }
+      row.appendChild(label); row.appendChild(dots);
+      col.appendChild(row);
+    }
+    grid.appendChild(col);
+  });
+  host.appendChild(grid);
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:absolute;inset:0;pointer-events:none;';
+  const styleEl = document.createElement('style');
+  styleEl.textContent = PULSE_GLOW_CSS;
+  overlay.appendChild(styleEl);
+  host.appendChild(overlay);
+  return { overlay: overlay, styleEl: styleEl, box: { width: w, height: h }, cap: cap };
+}
+
+// Bubble flight (NEW renderer: 4px column sprite + staircase + stamp)
+let seq = 0;
+function launch(surf, metric, slot, staggerMs, opts) {
+  opts = opts || {};
+  const f = pulseBubbleFlight(surf.box, metric, slot, surf.cap);
+  const el = document.createElement('span');
+  el.dataset.kind = 'bubble';
+  el.style.cssText = 'position:absolute;width:4px;height:12px;pointer-events:none;'
+    + 'left:' + f.left + 'px;top:' + f.top + 'px;'
+    + 'animation:' + f.animationName + ' ' + PULSE_TRAVEL_MS + 'ms linear '
+    + (staggerMs || 0) + 'ms 1 both;';
+  [0.95, 0.55, 0.25].forEach(function (o) {
+    const c = document.createElement('span');
+    c.style.cssText = 'display:block;width:4px;height:4px;background:var(--ui-accent);opacity:' + o + ';';
+    el.appendChild(c);
+  });
+  // inject the flight's keyframes into the surface style (deterministic union)
+  surf.styleEl.textContent += f.keyframes;
+  surf.overlay.appendChild(el);
+  if (!window.PULSE_CAPTURE) { // deterministic frame capture: no timer removals
+    const t = setTimeout(function () {
+      el.remove();
+      if (opts.reduced) return; // reduced motion: no arrival stamp
+      spawnStamp(surf, f);
+    }, PULSE_TRAVEL_MS + (staggerMs || 0));
+  }
+  seq++;
+  return seq;
+}
+function spawnStamp(surf, f) {
+  const stamp = document.createElement('span');
+    stamp.dataset.kind = 'stamp';
+    stamp.style.cssText = 'position:absolute;width:4px;height:4px;pointer-events:none;'
+      + 'background:var(--ui-accent);left:' + f.left + 'px;top:' + Math.round(f.targetY + 6) + 'px;'
+      + 'animation:iyh-bubble-stamp ' + BUBBLE_ARRIVAL_MS + 'ms steps(1,end) 1 both;';
+    surf.overlay.appendChild(stamp);
+    if (!window.PULSE_CAPTURE) setTimeout(function () { stamp.remove(); }, BUBBLE_ARRIVAL_MS + 20);
+}
+// OLD renderer (the before state: 8px rounded dot, linear slide, inset glow)
+function launchOld(surf, metric, slot, staggerMs) {
+  const p = pulseBubblePath(surf.box, metric, slot, surf.cap);
+  const dx = p.target.x - p.spawn.x, dy = p.target.y - p.spawn.y;
+  const el = document.createElement('span');
+  el.dataset.kind = 'bubble-old';
+  el.style.cssText = 'position:absolute;width:8px;height:8px;border-radius:4px;'
+    + 'background:var(--ui-accent);opacity:.9;pointer-events:none;'
+    + 'left:' + Math.max(0, p.spawn.x) + 'px;top:' + Math.max(0, p.spawn.y - 8) + 'px;'
+    + '--dx:' + dx + 'px;--dy:' + dy + 'px;'
+    + 'animation:iyh-bubble-travel-old ' + PUBY_TRAVEL_MS_SAFETY() + 'ms linear '
+    + (staggerMs || 0) + 'ms 1 both;';
+  surf.overlay.appendChild(el);
+  if (!window.PULSE_CAPTURE) setTimeout(function () {
+    el.remove();
+    const laneIdx = PULSE_LANE_ORDER.indexOf(metric), cap = surf.cap;
+    const laneW = surf.box.width / 4, cellH = surf.box.height / cap;
+    const glow = document.createElement('span');
+    glow.dataset.kind = 'flash-old';
+    glow.style.cssText = 'position:absolute;pointer-events:none;left:' + (laneIdx * laneW) + 'px;top:'
+      + (slot * cellH) + 'px;width:' + laneW + 'px;height:' + cellH + 'px;'
+      + 'box-shadow:inset 0 0 8px 2px var(--ui-accent);opacity:.6;';
+    surf.overlay.appendChild(glow);
+    setTimeout(function () { glow.remove(); }, BUBBLE_ARRIVAL_MS);
+  }, PULSE_TRAVEL_MS + (staggerMs || 0));
+}
+function PUBY_TRAVEL_MS_SAFETY() { return PULSE_TRAVEL_MS; }
+
+// ------------------------------------------------------------------
+// Two compositions + controls
+// ------------------------------------------------------------------
+const stripHost = document.getElementById('strip-new');
+const sideHost = document.getElementById('side-new');
+const oldHost = document.getElementById('old');
+const strip = buildSurface(stripHost, 400, 96, 4);
+const side = buildSurface(sideHost, 400, 600, 8);
+const old = buildSurface(oldHost, 400, 96, 4);
+old.styleEl.textContent = OLD_TRAVEL_CSS;
+
+const randLane = () => PULSE_LANE_ORDER[Math.floor(Math.random() * 4)];
+// Mutable holder: the resize handler rebuilds the sidebar surface;
+// every launcher goes through holders so it always targets the live one.
+const holders = { side: null, strip: null, old: null };
+holders.side = side; holders.strip = strip; holders.old = old;
+function clearAll() {
+  [holders.side, holders.strip, holders.old].forEach(function (s) {
+    s.overlay.querySelectorAll('[data-kind]').forEach(function (e) { e.remove(); });
+    s.styleEl.textContent = s === holders.old ? OLD_TRAVEL_CSS : PULSE_GLOW_CSS;
+  });
+}
+window.PULSE_SAMPLE = {
+  single: function () { clearAll(); launch(holders.side,  randLane(), Math.floor(Math.random() * 8), 0); },
+  repeated: function () { clearAll(); const l = 'live'; [0, 0, 0].forEach(function (_, i) { launch(holders.side,  l, 0, i * BUBBLE_STAGGER_MS); }); },
+  concurrent4: function () { clearAll(); PULSE_LANE_ORDER.forEach(function (l, i) { launch(holders.side,  l, 2, i * BUBBLE_STAGGER_MS); }); },
+  overflowPromote: function () {
+    clearAll();
+    // 7 flights against cap 4: four travel now, three stay QUEUED (FIFO)
+    const queued = [];
+    for (let i = 0; i < 7; i++) {
+      const l = PULSE_LANE_ORDER[i % 4], s = i % 8;
+      if (i < MAX_CONCURRENT_BUBBLES) launch(holders.side,  l, s, i * BUBBLE_STAGGER_MS);
+      else queued.push({ l: l, s: s });
+    }
+    this._queued = queued;
+    const b = document.getElementById('btn-promote');
+    b.disabled = false;
+    b.textContent = 'PROMOTE ' + queued.length + ' held (FIFO)';
+  },
+  promote: function () {
+    const q = this._queued || [];
+    q.forEach(function (t, i) { launch(holders.side,  t.l, t.s, i * BUBBLE_STAGGER_MS); });
+    this._queued = [];
+    const b = document.getElementById('btn-promote');
+    b.disabled = true; b.textContent = 'PROMOTE held (FIFO)';
+  },
+  stripVsSide: function () { clearAll(); const l = 'good'; launch(holders.strip,  l, 1, 0); launch(holders.side,  l, 3, 0); },
+  beforeAfter: function () {
+    clearAll();
+    launchOld(holders.old,  'live', 0, 0);   // BEFORE: old dot + slide + inset glow
+    launch(holders.side,  'live', 0, 0);     // AFTER: sprite + staircase + stamp
+    launchOld(holders.old,  'friction', 2, 0);
+    launch(holders.side,  'friction', 5, 0);
+  },
+  resizeDuringTravel: function () {
+    clearAll();
+    launch(holders.side,  'goal', 3, 0);
+    launch(holders.side,  'live', 1, 0);
+    setTimeout(function () {
+      // cap 8 -> cap 4 mid-flight: cancel in-flight flights (coord.resize
+      // contract), rebuild the surface, nothing lands on obsolete coords
+      clearAll();
+      holders.side = buildSurface(sideHost, 400, 600, 4); // cap now 4: in-flight flights cancelled
+    }, 200);
+  },
+  reducedMotion: function () {
+    clearAll();
+    launch(holders.side,  'live', 0, 0, { reduced: true }); // instant commit, no stamp
+    document.getElementById('rm-note').style.display = 'block';
+  },
+};
+document.getElementById('btn-single').onclick = PULSE_SAMPLE.single;
+document.getElementById('btn-rep').onclick = PULSE_SAMPLE.repeated;
+document.getElementById('btn-conc').onclick = PULSE_SAMPLE.concurrent4;
+document.getElementById('btn-ovf').onclick = PULSE_SAMPLE.overflowPromote;
+document.getElementById('btn-promote').onclick = PULSE_SAMPLE.promote;
+document.getElementById('btn-both').onclick = PULSE_SAMPLE.stripVsSide;
+document.getElementById('btn-ba').onclick = PULSE_SAMPLE.beforeAfter;
+document.getElementById('btn-resize').onclick = PULSE_SAMPLE.resizeDuringTravel;
+document.getElementById('btn-rm').onclick = PULSE_SAMPLE.reducedMotion;
+// Deterministic frame-capture hook (scrub travel animations, spawn stamps on demand)
+window.PULSE_DEBUG = { spawnStamp: spawnStamp, flight: pulseBubbleFlight,
+  scrub: function (ms, kind) {
+    document.getAnimations().forEach(function (a) {
+      var t = a.effect && a.effect.target;
+      var k = t && t.dataset ? t.dataset.kind : null;
+      a.pause();
+      a.currentTime = (kind && k && k !== kind) ? 0 : ms;
+    });
+  } };
+// Auto-run: the before/after pair once on load (for screenshots)
+PULSE_SAMPLE.beforeAfter();
+</script>
+</body>
