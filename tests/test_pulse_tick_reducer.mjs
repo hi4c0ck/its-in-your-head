@@ -5,10 +5,12 @@
 //       overlapping refreshes; cancel tears the window down.
 //   A — coordinator.activity(): same tool called N times = N distinct
 //       FIFO bubbles (identity evt|<eventId>); redelivery dedupe by
-//       watermark; unroutable tools (hidden or off-lane) HOLD in the
-//       unbounded FIFO queue until their LIVE cell exists (never
-//       dropped, never foreign-routed, never evicted); rePromoteHeld()
-//       re-resolves the queue on lane/capacity change; V1 hold of
+//       watermark; unroutable tools (hidden or off-lane) are ACCEPTED
+//       but NOT buffered in renderer memory (v0.1.11 B, cursor model) —
+//       they stay in the persistent events table and the tool's per-tool
+//       consumed watermark (consumedByTool) is left behind; backlogTools()
+//       + flushTool() fetch that tool's backlog and animate it FILO
+//       (newest first) when its LIVE cell becomes visible; V1 hold of
 //       semantic lanes + V2 immediate LIVE commit; reduced motion.
 //   C — cold-start integration: baseline high-water 0 is a VALID
 //       cursor (the query still sends after_event_id=0) -> the first
@@ -170,38 +172,48 @@ const ev = (id, tool) => ({
   eq(coord.getState().active.length, 5, 'A2: no duplicate bubbles')
 }
 {
-  // A3: hidden tool (rank > capacity) holds FIFO and promotes when it
-  // rises into the visible prefix (capacity growth here).
+  // A3 (v0.1.11 B): hidden tool (rank > capacity) — its event is accepted
+  // but NOT buffered in renderer memory. When capacity grows, the tool's
+  // backlog (fetched from the DB by the caller) is flushed FILO.
   const lanes = { live: [liveEntry('editor', 1), liveEntry('reader', 2), liveEntry('writer', 3)],
                   goal: [], good: [], friction: [] }
   const coord = createPulseBubbleCoordinator({ maxConcurrent: 3 })
   coord.ingest(lanes, 2)
-  var res = coord.activity([ev(10, 'writer')], lanes, 2)
+  var res = coord.activity([ev(10, 'writer')], lanes, 2) // writer rank 3 > cap 2: hidden
   eq(res.accepted, 1, 'A3: event accepted even though the tool is hidden')
   eq(coord.getState().active.length, 0, 'A3: hidden tool spawns no visible bubble yet')
-  eq(coord.getState().held.length, 1, 'A3: event holds in the FIFO queue')
-  var res2 = coord.activity([], lanes, 3) // capacity grows: writer now visible
-  ok(res2.fresh.length === 1 && res2.fresh[0].semanticId === 'evt|10', 'A3: held event promotes when the tool becomes visible')
-  eq(coord.getState().held.length, 0, 'A3: hold queue drained on promotion')
+  eq(coord.getState().consumedByTool['writer'], undefined,
+     'A3: hidden tool is NOT buffered in renderer memory (no consumed watermark)')
+  ok(coord.backlogTools(lanes, 3, 10).indexOf('writer') >= 0,
+     'A3: backlogTools flags the hidden tool once it would be visible (cap 3)')
+  // The caller (React) fetches writer's DB page (ASC) and flushes with cap 3.
+  var res2 = coord.flushTool('writer', [ev(10, 'writer')], 10, lanes, 3)
+  ok(res2.fresh.length === 1 && res2.fresh[0].semanticId === 'evt|10',
+     'A3: flushTool animates the backlog when the tool becomes visible')
+  eq(coord.getState().consumedByTool['writer'], 10, 'A3: the consumed watermark advanced')
 }
 {
-  // A4 (review fix): tool not on the lane right now -> the event is
-  // STILL ACCEPTED (cursor advances past it) and HOLDS in the FIFO
-  // queue until the tool's LIVE cell exists — never dropped, never
-  // routed to a foreign cell, no PULSE error.
+  // A4 (v0.1.11 B): tool not on the lane right now -> the event is
+  // STILL ACCEPTED (cursor advances past it) but is NOT buffered in
+  // renderer memory. When the tool's LIVE cell exists, flushTool()
+  // animates its backlog. Never dropped, never foreign-routed, no
+  // PULSE error.
   const lanes = { live: [liveEntry('editor', 1)], goal: [], good: [], friction: [] }
   const coord = createPulseBubbleCoordinator({ maxConcurrent: 3 })
   coord.ingest(lanes, 3)
-  var res = coord.activity([ev(20, 'ghost')], lanes, 3)
+  var res = coord.activity([ev(20, 'ghost')], lanes, 3) // ghost not on the lane
   eq(res.accepted, 1, 'A4: the event is still accepted into the stream')
-  eq(coord.getState().held.length, 1, 'A4: off-lane event holds in the FIFO queue')
+  eq(coord.getState().consumedByTool['ghost'], undefined,
+     'A4: off-lane event NOT buffered in renderer memory')
   eq(coord.getState().activityDropped, 0, 'A4: nothing is dropped (no foreign-cell routing)')
   eq(coord.getState().active.length, 0, 'A4: no bubble until the tool has a LIVE cell')
   var lanes2 = { live: [liveEntry('editor', 1), liveEntry('ghost', 2)], goal: [], good: [], friction: [] }
-  var res2 = coord.rePromoteHeld(lanes2, 3)
+  ok(coord.backlogTools(lanes2, 3, 20).indexOf('ghost') >= 0,
+     'A4: backlogTools flags the tool once it enters the visible prefix')
+  var res2 = coord.flushTool('ghost', [ev(20, 'ghost')], 20, lanes2, 3)
   ok(res2.fresh.length === 1 && res2.fresh[0].semanticId === 'evt|20',
-     'A4: the held event promotes when the tool enters the lane')
-  eq(coord.getState().held.length, 0, 'A4: hold queue drained on re-promotion')
+     'A4: flushTool animates when the tool enters the lane')
+  eq(coord.getState().consumedByTool['ghost'], 20, 'A4: the consumed watermark advanced')
 }
 {
   // A5: V1/V2 — LIVE commits immediately on acceptance; semantic lanes
@@ -317,38 +329,48 @@ const ev = (id, tool) => ({
     true, 'a well-formed empty batch adopts even with no coordinator result (the cursor is module state; the effect always passes a real result)')
 }
 
-// ============ A8/A9: unbounded held queue + re-promotion (review) ============
+// ============ A8/A9: cursor-model backlog (v0.1.11 B) ============
 {
-  // A8: the held queue is UNBOUNDED — overflow stays queued (FIFO),
-  // nothing is evicted. 70 off-lane events, each its own tool.
+  // A8 (v0.1.11 B): a large off-lane backlog is NOT buffered in renderer
+  // memory (the cursor model) — no unbounded queue. 70 off-lane events,
+  // each its own tool. When a tool enters the lane, its backlog (the DB
+  // page the caller fetches) is flushed FILO.
   const coord = createPulseBubbleCoordinator({ maxConcurrent: 2 })
   const offLane = { live: [liveEntry('editor', 1)], goal: [], good: [], friction: [] }
   coord.ingest(offLane, 2)
   var evs = []
   for (var i = 1; i <= 70; i++) evs.push(ev(i, 'tool' + i))
   var res = coord.activity(evs, offLane, 2)
-  eq(res.accepted, 70, 'A8: all events accepted')
-  eq(coord.getState().held.length, 70, 'A8: all 70 stay queued (no 64-entry eviction)')
+  eq(res.accepted, 70, 'A8: all 70 events accepted (cursor advanced)')
   eq(coord.getState().activityDropped, 0, 'A8: nothing dropped')
+  eq(Object.keys(coord.getState().consumedByTool).length, 0,
+     'A8: none of the 70 off-lane events are buffered in renderer memory (cursor model)')
+  // tool1 enters the lane -> flush its backlog (its DB page is just evt|1).
   var lanes2 = { live: [liveEntry('editor', 1), liveEntry('tool1', 2)], goal: [], good: [], friction: [] }
-  var res2 = coord.rePromoteHeld(lanes2, 2)
+  ok(coord.backlogTools(lanes2, 2, 70).indexOf('tool1') >= 0,
+     'A8: backlogTools flags tool1 once it enters the visible prefix')
+  var res2 = coord.flushTool('tool1', [ev(1, 'tool1')], 1, lanes2, 2)
   eq(res2.fresh.map(function (t) { return t.semanticId }), ['evt|1'],
-     'A8: the oldest held event promotes first when its tool enters the prefix (FIFO)')
-  eq(coord.getState().held.length, 69, 'A8: the rest of the queue is intact')
+     'A8: flushTool animates tool1 backlog (its single event)')
+  eq(coord.getState().consumedByTool['tool1'], 1, 'A8: the tool1 consumed watermark advanced')
 }
 {
-  // A9: capacity growth re-promotes a hidden held event with NO new
-  // batch — the pane's lane-key/capacity effect path (review fix 2).
+  // A9 (v0.1.11 B): capacity growth makes a hidden tool's backlog
+  // flushable — flushTool() animates it with NO new batch (the pane's
+  // lane-key/capacity effect path, review fix 2).
   const lanes = { live: [liveEntry('a', 1), liveEntry('b', 2), liveEntry('c', 3)],
                   goal: [], good: [], friction: [] }
   const coord = createPulseBubbleCoordinator({ maxConcurrent: 3 })
   coord.ingest(lanes, 2)
-  coord.activity([ev(50, 'c')], lanes, 2) // rank 3 > cap 2: hidden -> held
-  eq(coord.getState().held.length, 1, 'A9: the hidden tool\u2019s event holds')
-  var res = coord.rePromoteHeld(lanes, 3) // cap grows to 3: c now visible
+  coord.activity([ev(50, 'c')], lanes, 2) // c rank 3 > cap 2: hidden -> not buffered
+  eq(coord.getState().consumedByTool['c'], undefined,
+     'A9: the hidden tool\u2019s event is NOT buffered in renderer memory')
+  ok(coord.backlogTools(lanes, 3, 50).indexOf('c') >= 0,
+     'A9: backlogTools flags c once cap grows to 3')
+  var res = coord.flushTool('c', [ev(50, 'c')], 50, lanes, 3) // cap 3: c now visible
   ok(res.fresh.length === 1 && res.fresh[0].semanticId === 'evt|50',
-     'A9: the held event promotes on the capacity change alone')
-  eq(coord.getState().held.length, 0, 'A9: hold queue drained')
+     'A9: the backlog flushes on the capacity change alone')
+  eq(coord.getState().consumedByTool['c'], 50, 'A9: the consumed watermark advanced')
 }
 
 // ============ C: cold-start integration — baseline 0 -> first event -> bubble ============

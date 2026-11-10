@@ -106,7 +106,12 @@ assert.ok(strip.length > 0, 'Strip region found')
 // region now carries the J brick-mosaic canvas state (drift/dither
 // mask, glitch band), the content-sized portrait module split, and
 // the fill: true sidebar compact view. Intentional strip edit.
-const STRIP_SHA_S16_MOTION = '7bac8c6ebe822f8ef9df7dd2d3fa5432dea4423141ebf4052b6c808a023a11d1'
+// Re-baselined at v0.1.11 (B, cursor hold-model): the Strip now threads
+// the REST fetch handle into PulseLanes (rest prop) so it can issue
+// targeted /pulse?tool_name=&after_event_id= flushes of a visible
+// tool's unconsumed backlog (which lives in the DB, not renderer memory).
+// Intentional strip edit.
+const STRIP_SHA_S16_MOTION = 'e13b98928d7815d86118228934e87114423c068c63e1e46d248b5c2fdcdf157b'
 assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_S16_MOTION,
   '96px strip source byte-identical to the S16 motion-grammar baseline')
 ok(true, 'strip byte-identity snapshot pinned')

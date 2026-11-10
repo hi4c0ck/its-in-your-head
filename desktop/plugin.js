@@ -3552,7 +3552,13 @@ function createPulseBubbleCoordinator(opts) {
                 flashSlotId: null, flashes: {}, flashOwner: {}, hydrated: false,
                 // v0.1.10 (spec §5): activity-event bookkeeping.
                 lastActivityEventId: 0,  // per-surface delivered watermark
-                held: [],                // FIFO events awaiting a visible cell
+                // v0.1.11 (B): per-tool consumed watermark into the
+                // persistent events table. No in-memory backlog queue:
+                // events for a hidden tool stay in the DB and are flushed
+                // FILO (newest first) by flushTool() when the tool's LIVE
+                // cell becomes visible. Pruned to the current lane so it
+                // stays bounded. (Replaces the unbounded `held` FIFO.)
+                consumedByTool: {},
                 activityDropped: 0,       // bounded-drop counter (debug only)
                 liveSuppressed: false     // set by the activity effect, consumed by ingest
   };
@@ -3662,20 +3668,21 @@ function createPulseBubbleCoordinator(opts) {
       if (!state.committed) return pulseVisibleLanes(pulseSnapshotFromLanes({}, capacity), capacity);
       return pulseVisibleLanes(state.committed, capacity);
     },
-    // v0.1.10 (spec §5): accept a batch of persisted tool_start events.
-    // Each event is a FIRST-CLASS transition with its own identity
-    // (evt|<eventId>): the same tool called N times = N distinct FIFO
-    // bubbles, never a replace. Destination resolves against the LATEST
-    // live lane at dispatch/promotion time. Per-surface dedupe: events
-    // at or below the delivered watermark are ignored (redelivered
-    // batches from refetches without cursor advance). Events whose
-    // tool is not routable — hidden behind the visible prefix (rank >
-    // capacity) or absent from the lane — HOLD in the unbounded FIFO
-    // queue until that tool's LIVE cell exists: never routed to a
-    // foreign cell, never evicted (overflow stays queued; the
-    // delivered watermark is the only dedupe, review). rePromoteHeld()
-    // re-resolves the queue when the lane ranking or capacity changes
-    // without a new batch.
+    // v0.1.10 (spec §5) + v0.1.11 (B): accept a batch of persisted
+    // tool_start events. Each event is a FIRST-CLASS transition with its
+    // own identity (evt|<eventId>): the same tool called N times = N
+    // distinct FIFO bubbles, never a replace. Destination resolves
+    // against the LATEST live lane at dispatch time. Per-surface dedupe:
+    // events at or below the delivered watermark are ignored (redelivered
+    // batches from refetches without cursor advance). Events whose tool
+    // is not routable right now — hidden behind the visible prefix
+    // (rank > capacity) or absent from the lane — are STILL ACCEPTED
+    // (the delivered watermark advances past them) but are NOT buffered
+    // in renderer memory: they stay in the persistent events table and
+    // the tool's per-tool consumed watermark (consumedByTool) is left
+    // behind. When the tool's LIVE cell next becomes visible, backlogTools()
+    // + flushTool() fetch that tool's backlog and animate it FILO
+    // (newest first). This is the cursor model: no in-memory held queue.
     activity: function (events, rawLanes, capacity, actOpts) {
       var reduced = !!(actOpts && actOpts.reducedMotion);
       var capNow = Math.max(1, capacity || cap);
@@ -3688,34 +3695,6 @@ function createPulseBubbleCoordinator(opts) {
         }
         return -1;
       }
-      // Re-resolve held events FIRST against the current lane: the
-      // visible prefix may have grown or a tool may have risen.
-      if (state.held.length) {
-        var remaining = [];
-        state.held.forEach(function (t) {
-          var idx = liveIndexFor(t.tool);
-          if (idx >= 0 && idx < capNow) {
-            t.slotId = 'live|' + idx;
-            t.destinationSlot = idx;
-            t.heldUntilVisible = false;
-            fresh.push(t);
-            if (state.active.length < capNow) {
-              t.staggerMs = BUBBLE_STAGGER_MS * state.active.length;
-              state.active.push(t);
-            } else {
-              t.staggerMs = BUBBLE_STAGGER_MS * state.active.length;
-              state.queued.push(t);
-            }
-          } else {
-            // Still hidden (rank > capacity) or not on the lane right
-            // now: keep holding (FIFO) until the tool's LIVE cell
-            // exists — accepted events are never dropped and never
-            // routed to a foreign cell (review).
-            remaining.push(t);
-          }
-        });
-        state.held = remaining;
-      }
       (events || []).forEach(function (ev) {
         if (!ev || typeof ev.id !== 'number') return;
         if (ev.id <= state.lastActivityEventId) return; // delivered already
@@ -3725,6 +3704,9 @@ function createPulseBubbleCoordinator(opts) {
         if (reduced) {
           // Reduced motion: no travel at all; the live lane content
           // still commits immediately (V2) below.
+          // v0.1.11 (B): the per-tool consumed watermark advances even in
+          // reduced mode, so the cursor model stays consistent.
+          state.consumedByTool[ev.tool_name] = ev.id;
           return;
         }
         if (idx >= 0 && idx < capNow) {
@@ -3744,23 +3726,19 @@ function createPulseBubbleCoordinator(opts) {
             state.queued.push(t);
           }
           fresh.push(t);
+          // v0.1.11 (B): this event just animated -> advance the tool's
+          // consumed watermark. The event stays in the DB; the pane only
+          // tracks how far it has consumed that tool's stream.
+          state.consumedByTool[ev.tool_name] = ev.id;
         } else {
-          // Not routable right now — hidden behind the visible prefix
-          // (idx >= capacity) or the tool is not on the lane (idx -1):
-          // HOLD. The event was accepted (and the cursor advanced past
-          // it); it stays queued FIFO until the tool's LIVE cell
-          // exists, and is never routed to a foreign cell (spec §5.2,
-          // review). The held queue is UNBOUNDED: overflow stays
-          // queued, nothing is evicted (the 64-entry shift from the
-          // initial v0.1.10 cut was removed in review).
-          state.held.push({
-            kind: 'activity', semanticId: 'evt|' + ev.id, eventId: ev.id,
-            metric: 'live', tool: ev.tool_name,
-            tool_call_id: ev.tool_call_id != null ? ev.tool_call_id : null,
-            ts: ev.ts, reason: 'tool-call',
-            slotId: null, destinationSlot: null,
-            heldUntilVisible: true, sequence: state.seq += 1,
-          });
+          // v0.1.11 (B): not routable right now — hidden behind the
+          // visible prefix (idx >= capNow) or the tool is not on the
+          // lane (idx === -1). The event was accepted (the delivered
+          // cursor advanced past it) but is NOT buffered in renderer
+          // memory: it stays in the persistent events table and is
+          // flushed FILO (newest first) by flushTool() once the tool's
+          // LIVE cell exists. consumedByTool[ev.tool_name] is left
+          // behind on purpose — that gap IS the tool's backlog.
         }
       });
       // V2: when activity is accepted, the LIVE lane commits its new
@@ -3789,52 +3767,87 @@ function createPulseBubbleCoordinator(opts) {
             friction: rawLanes.friction }, capNow);
         state.committed = snapR; state.latest = snapR;
       }
-      return { accepted: accepted, fresh: fresh, held: state.held.length,
+      return { accepted: accepted, fresh: fresh, held: 0,
                committed: state.committed };
     },
-    // Re-promotion WITHOUT a new batch (review fix): when the LIVE lane
-    // ranking or capacity changes (the pane's lane-key/capacity effect),
-    // the held queue is re-resolved against the latest lanes and
-    // whatever is now routable gets first-class travel. Idempotent —
-    // the per-event delivered watermark and the single promotion of a
-    // queue entry mean nothing can double-bubble. Under reduced motion
-    // nothing is promoted (there is no travel to schedule): the queue
-    // keeps holding FIFO.
-    rePromoteHeld: function (rawLanes, capacity, actOpts) {
+    // v0.1.11 (B): the in-memory held queue is gone. Backlog lives in the
+    // persistent events table; the pane only tracks a per-tool consumed
+    // watermark (consumedByTool). These two functions replace rePromoteHeld:
+    //
+    // backlogTools() tells the caller WHICH visible tools have an
+    // unconsumed backlog (consumedByTool[tool] < highWater). It is a safe
+    // superset — a tool whose last event is older than highWater is a
+    // candidate; the caller confirms with a targeted /pulse?tool_name=
+    // fetch and then calls flushTool(). No events are ever buffered in
+    // renderer memory, so a long-hidden tool cannot grow JS heap.
+    backlogTools: function (rawLanes, capacity, highWater) {
+      var capNow = Math.max(1, capacity || cap);
+      var liveLane = (rawLanes && rawLanes.live) || [];
+      var hw = Number(highWater) || 0;
+      var out = [];
+      for (var i = 0; i < liveLane.length; i++) {
+        if (i >= capNow) break; // only the visible prefix can be flushed
+        var tool = liveLane[i] && liveLane[i].tool_name;
+        if (!tool) continue;
+        var consumed = state.consumedByTool[tool] || 0;
+        if (consumed < hw) out.push(tool); // gap -> possible backlog
+      }
+      return out;
+    },
+    // FILO flush: animate a tool's unconsumed backlog NEWEST-FIRST so the
+    // most recent calls pop first (fast-decay consistency, bounded by the
+    // active/queued caps). eventsAsc is the tool's events from the DB in
+    // ascending id order (a targeted /pulse?tool_name=&after_event_id=
+    // page); we reverse it. Idempotent: the per-tool consumed watermark
+    // means nothing double-bubbles. Advances consumedByTool[tool] to
+    // nextCursor (the page's high-watermark). Returns { fresh } so the
+    // caller can schedule the arrivals.
+    flushTool: function (tool, eventsAsc, nextCursor, rawLanes, capacity, actOpts) {
       var capNow = Math.max(1, capacity || cap);
       var fresh = [];
-      if (!state.held.length) return { fresh: fresh, held: 0 };
-      if (actOpts && actOpts.reducedMotion) {
-        return { fresh: fresh, held: state.held.length };
+      var reduced = !!(actOpts && actOpts.reducedMotion);
+      if (reduced || !eventsAsc || !eventsAsc.length) {
+        // Reduced motion commits lane content without travel; still advance
+        // the consumed watermark so the next poll does not re-flush.
+        if (nextCursor) state.consumedByTool[tool] = nextCursor;
+        return { fresh: fresh };
       }
       var liveLane = (rawLanes && rawLanes.live) || [];
-      function liveIndexFor(toolName) {
-        for (var i = 0; i < liveLane.length; i++) {
-          if (liveLane[i] && liveLane[i].tool_name === toolName) return i;
-        }
-        return -1;
+      var idx = -1;
+      for (var i = 0; i < liveLane.length; i++) {
+        if (liveLane[i] && liveLane[i].tool_name === tool) { idx = i; break; }
       }
-      var remaining = [];
-      state.held.forEach(function (t) {
-        var idx = liveIndexFor(t.tool);
-        if (idx >= 0 && idx < capNow) {
-          t.slotId = 'live|' + idx;
-          t.destinationSlot = idx;
-          t.heldUntilVisible = false;
-          fresh.push(t);
-          if (state.active.length < capNow) {
-            t.staggerMs = BUBBLE_STAGGER_MS * state.active.length;
-            state.active.push(t);
-          } else {
-            t.staggerMs = BUBBLE_STAGGER_MS * state.active.length;
-            state.queued.push(t);
-          }
+      if (idx < 0 || idx >= capNow) {
+        // The tool is not visible right now (lane/cap changed mid-fetch):
+        // keep holding in the DB — do NOT animate, do NOT advance the
+        // cursor. The next visibility effect re-checks and re-flushes.
+        return { fresh: fresh };
+      }
+      var consumedBefore = state.consumedByTool[tool] || 0;
+      var list = eventsAsc.slice().reverse(); // FILO: newest first
+      for (var k = 0; k < list.length; k++) {
+        var ev = list[k];
+        if (!ev || typeof ev.id !== 'number') continue;
+        if (ev.id <= consumedBefore) continue; // already animated (dedupe)
+        var t = {
+          kind: 'activity', semanticId: 'evt|' + ev.id, eventId: ev.id,
+          metric: 'live', tool: tool,
+          tool_call_id: ev.tool_call_id != null ? ev.tool_call_id : null,
+          ts: ev.ts, reason: 'tool-call',
+          slotId: 'live|' + idx, destinationSlot: idx,
+          heldUntilVisible: false, sequence: state.seq += 1,
+        };
+        if (state.active.length < capNow) {
+          t.staggerMs = BUBBLE_STAGGER_MS * state.active.length;
+          state.active.push(t);
         } else {
-          remaining.push(t); // still hidden or off the lane: keep holding
+          t.staggerMs = BUBBLE_STAGGER_MS * state.active.length;
+          state.queued.push(t);
         }
-      });
-      state.held = remaining;
-      return { fresh: fresh, held: state.held.length };
+        fresh.push(t);
+      }
+      state.consumedByTool[tool] = nextCursor || consumedBefore;
+      return { fresh: fresh };
     },
     getState: function () { return state; },
   };
@@ -3901,7 +3914,7 @@ const PULSE_GLOW_CSS =
 // lane grid itself (never the whole Strip), and bubbles travel
 // bottom-edge -> destination cell in one pixel coordinate system.
 function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow = false,
-                     activityEvents }) {
+                      activityEvents, rest }) {
   var order = ['live', 'goal', 'good', 'friction'];
   var cap = Math.max(1, Math.floor(Number(capacity) || 1));
   var coordRef = useRef(null);
@@ -4045,19 +4058,42 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
     active.forEach(scheduleArrival);
   }, [laneKey, cap]);
 
-  // Held-activity re-promotion (review fix): when the LIVE ranking or
-  // capacity changes WITHOUT a new activity batch, events that were
-  // accepted while their tool was hidden / off-lane are re-resolved
-  // against the new lane; anything now routable gets first-class
-  // travel. Declared AFTER the snapshot effect so the lane content
-  // commits first, then the bubbles land in the new cells. The
-  // per-event watermark makes this safe: nothing double-bubbles.
+  // v0.1.11 (B): backlog flush (replaces held re-promotion). When the LIVE
+  // ranking or capacity changes, tools that are now visible may carry an
+  // UNCONSUMED backlog: events accepted while their tool was hidden stay in
+  // the persistent events table (never buffered in renderer memory). The pane
+  // asks which visible tools have a backlog (backlogTools), issues a targeted
+  // /pulse?tool_name=&after_event_id= fetch per tool, and FILO-flushes it via
+  // flushTool() — newest calls pop first. Declared AFTER the snapshot effect
+  // so the lane content commits first, then the bubbles land in the new
+  // cells. The per-tool consumed watermark keeps it idempotent (no double-
+  // bubble). Best-effort: a failed fetch never blocks the UI.
   useEffect(function () {
-    var res = coord.rePromoteHeld(rawLanes, cap, { reducedMotion: reducedRef.current });
-    if (res.fresh.length) {
-      res.fresh.forEach(scheduleArrival);
-      setTick5(function (v) { return v + 1; });
-    }
+    var bl = coord.backlogTools(rawLanes, cap, PULSE_ACTIVITY.cursor);
+    if (!bl.length || !rest) return;
+    bl.forEach(function (tool) {
+      var after = coord.getState().consumedByTool[tool] || 0;
+      rest('/pulse?tool_name=' + encodeURIComponent(tool) + '&after_event_id=' + after)
+        .then(function (resp) {
+          var act = resp && resp.activity_events;
+          if (!act || !act.events || !act.events.length) {
+            // No backlog on this page: advance the consumed watermark to the
+            // page high-water so the next visibility check doesn't re-fetch
+            // the same empty range.
+            if (act && act.next_cursor) {
+              coord.getState().consumedByTool[tool] = act.next_cursor;
+            }
+            return;
+          }
+          var res2 = coord.flushTool(tool, act.events, act.next_cursor, rawLanes, cap,
+            { reducedMotion: reducedRef.current });
+          if (res2.fresh.length) {
+            res2.fresh.forEach(scheduleArrival);
+            setTick5(function (v) { return v + 1; });
+          }
+        })
+        .catch(function () { /* best-effort; the next visibility re-checks */ });
+    });
   }, [laneKey, cap]);
 
   // Unmount: cancel every pending travel/flash timer.
@@ -5628,6 +5664,11 @@ function Strip({ source, rest, portraitPreferences }) {
         // events — PulseLanes feeds them to the coordinator (each
         // accepted call = its own LIVE bubble, FIFO, never replaced).
         activityEvents: pulseQ.data && pulseQ.data.activity_events,
+        // v0.1.11 (B): the REST fetch handle — PulseLanes issues targeted
+        // /pulse?tool_name=&after_event_id= fetches to FILO-flush a
+        // visible tool's unconsumed backlog (which lives in the DB, not
+        // in renderer memory).
+        rest,
       }),
       ...(!narrow
         ? [jsxs('div', {
