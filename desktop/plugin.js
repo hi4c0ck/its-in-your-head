@@ -3460,29 +3460,64 @@ function pulseLanesKey(lanes, capacity) {
   });
   return parts.join('|');
 }
-// Surface-relative path: spawn at the surface's bottom edge, target
-// over the destination cell — derived only from the measured box.
-function pulseBubblePath(box, metric, slotIndex, capacity) {
+// PULSE landing geometry (animation pass v2): the bubble lands ON the
+// tool's own dot-matrix indicator, not the abstract cell centerline.
+// The lane's entry rows TOP-PACK at a fixed 16px pitch (14px row — the
+// 14px dot-grid height drives row content in both modes — + 2px row
+// gap), and each row right-pins a 19px dot grid (4 dot columns of 4px,
+// 1px gaps), so slot s's row center sits at 16*s+7 surface-relative
+// and the first-dot column at laneRight-19. The signal SPAWNS
+// bottom-flush under that column and lands ON the tool's first dot;
+// the arrival stamp then blinks over that same dot (the signal
+// activates the tool's indicator, never the empty cell middle).
+// PULSE_LANDING_BEFORE_DOT=true instead lands one cell BEFORE the grid
+// (6px left, toward the label).
+var PULSE_DOT_GRID_W = 19; // 4 dot columns x 4px + 3 gaps x 1px
+var PULSE_ROW_PITCH = 16; // 14px row (dot-grid driven) + 2px gap
+var PULSE_ROW_CENTER_OFF = 7; // half the 14px row
+var PULSE_LANDING_BEFORE_DOT = false;
+// Destination lane's dot-column x, surface-relative (the first-dot
+// column of the row's right-pinned 19px dot grid).
+function pulseDotColumnX(box, laneIdx, narrow) {
+  var w = box && Number.isFinite(Number(box.width)) ? Number(box.width) : 0;
+  var colGap = narrow ? 2 : 3; // the lane grid's column gap (PulseLanes)
+  var laneW = (w - 3 * colGap) / PULSE_LANE_ORDER.length;
+  var laneLeft = laneIdx * (laneW + colGap);
+  var dotLeft = laneLeft + laneW - PULSE_DOT_GRID_W;
+  return dotLeft - (PULSE_LANDING_BEFORE_DOT ? 6 : 0);
+}
+// Surface-relative path: spawn at the surface's bottom edge (under the
+// destination lane's dot column), target over the destination row's dot
+// indicator — derived only from the measured box + lane layout.
+function pulseBubblePath(box, metric, slotIndex, capacity, narrow) {
   var w = box && Number.isFinite(Number(box.width)) ? Number(box.width) : 0;
   var h = box && Number.isFinite(Number(box.height)) ? Number(box.height) : 0;
   var cap = Math.max(1, Math.floor(Number(capacity) || 1));
   var laneIdx = PULSE_LANE_ORDER.indexOf(metric);
   if (laneIdx < 0) laneIdx = 0;
-  var x = w * ((laneIdx + 0.5) / PULSE_LANE_ORDER.length);
-  var y = h * ((Math.max(0, Number(slotIndex) || 0) + 0.5) / cap);
-  return { spawn: { x: x, y: h }, target: { x: x, y: y } };
+  var slot = Math.max(0, Number(slotIndex) || 0);
+  var dotLeft = pulseDotColumnX(box, laneIdx, narrow);
+  var rowCenter = PULSE_ROW_PITCH * slot + PULSE_ROW_CENTER_OFF;
+  return {
+    spawn: { x: dotLeft, y: h },
+    target: { x: dotLeft, y: rowCenter },
+    dotLeft: dotLeft,
+    rowCenter: rowCenter,
+  };
 }
 // One flight's integer-pixel geometry: the sprite is a 4px-wide column
-// (three 4px cells) SPAWNed bottom-flush on the surface edge and
-// landing CENTERED on the destination cell. Every coordinate is a
-// whole pixel (no subpixel start), and the animation name + keyframe
-// string derive from the same (dist, n) pair, so the element and its
-// keyframes can never drift apart.
-function pulseBubbleFlight(box, metric, slotIndex, capacity) {
-  var path = pulseBubblePath(box, metric, slotIndex, capacity);
-  var left = Math.round(path.spawn.x) - 2; // center the 4px column on the lane centerline
+// (three 4px cells) SPAWNed bottom-flush on the surface edge and landing
+// ON the destination tool's first-dot column (its dot-matrix indicator),
+// not the empty cell center. Every coordinate is a whole pixel (no
+// subpixel start), and the animation name + keyframe string derive from
+// the same (dist, n) pair, so the element and its keyframes can never
+// drift apart. PULSE_LANDING_BEFORE_DOT shifts the landing one 4px cell
+// to the LEFT of the dot grid ("before it") instead of on it.
+function pulseBubbleFlight(box, metric, slotIndex, capacity, narrow) {
+  var path = pulseBubblePath(box, metric, slotIndex, capacity, narrow);
+  var left = Math.round(path.dotLeft); // align the 4px column on the tool's first-dot column
   var top = Math.round(path.spawn.y) - 12; // bottom flush at the surface edge
-  var dy = Math.round(path.target.y - 6 - top); // end: column centered on the cell
+  var dy = Math.round(path.rowCenter - 6 - top); // end: column centered on the tool's row
   var dist = Math.abs(dy);
   var n = pulseTravelSteps(dist);
   return {
@@ -3491,7 +3526,8 @@ function pulseBubbleFlight(box, metric, slotIndex, capacity) {
     dy: dy,
     dist: dist,
     steps: n,
-    targetY: path.target.y,
+    targetY: path.rowCenter,
+    dotLeft: path.dotLeft,
     animationName: 'iyh-bubble-travel-' + dist + '-' + n,
     keyframes: pulseTravelKeyframes(dy),
   };
@@ -3803,8 +3839,9 @@ function createPulseBubbleCoordinator(opts) {
 }
 // STAGE5-END
 // Pixel-step travel (animation pass): the bubble SPAWNS at the measured
-// surface bottom edge and climbs its lane centerline to the destination
-// cell. The motion is a STAIRCASE, not a slide: per travel distance a
+// surface bottom edge (under the destination lane's dot column) and
+// climbs to the destination tool's row. The motion is a STAIRCASE, not
+// a slide: per travel distance a
 // dedicated keyframe is generated whose every stop is an INTEGER pixel
 // translate (4px hops, the instrument's dot-matrix pixel unit) and whose
 // every segment holds-then-jumps (steps(1,end)) — saccades in the
@@ -4130,7 +4167,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
       // animations are never replaced or restarted.
       var dySeen = [];
       active5.forEach(function (t) {
-        var d = pulseBubbleFlight(box5, t.metric, t.destinationSlot, cap).dy;
+        var d = pulseBubbleFlight(box5, t.metric, t.destinationSlot, cap, narrow).dy;
         if (dySeen.indexOf(d) < 0) dySeen.push(d);
       });
       dySeen.sort(function (a, b) { return a - b; });
@@ -4139,7 +4176,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
       }).join('');
       return css ? [jsx('style', { key: 'pulse-travel-css', children: css })] : [];
     })().concat(active5.map(function (t) {
-      var f = pulseBubbleFlight(box5, t.metric, t.destinationSlot, cap);
+      var f = pulseBubbleFlight(box5, t.metric, t.destinationSlot, cap, narrow);
       return jsx('span', {
         key: 'bubble-' + t.sequence,
         'data-testid': 'pulse-bubble',
@@ -4149,7 +4186,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
         style: {
           position: 'absolute', width: 4, height: 12, pointerEvents: 'none',
           // Whole-pixel spawn: bottom-flush on the measured surface
-          // edge, centered on the lane centerline.
+          // edge, aligned on the destination lane's dot column.
           left: f.left + 'px', top: f.top + 'px',
           // Stable per-transition delay (coordinator-assigned): re-
           // renders of the active list can never rewrite this string,
@@ -4171,16 +4208,16 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
         }),
       });
     })).concat(Object.keys(flashes).map(function (slotId) {
-      // Arrival stamp: ONE 4px pixel on the landing axis — the lane
-      // centerline 6px below the cell center (just under where the
-      // sprite lands) — the signal settles INTO the destination cell,
-      // same pixel geometry as the sprite. Three-step blink, no
+      // Arrival stamp: ONE 4px pixel ON the tool's first dot — the
+      // same 4px column the sprite landed on, at the dot grid's top
+      // row — the signal activates the tool's own indicator, same
+      // pixel geometry as the sprite. Three-step blink, no
       // cell-wide glow, no residual (removed by the owning sequence's
       // clearFlash; stable data-slot identity).
       var parts = slotId.split('|');
       var laneIdx = PULSE_LANE_ORDER.indexOf(parts[0]); if (laneIdx < 0) laneIdx = 0;
       var slotIndex = Number(parts[1]) || 0;
-      var f = pulseBubbleFlight(box5, PULSE_LANE_ORDER[laneIdx], slotIndex, cap);
+      var f = pulseBubbleFlight(box5, PULSE_LANE_ORDER[laneIdx], slotIndex, cap, narrow);
       return jsx('span', {
         key: 'flash-' + slotId,
         'data-testid': 'pulse-arrival-flash',
@@ -4190,7 +4227,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
           width: 4, height: 4,
           background: 'var(--ui-accent)',
           left: f.left + 'px',
-          top: Math.round(f.targetY + 6) + 'px',
+          top: Math.round(f.targetY - PULSE_ROW_CENTER_OFF) + 'px',
           animation: 'iyh-bubble-stamp ' + BUBBLE_ARRIVAL_MS + 'ms steps(1,end) 1 both',
         },
       });

@@ -118,7 +118,27 @@ const PULSE_GLOW_CSS =
   + '80%,100%{opacity:0}}';
 const OLD_TRAVEL_CSS =
   '@keyframes iyh-bubble-travel-old{from{transform:translate(0,0);opacity:.25}to{transform:translate(var(--dx,0),var(--dy,0));opacity:.9}}';
-function pulseBubblePath(box, metric, slotIndex, capacity) {
+const PULSE_DOT_GRID_W = 19, PULSE_ROW_PITCH = 16, PULSE_ROW_CENTER_OFF = 7;
+const PULSE_LANDING_BEFORE_DOT = false; // true: land 6px left of the dot grid
+function pulseDotColumnX(w, laneIdx, narrow) {
+  const colGap = narrow ? 2 : 3; // lane grid column gap (PulseLanes)
+  const laneW = (w - 3 * colGap) / PULSE_LANE_ORDER.length;
+  const laneLeft = laneIdx * (laneW + colGap);
+  return laneLeft + laneW - PULSE_DOT_GRID_W - (PULSE_LANDING_BEFORE_DOT ? 6 : 0);
+}
+// NEW landing geometry: spawn under the lane's dot column (bottom edge),
+// land ON the tool's first-dot column at its top-packed row center.
+function pulseBubblePath(box, metric, slotIndex, capacity, narrow) {
+  var laneIdx = PULSE_LANE_ORDER.indexOf(metric);
+  if (laneIdx < 0) laneIdx = 0;
+  var slot = Math.max(0, Number(slotIndex) || 0);
+  var dotLeft = pulseDotColumnX(Number(box.width) || 0, laneIdx, narrow);
+  var rowCenter = PULSE_ROW_PITCH * slot + PULSE_ROW_CENTER_OFF;
+  return { spawn: { x: dotLeft, y: Number(box.height) || 0 }, target: { x: dotLeft, y: rowCenter },
+    dotLeft: dotLeft, rowCenter: rowCenter };
+}
+// OLD renderer geometry (before state): lane centerline + even cell center.
+function pulseBubblePathOld(box, metric, slotIndex, capacity) {
   var w = Number(box.width) || 0, h = Number(box.height) || 0;
   var cap = Math.max(1, Math.floor(Number(capacity) || 1));
   var laneIdx = PULSE_LANE_ORDER.indexOf(metric);
@@ -127,16 +147,16 @@ function pulseBubblePath(box, metric, slotIndex, capacity) {
   var y = h * ((Math.max(0, Number(slotIndex) || 0) + 0.5) / cap);
   return { spawn: { x: x, y: h }, target: { x: x, y: y } };
 }
-function pulseBubbleFlight(box, metric, slotIndex, capacity) {
-  var path = pulseBubblePath(box, metric, slotIndex, capacity);
-  var left = Math.round(path.spawn.x) - 2;
-  var top = Math.round(path.spawn.y) - 12;
-  var dy = Math.round(path.target.y - 6 - top);
+function pulseBubbleFlight(box, metric, slotIndex, capacity, narrow) {
+  var path = pulseBubblePath(box, metric, slotIndex, capacity, narrow);
+  var left = Math.round(path.dotLeft); // 4px column on the tool's first-dot column
+  var top = Math.round(path.spawn.y) - 12; // bottom flush at the surface edge
+  var dy = Math.round(path.rowCenter - 6 - top); // end: column centered on the tool's row
   var dist = Math.abs(dy);
   var n = pulseTravelSteps(dist);
   return { left: Math.max(0, left), top: Math.max(0, top), dy: dy, dist: dist,
     steps: n, animationName: 'iyh-bubble-travel-' + dist + '-' + n,
-    keyframes: pulseTravelKeyframes(dy), targetY: path.target.y };
+    keyframes: pulseTravelKeyframes(dy), targetY: path.rowCenter, rowCenter: path.rowCenter };
 }
 // ------------------------------------------------------------------
 // Scene: one PULSE surface (cells + label/dot content)
@@ -152,19 +172,24 @@ const DOT_VALUES = [0.75, 0.35, 0.0, 0.55, 0.9, 0.2, null, 0.4];
 function buildSurface(host, w, h, cap) {
   host.innerHTML = '';
   host.style.width = w + 'px'; host.style.height = h + 'px';
+  const narrow = w <= 560; // PulseLanes: sidebar forces narrow; strip 400 -> narrow
+  const colGap = narrow ? 2 : 3;
   const grid = document.createElement('div');
   grid.className = 'grid';
-  grid.style.cssText = 'display:grid;position:absolute;inset:0;grid-template-columns:repeat(4, minmax(0,1fr));gap:2px 3px;height:100%;';
+  // Mirror the real renderer: 4 lane COLUMNS; rows TOP-PACK inside each
+  // lane (flex column, 2px gap) — NOT evenly distributed. Row height is
+  // content-driven: the 14px dot grid, so the pitch is fixed 16px.
+  grid.style.cssText = 'display:grid;position:absolute;inset:0;grid-template-columns:repeat(4, minmax(0,1fr));gap:' + (narrow ? 1 : 2) + 'px ' + colGap + 'px;height:100%;';
   PULSE_LANE_ORDER.forEach(function (lane, li) {
     const col = document.createElement('div');
-    col.style.cssText = 'display:grid;grid-template-rows:repeat(' + cap + ',1fr);';
+    col.style.cssText = 'display:flex;flex-direction:column;gap:2px;min-width:0;min-height:0;overflow:hidden;';
     const names = TOOLS[lane];
     for (let r = 0; r < cap; r++) {
       const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;gap:4px;min-height:14px;overflow:hidden;position:relative;';
+      row.style.cssText = 'display:flex;align-items:center;gap:' + (narrow ? 2 : 4) + 'px;min-height:' + (narrow ? 10 : 14) + 'px;overflow:hidden;position:relative;';
       const label = document.createElement('span');
       label.textContent = r < names.length ? names[r] : '';
-      label.style.cssText = 'flex:1 1 auto;font-size:9px;line-height:14px;color:var(--ui-text-secondary,#8FA3C8);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+      label.style.cssText = 'flex:1 1 auto;min-width:0;font-size:' + (narrow ? 8 : 9) + 'px;line-height:' + (narrow ? 10 : 14) + 'px;color:var(--ui-text-secondary,#8FA3C8);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
       const dots = document.createElement('span');
       dots.style.cssText = 'display:inline-grid;grid-template-columns:repeat(4,4px);gap:1px;flex-shrink:0;';
       const v = r < DOT_VALUES.length ? DOT_VALUES[(li + r) % DOT_VALUES.length] : null;
@@ -186,14 +211,14 @@ function buildSurface(host, w, h, cap) {
   styleEl.textContent = PULSE_GLOW_CSS;
   overlay.appendChild(styleEl);
   host.appendChild(overlay);
-  return { overlay: overlay, styleEl: styleEl, box: { width: w, height: h }, cap: cap };
+  return { overlay: overlay, styleEl: styleEl, box: { width: w, height: h }, cap: cap, narrow: narrow };
 }
 
 // Bubble flight (NEW renderer: 4px column sprite + staircase + stamp)
 let seq = 0;
 function launch(surf, metric, slot, staggerMs, opts) {
   opts = opts || {};
-  const f = pulseBubbleFlight(surf.box, metric, slot, surf.cap);
+  const f = pulseBubbleFlight(surf.box, metric, slot, surf.cap, surf.narrow);
   const el = document.createElement('span');
   el.dataset.kind = 'bubble';
   el.style.cssText = 'position:absolute;width:4px;height:12px;pointer-events:none;'
@@ -221,15 +246,17 @@ function launch(surf, metric, slot, staggerMs, opts) {
 function spawnStamp(surf, f) {
   const stamp = document.createElement('span');
     stamp.dataset.kind = 'stamp';
+    // ON the tool's first dot: same 4px column as the sprite's landing,
+    // at the dot grid's top row (rowCenter - 7).
     stamp.style.cssText = 'position:absolute;width:4px;height:4px;pointer-events:none;'
-      + 'background:var(--ui-accent);left:' + f.left + 'px;top:' + Math.round(f.targetY + 6) + 'px;'
+      + 'background:var(--ui-accent);left:' + f.left + 'px;top:' + Math.round(f.targetY - PULSE_ROW_CENTER_OFF) + 'px;'
       + 'animation:iyh-bubble-stamp ' + BUBBLE_ARRIVAL_MS + 'ms steps(1,end) 1 both;';
     surf.overlay.appendChild(stamp);
     if (!window.PULSE_CAPTURE) setTimeout(function () { stamp.remove(); }, BUBBLE_ARRIVAL_MS + 20);
 }
 // OLD renderer (the before state: 8px rounded dot, linear slide, inset glow)
 function launchOld(surf, metric, slot, staggerMs) {
-  const p = pulseBubblePath(surf.box, metric, slot, surf.cap);
+  const p = pulseBubblePathOld(surf.box, metric, slot, surf.cap);
   const dx = p.target.x - p.spawn.x, dy = p.target.y - p.spawn.y;
   const el = document.createElement('span');
   el.dataset.kind = 'bubble-old';
@@ -333,7 +360,7 @@ window.PULSE_SAMPLE = {
   },
   stripConcurrent: function () {
     clearAll();
-    // four lanes, slots 0..3 — note slot 3 is the SPAWN row (dy=0 degenerate)
+    // four lanes, slots 0..3 (top-packed 16px rows; slot 3 lands at rowCenter 55)
     PULSE_LANE_ORDER.forEach(function (l, i) { launch(holders.strip, l, i, i * BUBBLE_STAGGER_MS); });
   },
   stripOverflow: function () {

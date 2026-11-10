@@ -179,6 +179,8 @@ eq(pulseSlotId('goal', 0), 'goal|0', 'visual slot identity metric|slotIndex')
   const q = pulseBubblePath({ width: 400, height: 800 }, 'good', 1, 3)
   eq(q.spawn.y, 800, 'tall sidebar surface: spawn scales with measured height (no hardcode)')
   ok(q.target.x !== p.target.x, 'coordinates derive from the measured box, not constants')
+  ok(typeof p.dotLeft === 'number' && p.target.x === p.dotLeft, 'path exposes the dot-column x (flight + stamp derive from it)')
+  eq(p.rowCenter, 23, 'top-packed row center: 16px pitch x slot 1 + 7 (row geometry, not cell center)')
 }
 
 // v0.1.10 (review fix 4): a NEW tool enters the visible top three while
@@ -366,17 +368,23 @@ eq(pulseSlotId('goal', 0), 'goal|0', 'visual slot identity metric|slotIndex')
   ok(stops.every((v, i) => i === 0 || v <= stops[i - 1]), 'stops are monotone upward (no backward jitter)')
   ok(css.split('animation-timing-function:steps(1,end)').length - 1 === stops.length - 1,
     'every segment is hold-then-jump (steps(1,end)) — saccades, not a glide')
-  // Flight geometry: whole-pixel spawn/landing derived from the measured box
-  const f = pulseBubbleFlight({ width: 400, height: 96 }, 'live', 0, 4)
-  eq(f.left, 48, 'sprite centered on the lane centerline (50 - 2px half-width, whole pixel)')
+  // Flight geometry: whole-pixel spawn/landing derived from the measured
+  // box; the bubble lands ON the tool's dot-matrix indicator (the
+  // first-dot column), not the abstract cell centerline (animation
+  // pass v2: top-packed 16px rows, right-pinned 19px dot grid).
+  const f = pulseBubbleFlight({ width: 400, height: 96 }, 'live', 0, 4, true)
+  eq(f.left, 80, 'sprite aligned on the tool first-dot column (narrow: laneW 98.5; 98.5-19=79.5 -> 80, whole pixel)')
   eq(f.top, 84, 'spawn bottom-flush on the surface edge (96 - 12px sprite height)')
-  eq(f.dy, -78, 'landing cell-centered (target.y 12; 12 - 6 - 84)')
-  eq(f.animationName, 'iyh-bubble-travel-78-20', 'animation name pairs with the generated keyframe')
+  eq(f.dy, -83, 'landing on the tool top-packed row (rowCenter 7; 7 - 6 - 84)')
+  eq(f.animationName, 'iyh-bubble-travel-83-21', 'animation name pairs with the generated keyframe')
   ok(f.keyframes === pulseTravelKeyframes(f.dy), 'element keyframes and animation name derive from the same flight (no drift)')
-  const f2 = pulseBubbleFlight({ width: 400, height: 96 }, 'friction', 2, 4)
-  eq(f2.left, 348, 'fourth lane centerline (350 - 2px)')
+  const f2 = pulseBubbleFlight({ width: 400, height: 96 }, 'friction', 2, 4, true)
+  eq(f2.left, 381, 'fourth lane dot column (301.5+98.5-19=381, whole pixel)')
   eq(f2.top, 84, 'every flight spawns bottom-flush regardless of destination')
-  eq(f2.dy, -30, 'deeper slot -> shorter climb (target.y 60; 60 - 6 - 84)')
+  eq(f2.dy, -51, 'deeper slot -> shorter climb (rowCenter 39; 39 - 6 - 84)')
+  const fW = pulseBubbleFlight({ width: 400, height: 96 }, 'live', 0, 4, false)
+  eq(fW.left, 79, 'wide composition (colGap 3): dot column 78.75 -> 79')
+  eq(fW.animationName, f.animationName, 'step count is width-independent (driven by |dy| only)')
 }
 
 // Source pins: wired into PulseLanes, UI-only (no backend schema fields).
@@ -399,6 +407,9 @@ eq(pulseSlotId('goal', 0), 'goal|0', 'visual slot identity metric|slotIndex')
     'per-distance staircase keyframes are generated (4px pixel-unit hops, clamped hop count)')
   ok(src.includes('steps(1,end)'), 'travel/stamp segments are hold-then-jump saccades (no smooth glide, no subpixel frames)')
   ok(src.includes('iyh-bubble-stamp'), 'arrival stamp keyframes present')
+  ok(src.includes('PULSE_LANDING_BEFORE_DOT'), 'on-dot vs before-dot landing is one named switch')
+  ok(lanesSrc.includes('f.targetY - PULSE_ROW_CENTER_OFF'), 'arrival stamp sits ON the tool first dot (dot-grid top row), not below the cell')
+  ok(lanesSrc.includes('cap, narrow'), 'flight calls thread the narrow layout flag (lane column gap)')
   ok(!lanesSrc.includes('inset 0 0 8px'), 'the old whole-cell inset glow is gone')
   ok(!/pulse-bubble[\s\S]{0,400}?borderRadius/.test(lanesSrc), 'the bubble sprite has sharp edges (no rounded corners, no antialiased dot)')
   ok(/Unmount/.test(lanesSrc) && lanesSrc.includes('clearTimeout'),
