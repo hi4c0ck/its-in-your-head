@@ -126,15 +126,16 @@ eq(adaptPulseToLanes({ rows: [], columns: [] }).available, false, 'no tools -> a
 eq(adaptPulseToLanes(null).lanes.goal, [], 'null payload -> empty lanes, never omits lanes')
 
 // 6. Stage 6 gap-fill (§15 criterion 11): sidebar proportional shrink.
-// v0.1.10 (review fix 7, as committed 3fe0b6b): PULSE holds a FIXED
-// basis in sidebar mode ('0 0 auto' + maxHeight 42%) while PORTRAIT
-// takes the flexible '1 1 0%' basis — the sidebar is the portrait
-// working surface; in bottom mode the reverse (PULSE flexes, PORTRAIT
-// is fixed). The old '1 1 50%' pair split ~75/25 and is gone.
-ok(src.includes("flex: composition === 'sidebar' ? '0 0 auto' : 1"),
-  'sidebar pulse module is flex 0 0 auto in sidebar mode (fixed basis, portrait takes the flex)')
-ok(src.includes("flex: composition === 'sidebar' ? '1 1 0%' : '0 0 auto'"),
-  'sidebar portrait module is flex 1 1 0% in sidebar mode (equal basis, the 50/75 split is gone)')
+// Re-baselined after the v13–v19 portrait brick-mosaic work: PORTRAIT
+// became the content-sized working surface — a FIXED '0 0 auto' module
+// (template picker + canvas + evidence row) in BOTH compositions, while
+// PULSE takes the remaining space with '1 1 0%' in sidebar mode
+// (flex: 1 in bottom). The v0.1.10 review-fix-7 'pulse fixed / portrait
+// flexes' split was inverted when the portrait became the surface.
+ok(src.includes("flex: composition === 'sidebar' ? '1 1 0%' : 1"),
+  'sidebar pulse module flexes in sidebar mode (takes the remaining space; portrait is content-sized)')
+ok(src.includes("flex: '0 0 auto'"),
+  'sidebar portrait module is fixed 0 0 auto (content-sized canvas, v18+)')
 ok(!/flex: composition === 'sidebar' \? '1 1 50%'/.test(src), 'no functional 50%-basis flex left (the 75/25 split is gone)')
 ok(src.includes("'data-composition': 'sidebar'"), 'sidebar composition hook present')
 ok(src.includes("className: 'flex flex-1 flex-col'") && src.includes("gap: 4, minHeight: 0, overflow: 'hidden'"),

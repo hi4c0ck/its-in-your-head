@@ -61,7 +61,7 @@ ok(/' · ⛶ full'/.test(pv), 'expand hint unchanged')
 
 // 4) locked invariants still hold (call forms)
 ok(count(src, /new ResizeObserver\(/g) === 4, 'four ResizeObserver( calls: portrait fit + PulseLanes grid + two Strip composition reads (all mounted-surface measures, no per-frame loops)')
-ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: narrow })'), 'compact PORTRAIT renders the IYH_PORTRAIT engine compact view')
+ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: true })') && src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48 })'), 'compact PORTRAIT renders the IYH_PORTRAIT engine compact view (fill: true stretches the canvas in the tall sidebar; the 48px strip keeps the fixed square)')
 ok(src.includes('jsx(IyhPortraitStudio, { data, preferences })'), 'expanded PORTRAIT renders the IYH_PORTRAIT engine studio view')
 ok(!/Math\.random/.test(ep), 'Perception render is deterministic (no Math.random in ExpandedPortrait)')
 ok(!/#[0-9a-fA-F]{3,8}\b/.test(ep.replace(/var\(--[^)]+\)/g, '')), 'Perception section has no hardcoded hex colors')

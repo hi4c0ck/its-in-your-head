@@ -148,7 +148,7 @@ const prefs2 = UI.createIyhPortraitTemplatePreferences(fakeCtx) // simulate a re
 ok(prefs2.get() === 'soft-flow-study', 'preference survives a reload (re-read from ctx.storage)')
 
 // (10) source wiring: both views render the engine; PULSE/DRIFT routes intact
-ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: narrow })'), 'compact PORTRAIT renders the engine compact view (fill: narrow in the tall sidebar)')
+ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: true })') && src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48 })'), 'compact PORTRAIT renders the engine compact view (fill: true in the tall sidebar; fixed square in the strip)')
 ok(src.includes('jsx(IyhPortraitStudio, { data, preferences })'), 'expanded PORTRAIT renders the engine studio view')
 ok(src.includes('createIyhPortraitTemplatePreferences(ctx)'), 'one shared preference store created in register(ctx)')
 ok(src.includes("rest('/pulse'") && src.includes("rest('/drift')") && src.includes("rest('/portrait')"),

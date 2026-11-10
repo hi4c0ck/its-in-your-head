@@ -38,14 +38,22 @@ jobs:
         with:
           node-version: 20
 
-      - name: Desktop pane syntax
-        run: node --check desktop/plugin.js
+      - name: Desktop pane syntax (ESM gate)
+        # stdin + explicit module type: `node --check file.js` is
+        # CJS-detected and can false-green broken ESM.
+        run: node --input-type=module --check < desktop/plugin.js
 
       - name: Desktop contract tests
         run: node tests/test_desktop_petstate.mjs
 
       - name: Desktop pulse contract tests
         run: node tests/test_desktop_pulse.mjs
+
+      - name: Desktop pulse reducer + cursor tests (Continuous Tool Activity)
+        run: node tests/test_pulse_tick_reducer.mjs
+
+      - name: Desktop bubble contract tests
+        run: node tests/test_desktop_bubble.mjs
 
       - name: Desktop theme-compat tests
         run: node tests/test_desktop_themecompat.mjs

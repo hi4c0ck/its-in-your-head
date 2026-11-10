@@ -102,7 +102,11 @@ assert.ok(strip.length > 0, 'Strip region found')
 // PulseLanes (activityEvents prop) and the PULSE queryFns ride the
 // cursor suffix; the portrait canvas pass (offscreen morph buffer +
 // particles) landed in the same window. Intentional strip edit.
-const STRIP_SHA_S16_MOTION = 'ee7725d5885c4a284449880fdbf37c8778bec07309bd56c29fe9f37a8c83a8fe'
+// Re-baselined after the v13–v19 portrait brick-mosaic work: the Strip
+// region now carries the J brick-mosaic canvas state (drift/dither
+// mask, glitch band), the content-sized portrait module split, and
+// the fill: true sidebar compact view. Intentional strip edit.
+const STRIP_SHA_S16_MOTION = '7bac8c6ebe822f8ef9df7dd2d3fa5432dea4423141ebf4052b6c808a023a11d1'
 assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_S16_MOTION,
   '96px strip source byte-identical to the S16 motion-grammar baseline')
 ok(true, 'strip byte-identity snapshot pinned')

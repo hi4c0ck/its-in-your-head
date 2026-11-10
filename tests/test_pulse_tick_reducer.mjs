@@ -5,9 +5,14 @@
 //       overlapping refreshes; cancel tears the window down.
 //   A — coordinator.activity(): same tool called N times = N distinct
 //       FIFO bubbles (identity evt|<eventId>); redelivery dedupe by
-//       watermark; hidden tools hold (bounded queue) and promote when
-//       visible; gone-from-lane drops without a PULSE error; V1 hold
-//       of semantic lanes + V2 immediate LIVE commit; reduced motion.
+//       watermark; unroutable tools (hidden or off-lane) HOLD in the
+//       unbounded FIFO queue until their LIVE cell exists (never
+//       dropped, never foreign-routed, never evicted); rePromoteHeld()
+//       re-resolves the queue on lane/capacity change; V1 hold of
+//       semantic lanes + V2 immediate LIVE commit; reduced motion.
+//   C — cold-start integration: baseline high-water 0 is a VALID
+//       cursor (the query still sends after_event_id=0) -> the first
+//       event (id 1) becomes a visible bubble.
 //   S — semantic suppression: an activity-driven batch must not also
 //       emit LIVE rank-change bubbles (spec §5.3).
 //   K — LIVE lane key extension: a completion with unchanged rank and
@@ -176,15 +181,23 @@ const ev = (id, tool) => ({
   eq(coord.getState().held.length, 0, 'A3: hold queue drained on promotion')
 }
 {
-  // A4: tool gone from the lane entirely -> dropped (debug counter
-  // only), never a PULSE error, never a foreign-cell animation.
+  // A4 (review fix): tool not on the lane right now -> the event is
+  // STILL ACCEPTED (cursor advances past it) and HOLDS in the FIFO
+  // queue until the tool's LIVE cell exists — never dropped, never
+  // routed to a foreign cell, no PULSE error.
   const lanes = { live: [liveEntry('editor', 1)], goal: [], good: [], friction: [] }
   const coord = createPulseBubbleCoordinator({ maxConcurrent: 3 })
   coord.ingest(lanes, 3)
   var res = coord.activity([ev(20, 'ghost')], lanes, 3)
   eq(res.accepted, 1, 'A4: the event is still accepted into the stream')
-  eq(coord.getState().activityDropped, 1, 'A4: gone-from-lane event is dropped (counted)')
-  eq(coord.getState().active.length, 0, 'A4: no bubble for a tool that no longer exists')
+  eq(coord.getState().held.length, 1, 'A4: off-lane event holds in the FIFO queue')
+  eq(coord.getState().activityDropped, 0, 'A4: nothing is dropped (no foreign-cell routing)')
+  eq(coord.getState().active.length, 0, 'A4: no bubble until the tool has a LIVE cell')
+  var lanes2 = { live: [liveEntry('editor', 1), liveEntry('ghost', 2)], goal: [], good: [], friction: [] }
+  var res2 = coord.rePromoteHeld(lanes2, 3)
+  ok(res2.fresh.length === 1 && res2.fresh[0].semanticId === 'evt|20',
+     'A4: the held event promotes when the tool enters the lane')
+  eq(coord.getState().held.length, 0, 'A4: hold queue drained on re-promotion')
 }
 {
   // A5: V1/V2 — LIVE commits immediately on acceptance; semantic lanes
@@ -298,6 +311,61 @@ const ev = (id, tool) => ({
     false, 'a malformed batch (no next_cursor) must NOT advance')
   eq(pulseActivityShouldAdopt(null, { events: [], next_cursor: 5 }),
     true, 'a well-formed empty batch adopts even with no coordinator result (the cursor is module state; the effect always passes a real result)')
+}
+
+// ============ A8/A9: unbounded held queue + re-promotion (review) ============
+{
+  // A8: the held queue is UNBOUNDED — overflow stays queued (FIFO),
+  // nothing is evicted. 70 off-lane events, each its own tool.
+  const coord = createPulseBubbleCoordinator({ maxConcurrent: 2 })
+  const offLane = { live: [liveEntry('editor', 1)], goal: [], good: [], friction: [] }
+  coord.ingest(offLane, 2)
+  var evs = []
+  for (var i = 1; i <= 70; i++) evs.push(ev(i, 'tool' + i))
+  var res = coord.activity(evs, offLane, 2)
+  eq(res.accepted, 70, 'A8: all events accepted')
+  eq(coord.getState().held.length, 70, 'A8: all 70 stay queued (no 64-entry eviction)')
+  eq(coord.getState().activityDropped, 0, 'A8: nothing dropped')
+  var lanes2 = { live: [liveEntry('editor', 1), liveEntry('tool1', 2)], goal: [], good: [], friction: [] }
+  var res2 = coord.rePromoteHeld(lanes2, 2)
+  eq(res2.fresh.map(function (t) { return t.semanticId }), ['evt|1'],
+     'A8: the oldest held event promotes first when its tool enters the prefix (FIFO)')
+  eq(coord.getState().held.length, 69, 'A8: the rest of the queue is intact')
+}
+{
+  // A9: capacity growth re-promotes a hidden held event with NO new
+  // batch — the pane's lane-key/capacity effect path (review fix 2).
+  const lanes = { live: [liveEntry('a', 1), liveEntry('b', 2), liveEntry('c', 3)],
+                  goal: [], good: [], friction: [] }
+  const coord = createPulseBubbleCoordinator({ maxConcurrent: 3 })
+  coord.ingest(lanes, 2)
+  coord.activity([ev(50, 'c')], lanes, 2) // rank 3 > cap 2: hidden -> held
+  eq(coord.getState().held.length, 1, 'A9: the hidden tool\u2019s event holds')
+  var res = coord.rePromoteHeld(lanes, 3) // cap grows to 3: c now visible
+  ok(res.fresh.length === 1 && res.fresh[0].semanticId === 'evt|50',
+     'A9: the held event promotes on the capacity change alone')
+  eq(coord.getState().held.length, 0, 'A9: hold queue drained')
+}
+
+// ============ C: cold-start integration — baseline 0 -> first event -> bubble ============
+{
+  // The path a fresh install walks: fresh DB (no events) -> baseline
+  // response (events: [], next_cursor: 0) -> the pane adopts 0 -> the
+  // NEXT request must carry after_event_id=0 (0 is a valid cursor, not
+  // a falsy "no cursor") -> the server returns the first event (id 1)
+  // -> it becomes a visible bubble.
+  rApi.pulseActivityAccept({ activity_events: { events: [], next_cursor: 0 } })
+  eq(pulseActivityQuerySuffix(), '?after_event_id=0',
+     'C1: the adopted baseline 0 still sends a cursor (0 is valid, not null)')
+  const coord = createPulseBubbleCoordinator({ maxConcurrent: 3 })
+  coord.ingest({ live: [liveEntry('terminal', 1)], goal: [], good: [], friction: [] }, 3)
+  var res = coord.activity([ev(1, 'terminal')],
+    { live: [liveEntry('terminal', 1, { calls_started: 1 })], goal: [], good: [], friction: [] }, 3)
+  eq(res.accepted, 1, 'C2: the first event is accepted')
+  ok(res.fresh.length === 1 && res.fresh[0].semanticId === 'evt|1',
+     'C3: the first event becomes the visible bubble')
+  rApi.pulseActivityAccept({ activity_events: { events: [ev(1, 'terminal')], next_cursor: 1 } })
+  eq(pulseActivityQuerySuffix(), '?after_event_id=1', 'C4: the cursor advanced 0 -> 1')
 }
 
 console.log('PASS pulse-tick-reducer: ' + n + ' assertions')
