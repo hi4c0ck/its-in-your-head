@@ -1,18 +1,19 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>IYH J wave-fold sample (v20)</title>
+<html><head><meta charset="utf-8"><title>IYH J ground-dither sample (v21)</title>
 <style>body{background:#101316;color:#cfd6dd;font:14px/1.5 system-ui;margin:24px;max-width:860px}
 canvas{background:#0e1116;border:1px solid #263140}
 .sld{display:grid;grid-template-columns:230px 1fr 70px;gap:8px 12px;align-items:center;margin:7px 0}
 .sld input[type=range]{width:100%}
 h1{font-size:18px}.sub{color:#8fa0b2;font-size:13px;max-width:760px}</style></head><body>
-<h1>IYH J brick mosaic &mdash; WAVE-FORMULA fold (v20)</h1>
-<p class="sub">The dither mask ripples in the <b>wave shape</b> (your formula y(x) = 0.54 + 0.12&middot;sin(&pi;x) &minus; 0.15&middot;cos(&pi;x) + 0.22&middot;sin(2&pi;x) &minus; 0.23&middot;cos(2&pi;x) &minus; 0.09&middot;sin(3&pi;x) &minus; 0.02&middot;cos(3&pi;x)). It <b>folds</b> (damps) where it hits the SVG lines + a <b>secondary fold mask</b> = the lines shifted LEFT by the avg line width (~foldOffset bricks). Open in a FOREGROUND tab to see the ripple + the glitches. Sliders: the wave amplitude, the fold line-threshold, the fold offset, + the glitch cadence.</p>
+<h1>IYH J brick mosaic &mdash; GROUND DITHER + LINE-FOLD (v21)</h1>
+<p class="sub">The face lines stay <b>crisp</b> (the accent, no dither). The dither mask ripples in the <b>wave shape</b> (your formula) where it <b>misses the SVG pattern</b> &mdash; the <b>ground/void</b> ("zero ground") &mdash; on its own opacity (<b>groundMax</b>). It <b>folds</b> (damps) where it hits the SVG lines + a <b>secondary fold mask</b> = the lines shifted LEFT by the avg line width (<b>foldOffset</b> bricks, ~8-12px). Sliders: wave amplitude, fold line-threshold, fold offset, glitch cadence, ground floor + ground opacity. Open in a FOREGROUND tab.</p>
 <div class="sld"><label>waveAmp (noise-units)</label><input id="waveAmp" type="range" min="0" max="20" value="6"><span class="v" id="waveAmpv">6</span></div>
 <div class="sld"><label>lineFoldThr (0..1)</label><input id="lineFoldThr" type="range" min="10" max="90" value="50"><span class="v" id="lineFoldThrv">0.50</span></div>
 <div class="sld"><label>foldOffset (bricks left)</label><input id="foldOffset" type="range" min="0" max="4" value="1"><span class="v" id="foldOffsetv">1</span></div>
 <div class="sld"><label>glitchEvery (frames)</label><input id="gEvery" type="range" min="20" max="300" value="90"><span class="v" id="gEveryv">90</span></div>
 <div class="sld"><label>glitchLen (frames)</label><input id="gLen" type="range" min="2" max="40" value="10"><span class="v" id="gLenv">10</span></div>
-<div class="sld"><label>ditherFloor</label><input id="floor" type="range" min="0" max="90" value="40"><span class="v" id="floorv">0.40</span></div>
+<div class="sld"><label>ditherFloor (ground floor)</label><input id="floor" type="range" min="0" max="90" value="40"><span class="v" id="floorv">0.40</span></div>
+<div class="sld"><label>groundMax (ground opacity)</label><input id="gMax" type="range" min="0" max="100" value="30"><span class="v" id="gMaxv">0.30</span></div>
 <canvas id="c" width="480" height="506"></canvas>
 <script>
 const IYH_J = {
@@ -31,6 +32,7 @@ const IYH_J = {
   ditherDriftY: 8,     // dither mask drift, Y (bricks/sec; DIFFERENT from X -> NON-diagonal)
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
   waveAmp: 6,          // v20 the WAVE-FORMULA offset-mask amplitude (noise-units): how far the dither field ripples in the wave shape (iihyJWave)
+  groundMax: 0.3,     // v21 the GROUND dither max opacity - the background (void) ripples on its own opacity, the face lines stay crisp
   foldOffset: 1,      // v20 the SECONDARY fold mask = the SVG lines shifted LEFT by this many pooled bricks (~1 ≈ 10px ≈ the avg line width); the fold band that prevents mess
   lineFoldThr: 0.5,   // v20 coverage (0..1) at/above which the wave FOLDS (damps) at a brick -> crisp lines, no mess near the SVG lines
   glitchEvery: 90,    // v19 the GLITCH burst cadence: frames between glitch bursts (~7.5s at 12fps)
@@ -107,18 +109,21 @@ function draw(f){
     gColor='#ff2d95'
   }
   const accCol=ACC
+  const gMax=+$('gMax').value/100
   for(let prr=0;prr<pm;prr++)for(let pc=0;pc<pn;pc++){
     let cvv=0,found=false
     for(let yy=0;yy<pool;yy++)for(let xx=0;xx<pool;xx++){const c0=pc*pool+xx,r0=prr*pool+yy;if(c0>=cn||r0>=rn)continue;const v=IYH_FACE_COV_BYTES[r0*cn+c0];if(v>cvv)cvv=v;found=true}
-    if(!found||cvv<IYH_FACE_COV.thr)continue
+    if(!found)continue
     const contrast=iiyhJContrast(cvv/255)
+    const isLit=cvv>=IYH_FACE_COV.thr   // a FACE line (the svg pattern hit here)
     let cvvL=0
     if(pc>=foldOff){const cc=pc-foldOff;for(let yy2=0;yy2<pool;yy2++)for(let xx2=0;xx2<pool;xx2++){const c0=cc*pool+xx2,r0=prr*pool+yy2;if(c0>=cn||r0>=rn)continue;const v2=IYH_FACE_COV_BYTES[r0*cn+c0];if(v2>cvvL)cvvL=v2}}
-    const foldDamp=Math.min(1,Math.max(cvv,cvvL)/(lineFoldThr*255))
-    const waveOff=(iihyJWave(pc/Math.max(1,pn-1))-0.5)*waveAmp*(1-foldDamp)
-    let a=contrast*(dFloor+(1-dFloor)*iihyJNoise(pc+dOffX,prr+dOffY+waveOff,IYH_J.ditherSeed,feat))
+    const lineProx=Math.min(1,Math.max(cvv,cvvL)/(lineFoldThr*255))   // 0 = deep void, 1 = on/near a line / the fold band
+    const waveOff=(iihyJWave(pc/Math.max(1,pn-1))-0.5)*waveAmp*(1-lineProx)   // the wave offset, FOLDED at the lines
+    const dv=iihyJNoise(pc+dOffX,prr+dOffY+waveOff,IYH_J.ditherSeed,feat)
+    let a=isLit?contrast:gMax*(dFloor+(1-dFloor)*dv)*(1-lineProx)   // FACE: crisp (the accent); GROUND: the dither ripple (own opacity), folded at the lines
     if(a<=0.02)continue
-    const inBand=gActive&&prr>=gBand&&prr<gBand+gH
+    const inBand=gActive&&isLit&&prr>=gBand&&prr<gBand+gH   // the glitch is on the FACE lines
     let gx=offX+pc*bwS+gapX/2,ga=a
     if(inBand){gx+=gShift+Math.sin(f*0.9+prr*1.3)*bwS*0.3;ga=Math.min(1,Math.max(a,0.85)*(0.6+0.4*iihyJHash(pc*7+f,gIdx,IYH_J.ditherSeed+90)))}
     g.fillStyle=inBand?gColor:accCol
@@ -128,7 +133,7 @@ function draw(f){
   g.globalAlpha=1
 }
 let frame=0,_iv=null
-for(const el of ['waveAmp','lineFoldThr','foldOffset','gEvery','gLen','floor']){const inp=$(el),out=$(el+'v');inp.oninput=()=>{out.textContent=el==='floor'||el==='lineFoldThr'?(inp.value/100).toFixed(2):inp.value}}
+for(const el of ['waveAmp','lineFoldThr','foldOffset','gEvery','gLen','floor','gMax']){const inp=$(el),out=$(el+'v');inp.oninput=()=>{out.textContent=el==='floor'||el==='lineFoldThr'||el==='gMax'?(inp.value/100).toFixed(2):inp.value}}
 draw(0)
 window.__setFrame=function(f){if(_iv){clearInterval(_iv);_iv=null}frame=f;draw(f);return f}
 _iv=setInterval(()=>{frame++;draw(frame)},1000/12)

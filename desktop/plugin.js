@@ -1919,8 +1919,9 @@ const IYH_J = {
   ditherDriftX: 12,    // dither mask drift, X (bricks/sec; features crawl, the face visibly shimmers)
   ditherDriftY: 8,     // dither mask drift, Y (bricks/sec; DIFFERENT from X -> NON-diagonal)
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
-  waveAmp: 6,          // v20 the WAVE-FORMULA offset-mask amplitude (noise-units): how far the dither field ripples in the wave shape (iihyJWave)
-  foldOffset: 1,      // v20 the SECONDARY fold mask = the SVG lines shifted LEFT by this many pooled bricks (~1 ≈ 10px ≈ the avg line width); the fold band that prevents mess
+  waveAmp: 6,            // v20: the WAVE offset amplitude (noise-units) - how hard the mask ripples in the wave shape
+  groundMax: 0.3,        // v21: the GROUND dither max opacity - the background (void) ripples on its own opacity, the face lines stay crisp
+  foldOffset: 1,         // v20: the SECONDARY fold mask = the SVG lines shifted LEFT this many pooled bricks (~avg line width, 8-12px) -> prevents mess near the lines
   lineFoldThr: 0.5,   // v20 coverage (0..1) at/above which the wave FOLDS (damps) at a brick -> crisp lines, no mess near the SVG lines
   glitchEvery: 90,    // v19 the GLITCH burst cadence: frames between glitch bursts (~7.5s at 12fps)
   glitchLen: 10,       // v19 how long a glitch burst lasts, in frames (~0.83s) -> a brief rip, then snap-back
@@ -2180,11 +2181,12 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       if (v > cvv) cvv = v
       found = true
     }
-    if (!found || cvv < IYH_FACE_COV.thr) continue
+    if (!found) continue
     const vc = cvv / 255                                       // brick "confidence" 0..1
     const contrast = iiyhJContrast(vc)                          // acos spline: [0,1], full at accentConf (0.83+)
-    // v20: the SECONDARY fold mask = the SVG lines shifted LEFT by foldOff pooled bricks (≈ the
-    // avg line width) -> the fold band that keeps the ripple from getting messy near the lines.
+    const isLit = cvv >= IYH_FACE_COV.thr                       // a FACE line (the SVG pattern hit here)
+    // the SECONDARY fold mask = the SVG lines shifted LEFT by foldOff pooled bricks (≈ the avg line
+    // width) -> the fold band that keeps the ground ripple from getting messy near the lines.
     let cvvL = 0
     if (pc >= foldOff) {
       const cc = pc - foldOff
@@ -2194,10 +2196,22 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
         const v2 = cov[r0 * cn + c0]; if (v2 > cvvL) cvvL = v2
       }
     }
-    const foldDamp = Math.min(1, Math.max(cvv, cvvL) / lineFoldThr)   // 1 = on a line / in the fold band -> the wave FOLDS
-    const waveOff = (iihyJWave(pc / Math.max(1, pn - 1)) - 0.5) * waveAmp * (1 - foldDamp)  // the per-column wave offset, damped at the lines
+    // proximity to the lines (0 = deep void, 1 = on/near a line or the shifted-left fold band)
+    const lineProx = Math.min(1, Math.max(cvv, cvvL) / lineFoldThr)
+    // the per-column WAVE offset (FULL in the ground; it FOLDS (damps) where it hits the lines)
+    const waveOff = (iihyJWave(pc / Math.max(1, pn - 1)) - 0.5) * waveAmp * (1 - lineProx)
     const dv = iihyJNoise(pc + dOffX, prr + dOffY + waveOff, IYH_J.ditherSeed, IYH_J.ditherFeat)
-    const a = contrast * (IYH_J.ditherFloor + (1 - IYH_J.ditherFloor) * dv) * (focusShift ? 1.05 : 1)
+    let a
+    if (isLit) {
+      // the FACE line: CRISP (the accent, full brightness, the v13 focus flicker). The wave folds here
+      // -> no dither shimmer on the lines.
+      a = contrast * (focusShift ? 1.05 : 1)
+    } else {
+      // v21: the GROUND — draw the dither where it MISSES the svg pattern (the void, "zero ground"),
+      // on its own opacity (groundMax), FOLDED at the lines (damped where lineProx is high). The
+      // background ripples in the wave shape, the face lines stay crisp.
+      a = IYH_J.groundMax * dv * (1 - lineProx)
+    }
     if (a <= 0.02) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
     const inBand = gActive && prr >= gBand && prr < gBand + gH
@@ -3960,7 +3974,7 @@ const PULSE_GLOW_CSS =
 // lane grid itself (never the whole Strip), and bubbles travel
 // bottom-edge -> destination cell in one pixel coordinate system.
 function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow = false,
-                      activityEvents, rest }) {
+                      activityEvents, rest, ioRecent }) {
   var order = ['live', 'goal', 'good', 'friction'];
   var cap = Math.max(1, Math.floor(Number(capacity) || 1));
   var coordRef = useRef(null);
