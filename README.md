@@ -61,6 +61,100 @@ Verify: `hermes -p <profile> plugins doctor its-in-your-head --ci`.
 
 `hermes://plugin/install?repo=hi4c0ck/its-in-your-head&enable=1`
 
+## Manual — the basic tools
+
+### The strip (what you see at all times)
+
+The 96px instrument docks to the bottom of the desktop app: live
+tool-call matrix, portrait sketch, four trend bars and a ticker. Labels
+ellipsize by design at the compact width.
+
+![Compact pulse strip](assets/shot-pulse-strip.png)
+
+### The workspace (expand for inspection)
+
+The strip's expand icon (top-right, next to `?`) opens the workspace —
+the same data in three wider views:
+
+**PULSE** — per-tool table: live-calls volume + goal / good / friction state.
+
+![Workspace PULSE view](assets/shot-workspace-pulse.png)
+
+**PORTRAIT** — the six perception dimensions with sparklines + delta.
+
+![Workspace PORTRAIT view](assets/shot-workspace-portrait.png)
+
+**DRIFT** — the same six dimensions as recent time series.
+
+![Workspace DRIFT view](assets/shot-workspace-drift.png)
+
+### `/mirror` — the chat quick reference
+
+| command | what it shows |
+|---|---|
+| `/mirror` | dataset line (events + tokens) |
+| `/mirror pulse` | goal / good / friction state per label |
+| `/mirror portrait` | six dimensions + confidence |
+| `/mirror portrait draw` | deterministic ASCII face + six-axis evidence strip |
+| `/mirror drift` | six-dimension series (last 8 points) |
+| `/mirror context` | context-visibility audit (what the model can / can't see) |
+| `/mirror reset [--yes]` | wipe the dataset — confirmation-gated, config untouched |
+| `/mirror adaptation [on\|off\|status\|rules]` | directional adaptation state + rules |
+| `/mirror engine [status\|enable\|disable]` | perception tier (Tier-0 default, opt-in ONNX Tier-1) |
+
+Sample output (live dataset):
+
+```text
+$ /mirror
+mirror: 44580 events, 1124716257 tokens
+
+$ /mirror portrait draw
+portrait draw:
+                           ...
+      :    \         /  :
+      :                 :
+      :     -       -   :
+      :        v        :
+      :-----------------------:
+      dir +0.50 c   - | ctx +0.54 c   - | exp +0.51 c   -
+      dep +0.51 c   - | itr +0.50 c   - | scp +0.50 c   -
+      stage none | seed true | line 0.21 | asym 0.03 | evidence present
+
+$ /mirror context
+context:
+  user message: VISIBLE
+  history extent: KNOWN
+  system instructions: NOT EXPOSED
+  SOUL.md: KNOWN
+  USER.md: KNOWN
+  MEMORY.md: KNOWN
+  AGENTS.md: KNOWN
+  active skills: KNOWN
+  plugin adaptation: KNOWN
+  injected instruction: KNOWN
+
+$ /mirror engine status
+engine:
+  Tier 0: tier-0 (sketch, always available) [active]
+  Tier 1: tier-1-onnx (ONNX MiniLM)
+  Active tier: Tier 0
+  ONNX runtime: ok
+  Worker: dead
+```
+
+(The `portrait draw` face above is abridged — the live output is a full
+25×14 deterministic character face; the axis lines are the evidence strip.)
+
+### Enable / disable
+
+- Settings → Plugins → **It's in Your Head**: the **backend** toggle runs
+  the agent half (hooks, telemetry, `/mirror`); the **desktop** toggle
+  mounts the pane. The halves are independent — the pane keeps showing
+  whatever the backend last flushed.
+- Zero-network by default. ONNX Tier-1 is opt-in: `/mirror engine enable`
+  downloads the pinned model once; inference is local CPU-only in an
+  isolated worker process.
+
 ## Tests & gates
 
 `<hermes venv python> -m pytest -q` (pytest.ini pins importlib import mode,
