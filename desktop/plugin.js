@@ -3780,8 +3780,10 @@ function pulseDriftMask(filled, base, mult) {
 // quantization transition detection uses, so: a meaningful value/level/state
 // change moves only this cell; everything else (other lanes' bubbles, other
 // tools) leaves this cell's mask byte-stable. Different tools / lanes hash to
-// different bases, so equal (peak, laneSize) no longer yields identical
-// patterns. `null` (no value at all) and 0.0 are distinct buckets: a
+// different bases, so two equal-value rows in different lanes no longer yield
+// identical patterns (the v0.1.21 lane-peak x rank-line coupling that did is
+// retired; v0.1.23 drives each row from its own value). `null` (no value at
+// all) and 0.0 are distinct buckets: a
 // learning row with no value stays an honest absence.
 function pulseFnv32(str) {
   var h = 2166136261;
@@ -4461,39 +4463,31 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
   var hasEntries = order.some(function (l) {
     return lanes && Array.isArray(lanes[l]) && lanes[l].length > 0;
   });
-  // v0.1.21 (rank progressive line): a lane's dot-meters step DOWN smoothly
-  // by rank -- the lane's top tool carries the PEAK (its strongest signal: the
-  // value, or the objective data when the value is empty) and the rest decay
-  // quadratically across the lane. "The weights across should matter": the
-  // standout stands out, the tail recedes. ONE smooth function of rank; no
-  // ad-hoc floor numbers (no 2/6/12).
-  function laneSignal(e) {
-    // v0.1.22 (owner fix): read the value exactly like pulseEntryValue does —
-    // LIVE entries carry it at e.momentum.value, NOT e.value. The v0.1.21
-    // rank line read e.value only, so every LIVE lane's peak was structurally
-    // 0 no matter how busy the tool was (the "always active yet empty" report).
+  // v0.1.23 (owner fix — the rank line is RETIRED): a row's meter is driven by
+  // the row's OWN value (the same number the hover tooltip shows), run through
+  // the owner's X-space wave (pulseDotWave). v0.1.21's rank line (lane peak x
+  // (1-rank/laneSize)^2) made a high-value LOW-rank row read FEWER dots than a
+  // low-value top row (the terminal ~0.35 -> 4 vs patch ~0.42 -> 2 report) —
+  // the meter no longer disagrees with its own tooltip.
+  function pulseRowDots(e) {
+    // Read the value exactly like pulseEntryValue does — LIVE entries carry it
+    // at e.momentum.value, NOT e.value (the v0.1.21 structural-0 bug).
     var raw = pulseEntryValue(e);
-    var v = raw === null ? 0 : (raw < 0 ? 0 : raw);
-    var h = (e && typeof e.objective_hint === 'number' && Number.isFinite(e.objective_hint)) ? e.objective_hint : 0;
-    var s = Math.max(v, h);
-    return s > 1 ? 1 : s;
+    if (raw === null) return 0;  // no evidence -> no dots (honest absence)
+    return Math.round(pulseDotWave(raw) * 12);
   }
   // v0.1.22 (presence floor, restored from v0.1.12): a row whose entry CARRIES
   // a value (value or momentum — not null) is never a pitch-black meter: the
-  // rank-line decay floors it at 1 dot ("present, weak"). Entries with no
-  // value at all (honest absence, state learning) stay empty, and the
-  // placeholder rows for lanes with fewer entries still render nothing.
+  // per-row wave can round a tiny value to 0 dots, so floor it at 1
+  // ("present, weak"). Entries with no value at all (honest absence, state
+  // learning) stay empty, and the placeholder rows for lanes with fewer
+  // entries still render nothing.
   function pulsePresenceFloor(dots, e) {
     return pulseEntryValue(e) !== null && dots < 1 ? 1 : dots;
   }
-  function rankLineDots(peak, rank, laneSize) {
-    var t = 1 - rank / Math.max(1, laneSize);
-    if (t < 0) t = 0;
-    return Math.max(0, Math.min(12, Math.round(peak * t * t)));
-  }
   function dotsFor(filled, driftBase) {
-    // v0.1.21: `filled` is the lane's RANK-LINE dot count (computed at the
-    // call site from the lane's peak + this entry's rank). The bar renders
+    // v0.1.23: `filled` is the ROW's own value->dots count (pulseRowDots,
+    // computed at the call site from this entry's value). The bar renders
     // that many dots in a deterministic drift order (v0.1.16).
     if (!Number.isFinite(filled)) filled = 0;
     filled = Math.max(0, Math.min(12, Math.round(filled)));
@@ -4526,15 +4520,13 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
     },
     children: [order.map(function (lane) {
       var entries = lanes && Array.isArray(lanes[lane]) ? lanes[lane].slice(0, cap) : [];
-      // v0.1.21 (rank progressive line): the lane's PEAK = its top tool's
-      // strongest signal (value, or the objective data when the value is
-      // empty), the HONEST read -- no temper, no floor, no confidence hack.
-      // Each entry's dots = peak * (1 - rank/laneSize)^2, a smooth decay down
-      // the lane. The value itself is the recent-call accumulation and it
-      // REDUCES on its own as matching calls roll out of the window -- that's
-      // how a "too confident" meter comes down, structurally, no cheat.
-      var laneSize = entries.length;
-      var lanePeak = laneSize ? Math.round(laneSignal(entries[0]) * 12) : 0;
+      // v0.1.23 (per-row value): each entry's dots are driven by that entry's
+      // OWN value (the recent-call accumulation), run through the owner's
+      // X-space wave (pulseRowDots -> pulseDotWave). The value REDUCES on its
+      // own as matching calls roll out of the window -- that's how a "too
+      // confident" meter comes down, structurally, no cheat. The v0.1.21
+      // lane-peak x rank-decoupling is gone: a row's meter now always agrees
+      // with the value its tooltip shows.
       return jsxs('div', {
         key: lane,
         'data-lane': lane,
@@ -4554,9 +4546,9 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
             children: entries.map(function (e, i) {
               var val = e && typeof e.value === 'number' ? e.value
                 : (e && e.momentum && typeof e.momentum.value === 'number' ? e.momentum.value : null);
-              // v0.1.21: `val` feeds the hover tooltip only. The bar is driven
-              // by the lane's rank-line (lanePeak / rankLineDots), not the
-              // per-cell value.
+              // v0.1.23: `val` is the row's OWN value (== pulseEntryValue(e));
+              // it feeds BOTH the hover tooltip and the meter (pulseRowDots),
+              // so the dots always agree with the number shown on hover.
               // Stage 3 detail surface: full canonical name, value,
               // state, support_count, threshold, evidence source.
               var evidenceSrc = e.evidence && e.evidence.source
@@ -4598,7 +4590,9 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
                     // never a pitch-black row) + the per-cell STABLE drift base
                     // (lane, tool, value-bucket) — bubbles in other lanes no
                     // longer re-roll this cell's pattern.
-                    children: dotsFor(pulsePresenceFloor(rankLineDots(lanePeak, i, laneSize), e), pulseCellBase(lane, e)),
+                    // v0.1.23: the count is the row's OWN value (pulseRowDots),
+                    // never the lane rank-line — dots agree with the tooltip.
+                    children: dotsFor(pulsePresenceFloor(pulseRowDots(e), e), pulseCellBase(lane, e)),
                   }),
                 ],
               });

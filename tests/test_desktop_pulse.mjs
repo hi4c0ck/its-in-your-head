@@ -289,12 +289,12 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   //   dot, so it read as a phantom 13th dot (friction: 2 real dots + lamp =
   //   "3") and dropped a second color onto a monochrome meter.
   ok3(lanesSrc.includes('function dotsFor(filled, driftBase)'),
-    'v0.1.21+: dotsFor counts the RANK-LINE fill and places it in drift order')
+    'v0.1.23: dotsFor counts the per-ROW value fill and places it in drift order')
   ok3(lanesSrc.includes('function pulsePresenceFloor(dots, e)')
       && lanesSrc.includes('pulseEntryValue(e) !== null && dots < 1 ? 1 : dots'),
     'v0.1.22 presence floor: an entry that CARRIES a value (value or momentum) is never a pitch-black row; no value = honest absence')
-  ok3(lanesSrc.includes('dotsFor(pulsePresenceFloor(rankLineDots(lanePeak, i, laneSize), e), pulseCellBase(lane, e))'),
-    'the render site: rank-line count + presence floor + per-cell STABLE drift base (lane|tool|value-bucket)')
+  ok3(lanesSrc.includes('dotsFor(pulsePresenceFloor(pulseRowDots(e), e), pulseCellBase(lane, e))'),
+    'the render site: per-ROW value count + presence floor + per-cell STABLE drift base (lane|tool|value-bucket)')
   ok3(lanesSrc.includes('pulseDriftMask(filled, driftBase, PULSE_DOT_DRIFT_MULT)'),
     'dotsFor places the lit dots in a deterministic drift order (pulseDriftMask)')
   ok3(lanesSrc.includes('opacity: (mask ? mask[i] : i < filled)'),
@@ -308,8 +308,9 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   // provisional/ready value (even weak) still gets the presence floor.
   ok3(lanesSrc.includes('pulseEntryValue(e) !== null'),
     'v0.1.13/22: the meter is value-driven (no value -> no floor; learning/null stays empty)')
-  ok3(lanesSrc.includes('var raw = pulseEntryValue(e)'),
-    'v0.1.22: laneSignal reads the value like pulseEntryValue does (LIVE entries carry it at e.momentum.value — v0.1.21 read e.value only, so live peaks were structurally 0)')
+  ok3(lanesSrc.includes('function pulseRowDots(e)')
+      && lanesSrc.includes('var raw = pulseEntryValue(e)'),
+    'v0.1.23: pulseRowDots drives the meter from the row OWN value (LIVE entries carry it at e.momentum.value via pulseEntryValue — the v0.1.21 structural-0 e.value-only read stays fixed)')
   ok3(src.includes('function pulseCellBase(lane, entry)') && src.includes('function pulseFnv32(str)'),
     'v0.1.22: the per-cell STABLE drift base is defined (FNV-1a of lane|tool|value-bucket, the same 1e-6 quantization transition detection uses)')
   ok3(!lanesSrc.includes('(coord.getState().seq || 0) + i'),
@@ -343,16 +344,18 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   // fill: dots = round(wave(value) * 12); the honest 0-dot floor for
   // value=null (learning/empty) is preserved.
   ok3(src.includes('function pulseDotWave('),
-    'the owner X-space value->dots wave is still DEFINED (retained as the re-tune handle; the v0.1.21 rank line now drives the lane fill)')
+    'the owner X-space value->dots wave is DEFINED and DRIVES the per-row fill (v0.1.23: the v0.1.21 rank line was retired in favor of this wave)')
   ok3(src.includes('Math.pow(v, 0.78)')
         && src.includes('0.420')
         && src.includes('0.500 * Math.cos(PI * u)'),
     'the wave uses the owner coefficients (0.420 base) + the x^0.78 X-space transform')
-  ok3(lanesSrc.includes('function rankLineDots(peak, rank, laneSize)')
-      && lanesSrc.includes('Math.round(peak * t * t)'),
-    'v0.1.21: the lane fill is the RANK-LINE (the top tool carries the peak, the rest decay quadratically down the lane), not the per-cell wave')
-  ok3(lanesSrc.includes('var lanePeak = laneSize ? Math.round(laneSignal(entries[0]) * 12) : 0'),
-    'the lane peak = the top entry\'s strongest signal scaled to the 12-dot meter')
+  ok3(!lanesSrc.includes('function rankLineDots(')
+      && !src.includes('rankLineDots(lanePeak, i, laneSize)'),
+    'v0.1.23: the v0.1.21 RANK-LINE (top-tool peak + quadratic rank decay) is RETIRED — it made a high-value low-rank row read fewer dots than a low-value top row')
+  ok3(!src.includes('var lanePeak = laneSize') && !src.includes('laneSignal(entries[0])'),
+    'v0.1.23: the lane peak + laneSignal coupling is gone; each row is driven by its own value')
+  ok3(lanesSrc.includes('Math.round(pulseDotWave(raw) * 12)'),
+    'v0.1.23: the per-row dot count = the owner wave applied to the row OWN value, scaled to the 12-dot meter')
   // v0.1.12 distinct dequeued dots: a whoop-up is ONE per tool (its newest
   // event), not one per call — the cursor queue exists to surface a NEW
   // tool, not the same tool N times. activity() dedupes via the helper;
