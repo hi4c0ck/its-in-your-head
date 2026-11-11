@@ -11,6 +11,8 @@ DB-down / no-tools case still returns the full envelope.
 """
 import time
 
+import math
+
 import pytest
 
 from pulse.matrix import (
@@ -176,10 +178,14 @@ def test_friction_user_objective_parts_independent():
     lanes = build_lanes(reg, protos, goal_vector=[1.0, 0.0])
     (fr,) = lanes["friction"]
     assert set(fr) == {"tool_id", "tool_name", "rank", "value", "threshold",
-                       "level", "state", "dominant_source", "user", "objective"}
+                       "level", "state", "dominant_source", "similarity",
+                       "user", "objective"}
     assert fr["threshold"] == 0.4
-    assert fr["value"] == 1.0
-    # Tie in value -> support ratio decides (user 3/3 = 1.0 > 1/3).
+    # P2: value = channel-gated accumulation (0.0 — no capsules passed here);
+    # the single-prompt strongest similarity is preserved as the sub-field.
+    assert fr["value"] == 0.0
+    assert fr["similarity"] == 1.0
+    # Tie in similarity -> support ratio decides (user 3/3 = 1.0 > 1/3).
     assert fr["dominant_source"] == "user"
     assert fr["state"] == "ready"
     for part in ("user", "objective"):
@@ -200,6 +206,62 @@ def test_friction_user_objective_parts_independent():
     assert fr2["user"]["state"] == "learning"
     assert fr2["user"]["value"] is None
     assert fr2["objective"]["state"] == "ready"
+
+
+def test_good_friction_value_is_channel_gated_accumulation():
+    """P2: the semantic value builds up from recent calls that resemble the
+    tool's OWN labeled bank (0-baseline saturation), not one prompt's
+    similarity. The strongest similarity is preserved as `similarity`."""
+    reg = _FakeRegistry([_row("browser", 7)])
+    protos = _FakeProtos({
+        "browser": {"good": [[1.0, 0.0]], "friction": [[0.0, 1.0]],
+                    "objective_friction": []},
+    })
+    import math
+
+    def _val(n, matching):
+        if matching:
+            return round(1.0 - math.exp(-n / 8.0), 4)
+        return 0.0
+
+    # 3 recent calls matching the good bank (cos 1.0 >= 0.6) accumulate.
+    good_caps = [{"vector": [1.0, 0.0]} for _ in range(3)]
+    lanes = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
+                        capsules_by_tool={"browser": good_caps})
+    good = next(e for e in lanes["good"] if e["tool_name"] == "browser")
+    assert good["value"] == _val(3, True)            # 0.3127
+    assert good["similarity"] == 1.0                 # preserved sub-field
+    # Monotonic: 6 matching calls -> strictly higher.
+    lanes6 = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
+                         capsules_by_tool={
+                             "browser": [{"vector": [1.0, 0.0]}
+                                         for _ in range(6)]})
+    assert lanes6["good"][0]["value"] > good["value"]
+    assert lanes6["good"][0]["value"] == _val(6, True)  # 0.5276
+
+    # Quality gate: no labeled good bank -> nothing accumulates (0.0).
+    empty = build_lanes(
+        reg, _FakeProtos({"browser": {"good": [], "friction": [],
+                                      "objective_friction": []}}),
+        goal_vector=[1.0, 0.0], capsules_by_tool={"browser": good_caps})
+    assert empty["good"][0]["value"] == 0.0
+
+    # Non-similar calls (cos 0.0 < 0.6) accumulate nothing for GOOD.
+    dissim = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
+                         capsules_by_tool={
+                             "browser": [{"vector": [0.0, 1.0]}
+                                         for _ in range(3)]})
+    assert dissim["good"][0]["value"] == 0.0
+    # ...but DO accumulate for FRICTION (match the friction bank, 0.4 gate).
+    assert dissim["friction"][0]["value"] == _val(3, True)
+
+    # Friction accumulation: 4 calls matching the friction bank.
+    fric_caps = [{"vector": [0.0, 1.0]} for _ in range(4)]
+    lanesf = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
+                         capsules_by_tool={"browser": fric_caps})
+    fr = next(e for e in lanesf["friction"] if e["tool_name"] == "browser")
+    assert fr["value"] == _val(4, True)
+    assert fr["similarity"] is not None  # objective/user sim sub-field kept
 
 
 def test_goal_and_good_reach_ready_independently():

@@ -29,12 +29,22 @@ for older consumers; new consumers must read per-cell state.
 """
 from __future__ import annotations
 
+import math
+
 from .prototypes import cosine, strongest_similarity
 from .momentum import surge_values, empty_momentum
 from .velocity import PULSE_VELOCITY_WINDOW_S
 
 # C4 thresholds (pulse.thresholds.*); S1 settings defaults.
 DEFAULT_THRESHOLDS = {"goal": 0.8, "good": 0.6, "friction": 0.4}
+
+# P2 accumulate model: GOOD/FRICTION value is a 0-baseline call-accumulation
+# (count of recent capsules similar to the tool's OWN labeled bank, saturated),
+# not a single prompt's similarity. ``PULSE_ACCUM_HALF_LIFE`` = how many
+# channel-matched recent calls reach ~63% accumulation (n=3 -> 0.31, n=6 ->
+# 0.53, n=12 -> 0.78 at 8). The recent capsule deque is bounded, so the count
+# rolls out as old evidence ages = natural decay with NO clock. Pure + stateless.
+PULSE_ACCUM_HALF_LIFE = 8
 
 
 def neutral_cell(state: str = "neutral", value=None) -> dict:
@@ -81,6 +91,31 @@ def _required(prototypes, attr: str, legacy: int) -> int:
         return max(1, int(candidate))
     except (TypeError, ValueError):
         return max(1, int(legacy))
+
+
+def _lane_accumulation(capsules, bank, threshold: float, half_life: int) -> float:
+    """P2 channel-gated call-accumulation (0-baseline), for one semantic lane.
+
+    Counts how many of the tool's recent capsules resemble its OWN labeled
+    bank (max cosine to ``bank`` >= ``threshold``), then saturates that count:
+    ``1 - exp(-n / half_life)``. 0 when there is no labeled bank (the quality
+    gate — a channel with no examples accumulates nothing) and 0 when no recent
+    call resembles it; rises with a few matching calls and decays as the recent
+    capsule deque rolls out. Pure + deterministic (no clock, no random).
+    """
+    if not bank:
+        return 0.0
+    n = 0
+    for capsule in capsules:
+        vector = capsule.get("vector") if isinstance(capsule, dict) else None
+        if not vector:
+            continue
+        sim = strongest_similarity(vector, bank)
+        if sim is not None and sim >= threshold:
+            n += 1
+    if n <= 0:
+        return 0.0
+    return round(1.0 - math.exp(-n / max(1, int(half_life))), 4)
 
 
 # -- v8 vector-space compatibility gate (single authoritative path) ---- #
@@ -512,13 +547,19 @@ def build_lanes(registry, prototypes, session_state=None,
         good_scored, good_supported = _gated_bank(tool, prototypes, "good",
                                                    vector_space)
         good_count = len(bank["good"])  # raw evidence fact
-        good_value = _floor(strongest_similarity(goal_vector, good_scored))
+        good_similarity = _floor(strongest_similarity(goal_vector, good_scored))
+        # P2: display value = channel-gated accumulation (recent calls that
+        # resemble this tool's own labeled good bank); the single-prompt
+        # similarity is preserved as the `similarity` sub-field.
+        good_value = _lane_accumulation(
+            capsules, good_scored, thr["good"], PULSE_ACCUM_HALF_LIFE)
         good.append({
             "tool_id": tid, "tool_name": tool, "rank": 0,
             "value": good_value, "threshold": thr["good"],
             "level": _level(good_value, thr["good"]),
             "state": _state(has_goal, len(good_supported), good_req),
             "support": _support(len(good_supported), good_req),
+            "similarity": good_similarity,
             "evidence_source": "good_prototypes" if good_count else "none",
         })
         user_scored, user_supported = _gated_bank(
@@ -539,20 +580,27 @@ def build_lanes(registry, prototypes, session_state=None,
         if obj_value is not None:
             scored.append(("objective", obj_value, obj_support["ratio"]))
         dominant = None
-        friction_value = None
+        friction_similarity = None
         friction_state = _state(has_goal, 0, user_fric_req)
         if scored:
-            dominant, friction_value, _r = max(
+            dominant, friction_similarity, _r = max(
                 scored, key=lambda s: (s[1], s[2], s[0] == "user"))
             friction_state = _state(
                 has_goal,
                 user_count if dominant == "user" else obj_count,
                 user_fric_req if dominant == "user" else obj_fric_req)
+        # P2: display value = channel-gated accumulation over the combined
+        # friction bank (labeled user + objective-friction prototypes); the
+        # per-source strongest similarities stay as sub-fields.
+        friction_value = _lane_accumulation(
+            capsules, user_scored + obj_scored, thr["friction"],
+            PULSE_ACCUM_HALF_LIFE)
         friction.append({
             "tool_id": tid, "tool_name": tool, "rank": 0,
             "value": friction_value, "threshold": thr["friction"],
             "level": _level(friction_value, thr["friction"]),
             "state": friction_state, "dominant_source": dominant,
+            "similarity": friction_similarity,
             "user": {"value": user_value,
                      "level": _level(user_value, thr["friction"]),
                      "state": _state(has_goal, user_count, user_fric_req),
