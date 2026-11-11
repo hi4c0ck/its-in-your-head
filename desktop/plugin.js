@@ -3507,6 +3507,22 @@ function dominantLaneFor(toolName, rawLanes, capNow) {
   });
   return best ? { metric: best.metric, idx: best.idx } : { metric: null, idx: -1 };
 }
+// v0.1.12 (distinct dequeued dots): collapse a batch of tool_start events to
+// ONE per tool — its LATEST (newest id). A tool called N times in a batch
+// whoops ONCE (its newest event); the older same-tool events are absorbed by
+// the per-tool consumed watermark, not re-bubbled. Dequeued dots are DISTINCT
+// (one per tool): that is the reason the cursor queue exists in the first
+// place — it surfaces a NEW tool, not the same tool N times. Self-contained
+// so the test can exercise it directly.
+function distinctEventsByTool(events) {
+  var out = {};
+  (events || []).forEach(function (ev) {
+    if (!ev || typeof ev.id !== 'number') return;
+    var cur = out[ev.tool_name];
+    if (!cur || ev.id > cur.id) out[ev.tool_name] = ev;
+  });
+  return out; // { tool_name: latest event }
+}
 function pulseLanesKey(lanes, capacity) {
   var cap = Math.max(1, Math.floor(Number(capacity) || 1));
   var parts = [];
@@ -3783,54 +3799,61 @@ function createPulseBubbleCoordinator(opts) {
       function routeFor(toolName) {
         return dominantLaneFor(toolName, rawLanes, capNow);
       }
-      (events || []).forEach(function (ev) {
-        if (!ev || typeof ev.id !== 'number') return;
-        if (ev.id <= state.lastActivityEventId) return; // delivered already
-        state.lastActivityEventId = Math.max(state.lastActivityEventId, ev.id);
-        accepted += 1;
-        var tgt = routeFor(ev.tool_name);
-        if (reduced) {
-          // Reduced motion: no travel at all; the live lane content
-          // still commits immediately (V2) below.
-          // v0.1.11 (B): the per-tool consumed watermark advances even in
-          // reduced mode, so the cursor model stays consistent.
-          state.consumedByTool[ev.tool_name] = ev.id;
-          return;
-        }
-        if (tgt.idx >= 0 && tgt.idx < capNow) {
-          var t = {
-            kind: 'activity', semanticId: 'evt|' + ev.id, eventId: ev.id,
-            metric: tgt.metric, tool: ev.tool_name,
-            tool_call_id: ev.tool_call_id != null ? ev.tool_call_id : null,
-            ts: ev.ts, reason: 'tool-call',
-            slotId: tgt.metric + '|' + tgt.idx, destinationSlot: tgt.idx,
-            // momentum data lives in the LIVE lane (the commit stays there);
-            // the sprite + arrival flash land on the tool's dominant lane.
-            dataLane: 'live',
-            heldUntilVisible: false, sequence: state.seq += 1,
-          };
-          if (state.active.length < capNow) {
-            t.staggerMs = BUBBLE_STAGGER_MS * state.active.length;
-            state.active.push(t);
-          } else {
-            t.staggerMs = BUBBLE_STAGGER_MS * state.active.length;
-            state.queued.push(t);
-          }
-          fresh.push(t);
-          // v0.1.11 (B): this event just animated -> advance the tool's
-          // consumed watermark. The event stays in the DB; the pane only
-          // tracks how far it has consumed that tool's stream.
-          state.consumedByTool[ev.tool_name] = ev.id;
-        } else {
-          // v0.1.11 (B): not routable right now — the tool is not visible in
-          // ANY lane (tgt.idx === -1). The event was accepted (the delivered
-          // cursor advanced past it) but is NOT buffered in renderer
-          // memory: it stays in the persistent events table and is
-          // flushed FILO (newest first) by flushTool() once the tool's
-          // cell exists in any lane. consumedByTool[ev.tool_name] is left
-          // behind on purpose — that gap IS the tool's backlog.
-        }
+      // v0.1.12 (distinct dequeued dots): a whoop-up is ONE per tool, not one
+      // per call. Filter the NEW events (past the delivered watermark), then
+      // collapse to the LATEST per tool via distinctEventsByTool; each tool
+      // whoops once (its newest event) and the older same-tool events are
+      // absorbed by the per-tool consumed watermark. Dequeued dots are distinct.
+      var newEvents = (events || []).filter(function (ev) {
+        return ev && typeof ev.id === 'number' && ev.id > state.lastActivityEventId;
       });
+      if (newEvents.length) {
+        newEvents.forEach(function (ev) {
+          state.lastActivityEventId = Math.max(state.lastActivityEventId, ev.id);
+        });
+        accepted = newEvents.length; // every new event is consumed (absorbed)
+        var latestByTool = distinctEventsByTool(newEvents); // tool -> newest
+        Object.keys(latestByTool).forEach(function (toolName) {
+          var ev = latestByTool[toolName];
+          var tgt = routeFor(toolName);
+          if (reduced) {
+            // Reduced motion: no travel; advance the tool's consumed watermark
+            // to its latest event so the cursor model stays consistent.
+            state.consumedByTool[toolName] = ev.id;
+            return;
+          }
+          if (tgt.idx >= 0 && tgt.idx < capNow) {
+            var t = {
+              kind: 'activity', semanticId: 'evt|' + ev.id, eventId: ev.id,
+              metric: tgt.metric, tool: toolName,
+              tool_call_id: ev.tool_call_id != null ? ev.tool_call_id : null,
+              ts: ev.ts, reason: 'tool-call',
+              slotId: tgt.metric + '|' + tgt.idx, destinationSlot: tgt.idx,
+              // momentum data lives in the LIVE lane (the commit stays there);
+              // the sprite + arrival flash land on the tool's dominant lane.
+              dataLane: 'live',
+              heldUntilVisible: false, sequence: state.seq += 1,
+            };
+            if (state.active.length < capNow) {
+              t.staggerMs = BUBBLE_STAGGER_MS * state.active.length;
+              state.active.push(t);
+            } else {
+              t.staggerMs = BUBBLE_STAGGER_MS * state.active.length;
+              state.queued.push(t);
+            }
+            fresh.push(t);
+            // v0.1.12: this whoop-up showed the tool's LATEST event -> jump
+            // its consumed watermark past the whole absorbed batch.
+            state.consumedByTool[toolName] = ev.id;
+          } else {
+            // Not visible in any lane (tgt.idx === -1): accepted (the
+            // delivered cursor advanced) but NOT buffered — it stays in the
+            // persistent events table. consumedByTool is left behind on
+            // purpose; that gap is the tool's backlog, flushed FILO by
+            // flushTool() when the tool's cell exists in any lane.
+          }
+        });
+      }
       // V2: when activity is accepted, the LIVE lane commits its new
       // content immediately (no wait for bubble arrival) — while
       // GOAL/GOOD/FRICTION keep holding their in-flight values. The
@@ -3921,16 +3944,25 @@ function createPulseBubbleCoordinator(opts) {
         return { fresh: fresh };
       }
       var consumedBefore = state.consumedByTool[tool] || 0;
+      // v0.1.12 (distinct dequeued dots): the flush shows ONE whoop-up — this
+      // tool's NEWEST unconsumed event. The rest of its backlog is absorbed
+      // (the watermark jumps to nextCursor), NOT re-bubbled N times: the
+      // cursor queue exists to surface a NEW tool, not the same tool N times.
+      var newest = null;
       var list = eventsAsc.slice().reverse(); // FILO: newest first
       for (var k = 0; k < list.length; k++) {
         var ev = list[k];
         if (!ev || typeof ev.id !== 'number') continue;
         if (ev.id <= consumedBefore) continue; // already animated (dedupe)
+        newest = ev; // first unconsumed = the newest
+        break;
+      }
+      if (newest) {
         var t = {
-          kind: 'activity', semanticId: 'evt|' + ev.id, eventId: ev.id,
+          kind: 'activity', semanticId: 'evt|' + newest.id, eventId: newest.id,
           metric: tgt.metric, tool: tool,
-          tool_call_id: ev.tool_call_id != null ? ev.tool_call_id : null,
-          ts: ev.ts, reason: 'tool-call',
+          tool_call_id: newest.tool_call_id != null ? newest.tool_call_id : null,
+          ts: newest.ts, reason: 'tool-call',
           slotId: tgt.metric + '|' + tgt.idx, destinationSlot: tgt.idx,
           dataLane: 'live',
           heldUntilVisible: false, sequence: state.seq += 1,

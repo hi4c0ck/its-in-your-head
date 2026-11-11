@@ -151,25 +151,38 @@ const ev = (id, tool) => ({
 })
 
 {
-  // A1: five calls of the same tool = five distinct FIFO bubbles,
-  // each with its own evt|<id> identity — never a replace.
+  // A1 (v0.1.12 distinct): five calls of the SAME tool collapse to ONE
+  // whoop-up — the tool's NEWEST event (evt|5). Dequeued dots are distinct
+  // PER TOOL (the whole point of the cursor queue: surface a NEW tool, not
+  // the same tool N times). All five calls are still accepted (the per-tool
+  // consumed watermark jumps past all of them).
   const coord = createPulseBubbleCoordinator({ maxConcurrent: 5 })
   coord.ingest({ live: [liveEntry('editor', 1)], goal: [], good: [], friction: [] }, 5)
   var res = coord.activity([ev(1, 'editor'), ev(2, 'editor'), ev(3, 'editor'), ev(4, 'editor'), ev(5, 'editor')],
     { live: [liveEntry('editor', 1, { calls_started: 5 })], goal: [], good: [], friction: [] }, 5)
-  eq(res.accepted, 5, 'A1: all five calls accepted')
-  eq(coord.getState().active.length, 5, 'A1: five distinct bubbles in flight (cap allows it)')
+  eq(res.accepted, 5, 'A1: all five calls accepted (absorbed)')
+  eq(coord.getState().active.length, 1, 'A1: five same-tool calls collapse to ONE whoop-up (distinct per tool)')
   eq(coord.getState().active.map(function (t) { return t.semanticId }),
-    ['evt|1', 'evt|2', 'evt|3', 'evt|4', 'evt|5'], 'A1: FIFO order, evt|<id> identities')
+    ['evt|5'], 'A1: the whoop-up is the tool\'s NEWEST event')
   eq(coord.getState().active.map(function (t) { return t.staggerMs }),
-    [0, BUBBLE_STAGGER_MS, 2 * BUBBLE_STAGGER_MS, 3 * BUBBLE_STAGGER_MS, 4 * BUBBLE_STAGGER_MS],
-    'A7: stable per-flight stagger, assigned once at dispatch')
+    [0], 'A1: single flight, stagger 0')
+  eq(coord.getState().consumedByTool['editor'], 5, 'A1: consumed watermark jumped past all five')
   // A2: the same batch redelivered (refetch without cursor advance)
   // is fully de-duped by the per-surface watermark.
   var res2 = coord.activity([ev(1, 'editor'), ev(2, 'editor')],
     { live: [liveEntry('editor', 1, { calls_started: 5 })], goal: [], good: [], friction: [] }, 5)
   eq(res2.accepted, 0, 'A2: redelivered events below the watermark are ignored')
-  eq(coord.getState().active.length, 5, 'A2: no duplicate bubbles')
+  eq(coord.getState().active.length, 1, 'A2: no duplicate bubbles')
+  // A1b (v0.1.12): the contrast — DISTINCT tools each whoop once.
+  const coord2 = createPulseBubbleCoordinator({ maxConcurrent: 5 })
+  coord2.ingest(
+    { live: [liveEntry('a', 1), liveEntry('b', 2), liveEntry('c', 3)], goal: [], good: [], friction: [] }, 5)
+  var res3 = coord2.activity(
+    [ev(10, 'a'), ev(11, 'b'), ev(12, 'c')],
+    { live: [liveEntry('a', 1), liveEntry('b', 2), liveEntry('c', 3)], goal: [], good: [], friction: [] }, 5)
+  eq(coord2.getState().active.length, 3, 'A1b: three DISTINCT tools -> three whoop-ups')
+  eq(coord2.getState().active.map(function (t) { return t.semanticId }).sort(),
+    ['evt|10', 'evt|11', 'evt|12'], 'A1b: one whoop-up per distinct tool')
 }
 {
   // A3 (v0.1.11 B): hidden tool (rank > capacity) — its event is accepted

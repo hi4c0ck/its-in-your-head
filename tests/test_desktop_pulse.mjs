@@ -320,6 +320,15 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   ok3(src.includes('PULSE_DOT_SHARPNESS'), 'a value->dots sharpness curve is defined')
   ok3(lanesSrc.includes('Math.pow(v, PULSE_DOT_SHARPNESS)'),
     'dotsFor applies the steep (monotonic) value->dots curve')
-  console.log('ok ' + (++n) + ' - v0.1.12: I/O bottom-strip ticker + dominant-lane bubble routing + sharper good curve')
+  // v0.1.12 distinct dequeued dots: a whoop-up is ONE per tool (its newest
+  // event), not one per call — the cursor queue exists to surface a NEW
+  // tool, not the same tool N times. activity() dedupes via the helper;
+  // flushTool() emits a single newest-event whoop-up.
+  ok3(src.includes('function distinctEventsByTool('), 'the one-per-tool dedup helper exists')
+  ok3(src.includes('distinctEventsByTool(newEvents)'),
+    'activity() collapses a batch to the LATEST event per tool (distinct whoop-ups)')
+  ok3(src.includes('newest = ev; // first unconsumed = the newest'),
+    'flushTool() emits ONE whoop-up (the newest), absorbing the tool\'s backlog')
+  console.log('ok ' + (++n) + ' - v0.1.12: I/O bottom-strip + dominant-lane routing + sharper curve + distinct (one-per-tool) whoop-ups')
 }
 console.log('PASS pulse: ' + n + ' assertions')
