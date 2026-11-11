@@ -2250,7 +2250,12 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     }
     if (a <= 0.004) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
-    const inBand = gActive && prr >= gBand && prr < gBand + gH
+    // v42: the band stays ON THE FACE LINES ONLY (the sample's semantics: "the magenta glitch band
+    // stays on the face lines"). Production was missing `isLit`, so every ~8.3s the band piled a
+    // hard 0.85+ magenta specular onto the GROUND dither rows (30-45, upper-middle = "from above")
+    // with its sin jitter — a hard glare on the ground texture. Ground bricks keep their own dither
+    // value; only lit face bricks take the rip.
+    const inBand = gActive && isLit && prr >= gBand && prr < gBand + gH
     let gx = offX + pc * bwS + drift + gapX / 2, ga = a
     if (inBand) {
       gx += gShift + Math.sin(frame * 0.9 + prr * 1.3) * bwS * 0.3   // the sideways rip + a little jitter
