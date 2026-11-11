@@ -135,9 +135,26 @@ def _on_pre_llm_call(**kwargs):
                 "prototypes": eng.protos,
                 "capsules": eng.capsule_state(),
             }
+            prompt_features = {"text": message,
+                               "turn_id": kwargs.get("turn_id")}
+            # §3: encode the prompt with the ACTIVE encoder (not
+            # unconditional Tier-0) so the similarity is in the same
+            # vector space as the PULSE prototypes; without a
+            # compatible vector the channels that need one stay quiet.
+            try:
+                _backend = eng._get_backend()
+                pvecs = _backend.encode([message]) if message else []
+                if pvecs:
+                    prompt_features["vector"] = list(pvecs[0])
+            except Exception:
+                pass
+            try:
+                prompt_features["vector_space"] = eng._pulse_vector_space()
+            except Exception:
+                pass
             res = build_injection(
                 snap,
-                {"text": message, "turn_id": kwargs.get("turn_id")},
+                prompt_features,
                 pulse_state,
                 turn_id=kwargs.get("turn_id"))
             if res is not None:

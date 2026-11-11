@@ -195,13 +195,19 @@ _ORTH = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 def _seed_qualifying_store(eng, vec=None):
     """Store + capsule evidence for web_search; vectors fixed so cosine
-    similarities are exact (1.0 match / 0.0 orthogonal)."""
+    similarities are exact (1.0 match / 0.0 orthogonal).
+
+    Directional v2: a category only fires at its own minimum, and a
+    qualifying GOOD would conflict with a qualifying FRICTION, so seed
+    the GOOD channel past its minimum and keep the FRICTION channels
+    below theirs (single-directional evidence -> 'Prefer').
+    """
     from collections import deque
     v = list(vec or _VEC)
     tool = "web_search"
-    for _ in range(2):
+    for _ in range(3):
         eng.protos.add_good(tool, list(v))
-        eng.protos.add_friction(tool, list(v))
+    eng.protos.add_friction(tool, list(v))
     eng.protos.add_objective_friction(tool, list(v))
     eng._capsules[tool] = deque([{"vector": list(v)}])
     return tool

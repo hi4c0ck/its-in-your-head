@@ -1,32 +1,32 @@
-"""Deterministic adaptation rule engine (S7).
+"""Deterministic adaptation rule engine (S7, v2 — directional).
 
 Pure, inspectable rules. No file I/O, no network, no RNG, no memory-provider
-retrieval, no LLM calls. The engine emits AT MOST ONE instruction from a
-fixed template; the disabled-by-default gate lives in the caller
-(injection.build_injection), not here.
+retrieval, no LLM calls. The engine emits AT MOST ONE instruction per turn
+from a fixed per-channel template; the disabled-by-default gate lives in the
+caller (injection.build_injection), not here.
 
-Inputs:
-- prompt_features: dict with optional 'vector' / 'text' / 'domain' / 'tool',
-  or a raw text string (encoded in-memory via the S2 Tier-0 backend).
-- pulse_state: per-tool friction evidence. Accepted shapes:
-  * a pulse.PrototypeStore (bank/labeled_count/tools),
-  * a dict mapping tool -> evidence dict, or {"tools": {...}} /
-    {"per_tool": {...}} / {"matrix": [rows]} wrappers, optionally with
-    "prototypes"/"store" holding a PrototypeStore and "capsules"/"goal_vectors"
-    holding per-tool capsule vectors for domain resemblance,
-  * a list of matrix rows (pulse.matrix.build_matrix output).
-- transitions_signal: label string, dict with 'label', or a
-  perception.transitions.Transition. A 'new_topic' signal suppresses firing
-  unless the domain match is strong (see _SUPPRESS_LABELS).
+Directional GOOD / FRICTION reinforcement: three independently-evaluated
+evidence channels, each scoring the prompt against ONE tool's OWN prototype
+bank only (never a combined GOOD+FRICTION average, and no positive/negative
+cross-erase):
 
-A tool qualifies when ALL of:
-1. domain match — the prompt resembles a goal/capsule vector for the tool
-   (cosine >= pulse.thresholds.goal) OR explicitly names the tool/domain;
-2. friction confidence — strongest similarity to the tool's FRICTION bank
-   >= pulse.thresholds.friction (C4 defaults);
-3. min_labeled — labeled (GOOD+FRICTION) count >= pulse.min_labeled (C4);
-4. at least one GOOD prototype exists for the tool (so the fixed
-   'Prefer <tool>' instruction is grounded in labeled evidence).
+- GOOD                -> positive  ("Prefer ...")
+- USER FRICTION       -> negative  ("Do not repeat ...")
+- OBJECTIVE FRICTION  -> negative  ("Verify the result of ...")
+
+A channel for tool T qualifies when ALL of:
+1. T's own bank holds COMPATIBLE evidence (dimension + provenance match the
+   prompt vector — see _live_bank_similarity; a blind Tier-0 into a foreign
+   space never counts);
+2. the prompt matches that bank at or above the channel threshold;
+3. T's own category evidence count >= the category minimum (independent per
+   category; the combined pulse.min_labeled is NOT a gate);
+4. no conflicting-direction channel qualifies for this prompt.
+
+When a positive and a negative channel both qualify, no clear direction
+exists for this prompt -> no instruction (the banks keep accumulating
+regardless). GOAL maturity is never a gate: the prompt-to-prototype
+similarity is the direct relevance check.
 """
 from __future__ import annotations
 
@@ -41,36 +41,68 @@ except Exception:
     except Exception:
         _protos = None
 
-# C4 defaults (core/settings.py DEFAULTS; duplicated here as literals so
-# this module stays importable without the core lane).
+# C4 defaults (core/settings.py DEFAULTS; literals so this module stays
+# importable without the core lane).
 DEFAULT_FRICTION_THRESHOLD = 0.4
 DEFAULT_GOAL_THRESHOLD = 0.8
 DEFAULT_GOOD_THRESHOLD = 0.6
 DEFAULT_MIN_LABELED = 3
 
-# Fixed template — the ONLY instruction shape this engine can emit.
-TEMPLATE = "Prefer {tool} for this domain."
+# Fixed templates — the ONLY instruction shapes this engine can emit.
+GOOD_TEMPLATE = "Prefer {tool} for this domain."
+USER_FRICTION_TEMPLATE = ("Do not repeat the previous {tool} "
+                          "approach for this domain.")
+OBJECTIVE_FRICTION_TEMPLATE = ("Verify the result of {tool} before proceeding "
+                               "in this domain.")
+
+# Legacy single-template alias (surfaces / callers that reference TEMPLATE).
+TEMPLATE = GOOD_TEMPLATE
 
 # Transitions that suppress firing outright.
 _SUPPRESS_LABELS = frozenset({"new_topic", "ambiguous"})
-# Labels that count as corroborating friction signals in evidence.
-_FRICTION_LABELS = frozenset({"correction", "positive_feedback"})
 
 _MAX_DOMAIN_CHARS = 32
 
-# The single inspectable rule definition.
+# Negative-source priority on similarity ties: explicit user feedback
+# outranks objective execution evidence.
+_SOURCE_RANK = {"user_friction": 1, "objective_friction": 2}
+
+GOOD_RULE = "pulse-good"
+USER_FRICTION_RULE = "pulse-user-friction"
+OBJECTIVE_FRICTION_RULE = "pulse-objective-friction"
+
+# The three inspectable rule definitions (name/match/template/evidence).
 RULE_DEFINITIONS = (
     {
-        "id": "domain-friction-prefer-good",
-        "name": "domain-friction-prefer-good",
-        "match": (
-            "domain resemblance >= pulse.thresholds.goal AND friction "
-            "similarity >= pulse.thresholds.friction AND labeled >= "
-            "pulse.min_labeled AND >=1 GOOD prototype"
-        ),
-        "template": TEMPLATE,
-        "evidence": ("tool", "friction", "labeled", "good_count",
-                     "objective_friction", "transition_label"),
+        "id": GOOD_RULE,
+        "name": GOOD_RULE,
+        "match": ("GOOD similarity >= pulse.thresholds.good AND good support "
+                  ">= pulse.good_min_samples AND no qualifying FRICTION "
+                  "channel"),
+        "template": GOOD_TEMPLATE,
+        "evidence": ("tool", "source", "similarity", "support",
+                     "transition_label"),
+    },
+    {
+        "id": USER_FRICTION_RULE,
+        "name": USER_FRICTION_RULE,
+        "match": ("user FRICTION similarity >= pulse.thresholds.friction AND "
+                  "friction support >= pulse.user_friction_min_samples AND no "
+                  "qualifying GOOD channel"),
+        "template": USER_FRICTION_TEMPLATE,
+        "evidence": ("tool", "source", "similarity", "support",
+                     "transition_label"),
+    },
+    {
+        "id": OBJECTIVE_FRICTION_RULE,
+        "name": OBJECTIVE_FRICTION_RULE,
+        "match": ("objective FRICTION similarity >= "
+                  "pulse.thresholds.friction AND objective support >= "
+                  "pulse.objective_friction_min_samples AND no qualifying "
+                  "GOOD channel"),
+        "template": OBJECTIVE_FRICTION_TEMPLATE,
+        "evidence": ("tool", "source", "similarity", "support",
+                     "transition_label"),
     },
 )
 
@@ -132,7 +164,7 @@ def _short_domain(value) -> str:
     return " ".join(words[:2])[:_MAX_DOMAIN_CHARS].strip()
 
 
-def _transition_label(signal) -> str | None:
+def _transition_label(signal):
     if signal is None:
         return None
     if isinstance(signal, str):
@@ -142,35 +174,56 @@ def _transition_label(signal) -> str | None:
     return getattr(signal, "label", None)
 
 
-def _encode_text(text: str):
+def _clamp01(x):
     try:
-        try:
-            from ..perception import encoder as _encoder
-        except Exception:
-            from perception import encoder as _encoder  # type: ignore[no-redef]
-        backend = _encoder.Tier0SketchBackend()
-        vecs = backend.encode([text])
-        return list(vecs[0]) if vecs else None
-    except Exception:
+        return max(0.0, min(1.0, float(x)))
+    except (TypeError, ValueError):
         return None
 
 
+# --- prompt vector + space identity ---------------------------------------
 def _prompt_vector(prompt_features):
+    """The active-encoder prompt vector (or None) + the explicit tool hint.
+
+    The vector is expected to be produced by the same active encoder / vector
+    space as the PULSE prototypes (the seam does this). A raw text string is
+    accepted but yields NO vector -> live-bank channels stay quiet (never a
+    blind Tier-0 into a foreign space).
+    """
     if isinstance(prompt_features, str):
-        return _encode_text(prompt_features), "", ""
+        return None, _short_domain(prompt_features)
     if not isinstance(prompt_features, dict):
-        return None, "", ""
+        return None, ""
     vec = prompt_features.get("vector")
-    if vec is None and prompt_features.get("text"):
-        vec = _encode_text(str(prompt_features["text"]))
-    domain = _short_domain(
-        prompt_features.get("domain") or prompt_features.get("tool")
-        or prompt_features.get("tool_name") or "")
+    vector = list(vec) if vec is not None else None
     tool_hint = str(prompt_features.get("tool")
                     or prompt_features.get("tool_name") or "")
-    return (list(vec) if vec is not None else None), domain, tool_hint
+    return vector, tool_hint
 
 
+def _prompt_space(prompt_features):
+    if isinstance(prompt_features, dict):
+        return prompt_features.get("vector_space")
+    return None
+
+
+def _prompt_provenance(space):
+    """(backend, model_version) from a vector-space identity, else None."""
+    if space is None:
+        return None
+    if isinstance(space, (tuple, list)):
+        if len(space) < 1 or space[0] is None:
+            return None
+        return (space[0], space[1] if len(space) > 1 else None)
+    if isinstance(space, dict):
+        backend = space.get("id") or space.get("backend")
+        if backend is None:
+            return None
+        return (backend, space.get("model_version"))
+    return None
+
+
+# --- evidence normalization ------------------------------------------------
 def _evidence_by_tool(pulse_state) -> dict:
     """Normalize any accepted pulse_state shape to tool -> evidence dict."""
     if pulse_state is None:
@@ -178,6 +231,7 @@ def _evidence_by_tool(pulse_state) -> dict:
     # PrototypeStore directly.
     if hasattr(pulse_state, "tools") and hasattr(pulse_state, "bank"):
         out = {}
+        has_meta = hasattr(pulse_state, "bank_meta")
         for tool in pulse_state.tools():
             bank = pulse_state.bank(tool)
             out[str(tool)] = {
@@ -188,6 +242,7 @@ def _evidence_by_tool(pulse_state) -> dict:
                 "_good_bank": list(bank.get("good") or []),
                 "_friction_bank": list(bank.get("friction") or []),
                 "_objective_bank": list(bank.get("objective_friction") or []),
+                "_bank_meta": pulse_state.bank_meta(tool) if has_meta else None,
             }
         return out
     if isinstance(pulse_state, dict):
@@ -208,7 +263,8 @@ def _evidence_by_tool(pulse_state) -> dict:
         out = {}
         store = pulse_state.get("prototypes") or pulse_state.get("store")
         store_ev = _evidence_by_tool(store) if store is not None else {}
-        capsules = pulse_state.get("capsules") or pulse_state.get("goal_vectors") or {}
+        capsules = (pulse_state.get("capsules")
+                    or pulse_state.get("goal_vectors") or {})
         for tool, ev in {**store_ev, **inner}.items():
             ev = dict(ev) if isinstance(ev, dict) else {}
             # Merge explicit evidence over store-derived evidence.
@@ -231,53 +287,7 @@ def _evidence_by_tool(pulse_state) -> dict:
     return {}
 
 
-def _friction_similarity(ev: dict, vector):
-    """Strongest FRICTION-bank similarity; None when the bank is empty."""
-    if vector is None:
-        return None
-    bank = ev.get("_friction_bank") or ev.get("friction_bank")
-    if bank:
-        return max((_cosine(vector, v) for v in bank), default=None)
-    for key in ("friction", "friction_value", "friction_similarity"):
-        val = ev.get(key)
-        if isinstance(val, dict):
-            val = val.get("value")
-        if isinstance(val, (int, float)):
-            return max(0.0, min(1.0, float(val)))
-    return None
-
-
-def _goal_similarity(ev: dict, vector) -> float | None:
-    if vector is None:
-        return None
-    vecs = ev.get("_capsule_vectors") or ev.get("capsule_vectors")
-    if vecs:
-        return max((_cosine(vector, v) for v in vecs), default=None)
-    for key in ("goal", "goal_value", "goal_similarity", "resemblance"):
-        val = ev.get(key)
-        if isinstance(val, dict):
-            val = val.get("value")
-        if isinstance(val, (int, float)):
-            return max(0.0, min(1.0, float(val)))
-    return None
-
-
-def _labeled_count(ev: dict) -> int:
-    if isinstance(ev.get("labeled"), (int, float)):
-        return int(ev["labeled"])
-    if isinstance(ev.get("labeled_count"), (int, float)):
-        return int(ev["labeled_count"])
-    good = ev.get("good_count")
-    fric = ev.get("friction_count")
-    if isinstance(good, (int, float)) and isinstance(fric, (int, float)):
-        return int(good) + int(fric)
-    gb = ev.get("_good_bank")
-    fb = ev.get("_friction_bank")
-    if gb is not None or fb is not None:
-        return len(gb or []) + len(fb or [])
-    return 0
-
-
+# --- per-channel evidence counts (independent, never summed) ---------------
 def _good_count(ev: dict) -> int:
     if isinstance(ev.get("good_count"), (int, float)):
         return int(ev["good_count"])
@@ -290,78 +300,190 @@ def _good_count(ev: dict) -> int:
     return 1 if ev.get("has_good_prototype") else 0
 
 
+def _friction_count(ev: dict) -> int:
+    if isinstance(ev.get("friction_count"), (int, float)):
+        return int(ev["friction_count"])
+    fb = ev.get("_friction_bank")
+    if fb is not None:
+        return len(fb)
+    return 0
+
+
 def _objective_count(ev: dict) -> int:
-    if isinstance(ev.get("objective_friction"), (int, float)):
-        return int(ev["objective_friction"])
-    if isinstance(ev.get("objective_count"), (int, float)):
-        return int(ev["objective_count"])
+    for key in ("objective_friction_count", "objective_friction",
+                "objective_count"):
+        if isinstance(ev.get(key), (int, float)):
+            return int(ev[key])
     ob = ev.get("_objective_bank")
     return len(ob) if ob is not None else 0
 
 
+def _category_min(settings, category: str) -> int:
+    """Per-category evidence minimum; the combined pulse.min_labeled is a
+    fallback default only, never a cross-category gate."""
+    key = {"good": "pulse.good_min_samples",
+           "user_friction": "pulse.user_friction_min_samples",
+           "objective_friction":
+               "pulse.objective_friction_min_samples"}[category]
+    val = _setting(settings, key, None)
+    if val is None:
+        val = _setting(settings, "pulse.min_labeled", DEFAULT_MIN_LABELED)
+    try:
+        return max(1, int(val))
+    except (TypeError, ValueError):
+        return DEFAULT_MIN_LABELED
+
+
+# --- per-channel similarity (own bank only, compatibility-gated) ---------
+def _live_bank_similarity(bank, meta, label, vector, space):
+    """Strongest cosine to a live prototype bank, gated on vector-space
+    compatibility (§3): dimension must match and a known provenance conflict
+    (bank encoded by a different active backend) invalidates the channel — it
+    must not silently become a valid reinforcement signal."""
+    if vector is None or not bank:
+        return None
+    dims = {len(v) for v in bank if v is not None}
+    if len(dims) != 1 or len(vector) not in dims:
+        return None
+    prov = (meta or {}).get(label)
+    if prov is not None:
+        prompt_prov = _prompt_provenance(space)
+        if prompt_prov is not None and prompt_prov[0] != prov[0]:
+            return None
+    return max(_cosine(vector, v) for v in bank if v is not None)
+
+
+def _good_similarity(ev, vector, space):
+    bank = ev.get("_good_bank")
+    if bank:
+        return _live_bank_similarity(
+            bank, ev.get("_bank_meta"), "good", vector, space)
+    for key in ("good_similarity", "good_value", "good"):
+        val = ev.get(key)
+        if isinstance(val, dict):
+            val = val.get("value")
+        if isinstance(val, (int, float)):
+            return _clamp01(val)
+    return None
+
+
+def _user_friction_similarity(ev, vector, space):
+    bank = ev.get("_friction_bank")
+    if bank:
+        return _live_bank_similarity(
+            bank, ev.get("_bank_meta"), "friction", vector, space)
+    for key in ("friction_similarity", "friction_value", "friction"):
+        val = ev.get(key)
+        if isinstance(val, dict):
+            val = val.get("value")
+        if isinstance(val, (int, float)):
+            return _clamp01(val)
+    return None
+
+
+def _objective_similarity(ev, vector, space):
+    bank = ev.get("_objective_bank")
+    if bank:
+        return _live_bank_similarity(
+            bank, ev.get("_bank_meta"), "objective_friction", vector, space)
+    for key in ("objective_friction_similarity", "objective_value"):
+        val = ev.get(key)
+        if isinstance(val, dict):
+            val = val.get("value")
+        if isinstance(val, (int, float)):
+            return _clamp01(val)
+    return None
+
+
+# --- decision --------------------------------------------------------------
+def _decision(candidate: dict, rule_id: str, template: str, label) -> dict:
+    tool = candidate["tool"]
+    return {
+        "rule_id": rule_id,
+        "tool": tool,
+        "domain": _short_domain(tool),
+        "source": candidate["source"],
+        "similarity": candidate["similarity"],
+        "support": candidate["support"],
+        "instruction": template.format(tool=tool),
+        "evidence": {
+            "tool": tool,
+            "source": candidate["source"],
+            "similarity": candidate["similarity"],
+            "support": candidate["support"],
+            "transition_label": label,
+        },
+    }
+
+
 def evaluate_rules(settings, prompt_features, pulse_state,
                    transitions_signal=None) -> list:
-    """Return [] or [one match]. Pure + deterministic."""
+    """Return [] or [one match]. Pure + deterministic.
+
+    Three independent channels; a conflicting positive+negative pair for the
+    same prompt suppresses the injection (no clear direction).
+    """
+    good_thr = float(_setting(
+        settings, "pulse.thresholds.good", DEFAULT_GOOD_THRESHOLD))
     fric_thr = float(_setting(
         settings, "pulse.thresholds.friction", DEFAULT_FRICTION_THRESHOLD))
-    goal_thr = float(_setting(
-        settings, "pulse.thresholds.goal", DEFAULT_GOAL_THRESHOLD))
-    min_labeled = int(_setting(
-        settings, "pulse.min_labeled", DEFAULT_MIN_LABELED))
-    vector, domain_hint, tool_hint = _prompt_vector(prompt_features)
+    vector, _tool_hint = _prompt_vector(prompt_features)
+    space = _prompt_space(prompt_features)
     evidence = _evidence_by_tool(pulse_state)
     if not evidence:
         return []
     label = _transition_label(transitions_signal)
+    good_min = _category_min(settings, "good")
+    uf_min = _category_min(settings, "user_friction")
+    of_min = _category_min(settings, "objective_friction")
 
-    candidates = []
+    positive: list = []
+    negative: list = []
     for tool in sorted(evidence):
         ev = evidence[tool]
-        labeled = _labeled_count(ev)
-        if labeled < min_labeled:
-            continue
-        good_n = _good_count(ev)
-        if good_n < 1:
-            continue
-        friction = _friction_similarity(ev, vector)
-        if friction is None or friction < fric_thr:
-            continue
-        # Domain match.
-        goal = _goal_similarity(ev, vector)
-        named = bool(tool_hint and tool_hint == tool)
-        dom_named = bool(domain_hint and domain_hint == tool)
-        if not (named or dom_named or (goal is not None and goal >= goal_thr)):
-            continue
-        candidates.append({
-            "rule_id": RULE_DEFINITIONS[0]["id"],
-            "tool": tool,
-            "domain": _short_domain(domain_hint or tool),
-            "friction": float(friction),
-            "goal": (float(goal) if goal is not None else None),
-            "labeled": labeled,
-            "good_count": good_n,
-            "objective_friction": _objective_count(ev),
-            "transition_label": label,
-        })
-    if not candidates:
+        g_sim = _good_similarity(ev, vector, space)
+        f_sim = _user_friction_similarity(ev, vector, space)
+        o_sim = _objective_similarity(ev, vector, space)
+        if g_sim is not None and g_sim >= good_thr \
+                and _good_count(ev) >= good_min:
+            positive.append({"tool": tool, "source": "good",
+                             "similarity": g_sim, "support": _good_count(ev)})
+        if f_sim is not None and f_sim >= fric_thr \
+                and _friction_count(ev) >= uf_min:
+            negative.append({"tool": tool, "source": "user_friction",
+                             "similarity": f_sim,
+                             "support": _friction_count(ev)})
+        if o_sim is not None and o_sim >= fric_thr \
+                and _objective_count(ev) >= of_min:
+            negative.append({"tool": tool, "source": "objective_friction",
+                             "similarity": o_sim,
+                             "support": _objective_count(ev)})
+
+    # §6: a positive and a negative channel both qualifying for the same
+    # prompt is a contradiction -> no clear direction -> suppress (the banks
+    # keep accumulating, but this turn gets no instruction).
+    if positive and negative:
         return []
-    # Deterministic best-tool selection: friction desc, then tool asc.
-    candidates.sort(key=lambda c: (-c["friction"], c["tool"]))
-    best = candidates[0]
-    # new_topic suppresses the (single) rule unless friction is strong.
-    if label in _SUPPRESS_LABELS and best["friction"] < 1.0:
+
+    out: list = []
+    if positive:
+        best = min(positive, key=lambda c: (-c["similarity"], c["tool"]))
+        out = [_decision(best, GOOD_RULE, GOOD_TEMPLATE, label)]
+    elif negative:
+        best = min(negative,
+                   key=lambda c: (-c["similarity"],
+                                  _SOURCE_RANK.get(c["source"], 9),
+                                  c["tool"]))
+        if best["source"] == "user_friction":
+            out = [_decision(best, USER_FRICTION_RULE,
+                             USER_FRICTION_TEMPLATE, label)]
+        else:
+            out = [_decision(best, OBJECTIVE_FRICTION_RULE,
+                            OBJECTIVE_FRICTION_TEMPLATE, label)]
+
+    if out and label in _SUPPRESS_LABELS and out[0]["similarity"] < 1.0:
         return []
-    best["instruction"] = TEMPLATE.format(tool=best["tool"])
-    best["evidence"] = {
-        "tool": best["tool"],
-        "friction": best["friction"],
-        "labeled": best["labeled"],
-        "good_count": best["good_count"],
-        "objective_friction": best["objective_friction"],
-        "transition_label": best["transition_label"],
-        "goal": best["goal"],
-    }
-    return [best]
+    return out
 
 
 # Alias for call sites that prefer a verb name.
