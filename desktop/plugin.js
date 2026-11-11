@@ -2216,13 +2216,14 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     // the per-column WAVE multiplier (the owner's formula applied to MULTIPLY the col into the fold,
     // NOT as a noise offset). 0..1, mirrored L->R.
     const waveCol = iihyJWave((pn - 1 - pc) / Math.max(1, pn - 1))
-    // v38: the LEVELED PARALLAX - two layers with the SAME spatial frequency (no moiré/"stripy"),
-    // but DIFFERENT temporal periods + amplitude bands. The far layer = 0..0.34 band, slow (18s);
-    // the near layer = 0..0.66 band, fast (6s). Same spatial freq -> they DON'T interfere/mixup.
-    const waveSp = pc * 6.2832 / 12   // the SHARED spatial frequency (same for both layers -> no moiré)
-    const waveFar = 0.34 * (0.5 + 0.5 * Math.sin(waveSp + secs / 18 * 6.2832))   // the FAR layer: 0..0.34 band, slow period (18s)
-    const waveNear = 0.66 * (0.5 + 0.5 * Math.sin(waveSp + secs / 6 * 6.2832))   // the NEAR layer: 0..0.66 band, fast period (6s)
-    const waveParallax = waveFar + waveNear   // the two layers add up to the full 0..1 range (the parallax)
+    // v40: RESTORE THE WAVY SEMANTIC (the owner's fundamental formula = blank start -> big ampl ->
+    // solid descent -> extra ampl -> clear end) as the BASE shape. The parallax is now a PURE TIME
+    // modulation (NO spatial term -> zero moiré/"stripy") that breathes the base shape at two rates:
+    // the FAR layer (0..0.34 band, slow 18s) + the NEAR layer (0..0.66 band, fast 6s). The base shape
+    // is MULTIPLIED by the parallax modulation -> the wavy semantic is preserved, no stripes.
+    const waveFar = 0.34 * (0.5 + 0.5 * Math.sin(secs / 18 * 6.2832))   // the FAR layer: 0..0.34 band, slow (18s), NO spatial term
+    const waveNear = 0.66 * (0.5 + 0.5 * Math.sin(secs / 6 * 6.2832))   // the NEAR layer: 0..0.66 band, fast (6s), NO spatial term
+    const waveParallax = waveCol * (waveFar + waveNear)   // the BASE wavy semantic * the parallax modulation (no moiré)
     const dv = iihyJNoise(pc + dOffX, prr + dOffY, IYH_J.ditherSeed, IYH_J.ditherFeat)
     let a
     if (isLit) {
