@@ -4959,13 +4959,28 @@ function PortraitView({ data, drift, narrow, canExpand, preferences }) {
       children: [jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: true })],
     })
   }
+  // Wide bottom-dock: the portrait is the DOMINANT instrument — it fills the
+  // module's full height (contain-fit) and takes most of the width; the flank
+  // ticks + readout are compacted to a thin, centered right column so the face
+  // covers most of the place. (The narrow/sidebar branch above still returns
+  // just the full-width image.)
   return jsxs('div', {
-    className: 'flex flex-1 items-center',
-    style: { gap: 12, minHeight: 0, overflow: 'hidden' },
+    className: 'flex flex-1 items-stretch',
+    style: { gap: 8, minHeight: 0, minWidth: 0, overflow: 'hidden', flex: '1 1 0' },
     children: [
-      jsx(IyhPortraitCompact, { data, preferences, size: 48 }),
-      flank,
-      readout,
+      jsx('div', {
+        className: 'flex flex-1 items-center justify-center',
+        style: { minWidth: 132, minHeight: 0 },
+        children: [jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: true })],
+      }),
+      jsxs('div', {
+        className: 'flex flex-col',
+        style: {
+          flex: '0 0 132px', width: 132, gap: 6,
+          alignSelf: 'center', minHeight: 0, overflow: 'hidden',
+        },
+        children: [flank, readout],
+      }),
     ],
   })
 }
@@ -6043,7 +6058,7 @@ function Strip({ source, rest, portraitPreferences }) {
   const portraitModule = jsx('div', {
     'data-module': 'portrait',
     'data-focus': tab === 'portrait' ? 'active' : 'inactive',
-    className: 'flex items-center',
+    className: 'flex items-stretch',
     style: {
       flex: '0 0 auto',
       minHeight: 0, minWidth: 0, overflow: 'hidden',

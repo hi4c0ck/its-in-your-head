@@ -114,9 +114,13 @@ assert.ok(strip.length > 0, 'Strip region found')
 // is gone — the 4 lane boxes own the full module width, and the I/O readout
 // becomes a compact 1-line ticker in the grid's reserved bottom spawn band
 // (pulse-io-strip). Intentional strip edit.
-const STRIP_SHA_S16_MOTION = 'c2f484bd401ae596bed270ceb6b4a4552da964f41bfc27e30fc96aec89d85d49'
-assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA_S16_MOTION,
-  '96px strip source byte-identical to the S16 motion-grammar baseline')
+// Re-baselined (full-height bottom-dock portrait): the wide PortraitView now
+// renders the portrait with fill: true (full module height, dominant) + the
+// flank ticks + readout compacted to a thin centered side column (the fixed
+// 48px strip square is retired). Intentional strip edit.
+const STRIP_SHA = '89c6a6a740d40969d5adb74aeebf11ab19127042ace6b7e6a00e02009bfbf80c'
+assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA,
+  '96px strip source byte-identical to the full-height-portrait baseline')
 ok(true, 'strip byte-identity snapshot pinned')
 
 // locked invariants (P3 subset, re-asserted where E2 touches the block)

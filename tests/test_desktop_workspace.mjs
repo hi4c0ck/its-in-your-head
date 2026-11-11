@@ -61,8 +61,8 @@ ok(src.includes('const IYH_PORTRAIT = (() =>'), 'portrait engine inline bundle p
 ok(src.includes('id: \'neutral-pencil\'') && src.includes('id: \'angular-pencil\'') && src.includes('id: \'soft-flow-study\''),
   'all three drawing templates registered in the engine')
 ok(src.includes('IYH_PORTRAIT.buildPortraitSvg'), 'the engine buildPortraitSvg API is consumed')
-ok(src.includes("jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: true })") && src.includes("jsx(IyhPortraitCompact, { data, preferences, size: 48 })"),
-  'compact PORTRAIT renders the engine compact view at the 48px dock budget (fill: true in the tall sidebar; fixed square in the strip)')
+ok(src.includes("jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: true })") && src.includes("flex: '0 0 132px', width: 132"),
+  'full-height PORTRAIT: fill: true is now BOTH the tall sidebar and the wide bottom-dock; the flank + readout are compacted to a thin centered side column so the face covers most of the place (the fixed 48px strip square is retired)')
 ok(src.includes('jsx(IyhPortraitStudio, { data, preferences })'),
   'expanded PORTRAIT renders the engine studio view')
 ok(src.includes('createIyhPortraitTemplatePreferences(ctx)'),
@@ -99,7 +99,7 @@ ok(src.includes('const PULSE_MAX_ROWS = 4'), 'compact lane still shows up to 4 t
 ok(src.includes('rows.map((row, ri)'), 'expanded PULSE walks ALL tool rows (uncapped)')
 ok(src.includes("gridTemplateColumns: 'repeat(4, minmax(0, 1fr))'"),
   'compact lanes keep equal-width 4-column tracks (PulseLanes; old row-table removed)')
-ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: true })') && src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48 })'), 'compact PORTRAIT renders the engine compact view at 48px (fill: true in the tall sidebar; fixed square in the strip)')
+ok(src.includes('jsx(IyhPortraitCompact, { data, preferences, size: 48, fill: true })') && src.includes("flex: '0 0 132px', width: 132"), 'full-height PORTRAIT: fill: true is now BOTH the tall sidebar and the wide bottom-dock; the flank + readout are compacted to a thin centered side column so the face covers most of the place (the fixed 48px strip square is retired)')
 ok(src.includes("'PORTRAIT · no data yet — evidence empty'"),
   'honest compact empty-state placeholder retained (the studio view carries its own)')
 
