@@ -28,6 +28,8 @@ const IYH_J = {
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
   ditherFeat: 5,       // v33: "ocean wave smooth lean" - SMOOTH rolling waves (was 1, the grainy sparkles; now ~5 => big smooth features, the ocean-wave look)
+  ditherNearFeat: 3,    // v45: the NEAR-layer feature scale (was 1 = the infinite-strikes driver, 592 flashes/s -> 4/s at 3)
+  ditherNearSpeed: 1.0, // v45: the NEAR-layer drift-speed multiplier (was 2.5 = the re-strike every ~20s)
   ditherDriftX: 1,    // v35: the dither drift X AMPLITUDE (a fraction of the half-grid; the drift is now a BOUNDED sine oscillation, not a linear sweep) - 1 = the full sway
   ditherDriftY: 0,    // v36: the dither drift Y AMPLITUDE - ZEROED (the Y sway was the "awkward one from the top"); now the drift is a pure X oscillation
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
@@ -123,7 +125,7 @@ function draw(f){
     if(pc+foldOff<pn){const cc=pc+foldOff;for(let yy2=0;yy2<pool;yy2++)for(let xx2=0;xx2<pool;xx2++){const c0=cc*pool+xx2,r0=prr*pool+yy2;if(c0>=cn||r0>=rn)continue;const v2=IYH_FACE_COV_BYTES[r0*cn+c0];if(v2>cvvL)cvvL=v2}}
     const lineProx=Math.min(1,Math.max(cvv,cvvL)/(lineFoldThr*255))   // 0 = deep void, 1 = on/near a line / the fold band
     const waveCol=waveOn?iihyJWave((pn-1-pc)/Math.max(1,pn-1)):1   // the formula as a per-column MULTIPLIER (0..1); the WAVY SEMANTIC
-    const dvFar=iihyJNoise(pc+dOffX,prr,IYH_J.ditherSeed,5),dvNear=iihyJNoise(pc+dOffX*2.5,prr,IYH_J.ditherSeed+40,1)   // v41: the REAL PARALLAX - TWO SEPARATE noise fields at different SCALES (the coarse far + the fine near, different drift speeds, no diagonal)
+    const dvFar=iihyJNoise(pc+dOffX,prr,IYH_J.ditherSeed,5),dvNear=iihyJNoise(pc+dOffX*(IYH_J.ditherNearSpeed||1),prr,IYH_J.ditherSeed+40,IYH_J.ditherNearFeat||3)   // v45: the NEAR layer = the middle scale (ditherNearFeat), breathing with the far layer (ditherNearSpeed)
     const waveParallax=waveCol*(0.34*dvFar+0.66*dvNear)   // v41: the WAVY SEMANTIC * the two parallax layers (0.34 far + 0.66 near)
     const vdx=pc-vigCx,vdy=prr-vigCy,vig=1-Math.pow(Math.sqrt(vdx*vdx+vdy*vdy)/vigMax,2)   // the VIGNETTE (v32): brighter at the center, darker at the corners/edges
     const groundAmp=$('groundAmp').value/100   // v39: the GROUND DITHER AMPLITUDE slider (0..2; 1 = the full parallax, 0 = the ground is fully dark)

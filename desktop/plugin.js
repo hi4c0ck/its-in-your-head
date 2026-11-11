@@ -1915,6 +1915,8 @@ const IYH_J = {
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
   ditherFeat: 5,       // v33: "ocean wave smooth lean" - SMOOTH rolling waves (was 1, the grainy sparkles; now ~5 => big smooth features, the ocean-wave look)
+  ditherNearFeat: 3,    // v45: the NEAR-layer feature scale (was hardcoded 1 = 1-cell "grainy sparkle" — the infinite-strikes driver, 592 visible flashes/s; 3 = the middle scale, the far=5 + near=3 keep the parallax depth)
+  ditherNearSpeed: 1.0, // v45: the NEAR-layer drift-speed multiplier (was 2.5; the fast fine drift re-lit the ground every ~20s period = "later things going crazy"; 1.0 = it breathes with the far layer)
   ditherDriftX: 1,    // v35: the dither drift X AMPLITUDE (a fraction of the half-grid; the drift is now a BOUNDED sine oscillation, not a linear sweep) - 1 = the full sway
   ditherDriftY: 0,    // v36: the dither drift Y AMPLITUDE - ZEROED (the Y sway was the "awkward one from the top"); now the drift is a pure X oscillation
   groundAmp: 0.70,    // v43: max GROUND EFFECT -30% (owner's call): 1.0 -> 0.70 (was the full parallax)
@@ -2231,7 +2233,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     // No moiré (they're separate fields, not two sines beating). The wavy semantic (waveCol) modulates
     // both. Each field has its own bounded drift (the "scalable" = the feature size, not just a fit).
     const dvFar = iihyJNoise(pc + dOffX, prr, IYH_J.ditherSeed, 5)   // the FAR field: coarse, slow drift
-    const dvNear = iihyJNoise(pc + dOffX * 2.5, prr, IYH_J.ditherSeed + 40, 1)   // the NEAR field: fine, faster X drift (2.5x the far), NO diagonal (prr unchanged)
+    const dvNear = iihyJNoise(pc + dOffX * (IYH_J.ditherNearSpeed || 1), prr, IYH_J.ditherSeed + 40, IYH_J.ditherNearFeat || 3)   // the NEAR field (v45): the middle scale, breathing with the far layer
     const waveParallax = waveCol * (0.34 * dvFar + 0.66 * dvNear)   // the WAVY SEMANTIC * the two parallax layers (0.34 far + 0.66 near)
     let a
     if (isLit) {
