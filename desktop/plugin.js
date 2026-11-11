@@ -1919,7 +1919,9 @@ const IYH_J = {
   ditherDriftX: 12,    // dither mask drift, X (bricks/sec; features crawl, the face visibly shimmers)
   ditherDriftY: 8,     // dither mask drift, Y (bricks/sec; DIFFERENT from X -> NON-diagonal)
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
-  waveAmp: 6,            // v23: the WAVE offset amplitude (noise-units) - how hard the dither field ripples in the wave shape (the NEW iihyJWave formula)
+  waveAmp: 6,            // v20: the WAVE offset amplitude (noise-units) - how hard the mask ripples in the wave shape
+  foldOffset: 1,         // v20: the SECONDARY fold mask = the SVG lines shifted LEFT this many pooled bricks (~avg line width, 8-12px) -> prevents mess near the lines
+  lineFoldThr: 0.5,   // v20 coverage (0..1) at/above which the wave FOLDS (damps) at a brick -> crisp lines, no mess near the SVG lines
   glitchEvery: 90,    // v19 the GLITCH burst cadence: frames between glitch bursts (~7.5s at 12fps)
   glitchLen: 10,       // v19 how long a glitch burst lasts, in frames (~0.83s) -> a brief rip, then snap-back
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
@@ -2038,11 +2040,12 @@ function iihyJNoise(nx, ny, seed, feat) {
   const ab = a + (b - a) * sx, cd = c + (d - c) * sx
   return ab + (cd - ab) * sy
 }
-// v23: the user's NEW wave-formula OFFSET mask (x in 0..1): y = 0.28 sin(πx) - 0.25 cos(πx)
-// + 0.01 sin(2πx) - 0.59 cos(2πx) + 0.15 sin(3πx) - 0.37 cos(3πx). Drives the per-column mask
-// offset -> the dither field ripples in this wave shape across the face.
+// v20: the user's wave-formula OFFSET mask (x in 0..1): y = 0.54 + 0.12 sin(πx) - 0.15 cos(πx)
+// + 0.22 sin(2πx) - 0.23 cos(2πx) - 0.09 sin(3πx) - 0.02 cos(3πx). Drives the per-column mask
+// offset -> the dither field ripples in this wave shape across the face (the "impress" drift).
 function iihyJWave(x) {
   const PI = Math.PI
+  // The owner's wave formula (replaces the older 0.54+... one):
   return 0.28 * Math.sin(PI * x) - 0.25 * Math.cos(PI * x)
     + 0.01 * Math.sin(2 * PI * x) - 0.59 * Math.cos(2 * PI * x)
     + 0.15 * Math.sin(3 * PI * x) - 0.37 * Math.cos(3 * PI * x)
@@ -2145,7 +2148,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const drift = 0                                             // v17: face position FIXED (no whole-picture sway); the DRIFT = the dither mask's thin lines sweeping the face
   // v18: the DITHER MASK drift offsets — a value-noise field fit to the image size, drifting
   // NON-diagonally (x + y at different slow rates). No per-brick state (the mask drives the bricks).
-  const dOffX = -(frame / 12) * (IYH_J.ditherDriftX || 0.5)   // v22: NEGATED -> the features sweep LEFT-TO-RIGHT (not R->L)
+  const dOffX = -((frame / 12) * (IYH_J.ditherDriftX || 0.5))
   const dOffY = (frame / 12) * (IYH_J.ditherDriftY || 0.35)
   // v19: the GLITCH burst (a TV-tracking glitch). Mostly the stable dither; then a periodic
   // random horizontal band rips sideways + takes a glitch (RGB-split) color + its bricks
@@ -2161,10 +2164,13 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     gColor = '#ff2d95'   // the RGB-split glitch color: a strong MAGENTA (unmistakable against the base cyan)
   }
   const accentColor = iiyhJResolveAccent()                     // pane accent (cached); alpha via globalAlpha; the glitch band overrides it
-  // v23: the WAVE-FORMULA offset mask (iihyJWave, the NEW formula) -> the dither field ripples per-column
-  // in the wave shape. The dither projects ONLY onto the bricks (the face cells); the void stays empty.
-  // No separate ground layer, no fold-damping (the projection is ON the bricks).
+  // v20: the WAVE-FORMULA offset mask (iihyJWave) + the LINE-FOLD damping. The wave ripples the
+  // dither field per-column; it FOLDS (damps) where a brick sits ON the SVG lines (cvv) or in the
+  // SECONDARY fold band (the lines shifted LEFT by foldOff -> cvvL) -> the ripple is full in open
+  // areas, calm at the lines (no mess).
   const waveAmp = IYH_J.waveAmp || 6
+  const foldOff = IYH_J.foldOffset || 1
+  const lineFoldThr = (IYH_J.lineFoldThr || 0.5) * 255
   for (let prr = 0; prr < pm; prr++) for (let pc = 0; pc < pn; pc++) {
     let cvv = 0, found = false
     for (let yy = 0; yy < pool; yy++) for (let xx = 0; xx < pool; xx++) {
@@ -2174,14 +2180,39 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       if (v > cvv) cvv = v
       found = true
     }
-    if (!found || cvv < IYH_FACE_COV.thr) continue   // v23: the dither projects ONLY onto the bricks (the face cells); the void stays empty (no separate ground layer)
-    // v23: the per-column WAVE offset (the NEW formula, MIRRORED L->R). The dither field ripples in this
-    // wave shape across the face. No ground, no fold-damping (the projection is ON the bricks).
-    const waveOff = iihyJWave((pn - 1 - pc) / Math.max(1, pn - 1)) * waveAmp
+    if (!found) continue
+    const vc = cvv / 255                                       // brick "confidence" 0..1
+    const contrast = iiyhJContrast(vc)                          // acos spline: [0,1], full at accentConf (0.83+)
+    const isLit = cvv >= IYH_FACE_COV.thr                       // a FACE line (the SVG pattern hit here)
+    // the SECONDARY fold mask = the SVG lines shifted LEFT by foldOff pooled bricks (≈ the avg line
+    // width) -> the fold band that keeps the ground ripple from getting messy near the lines.
+    let cvvL = 0
+    if (pc >= foldOff) {
+      const cc = pc - foldOff
+      for (let yy2 = 0; yy2 < pool; yy2++) for (let xx2 = 0; xx2 < pool; xx2++) {
+        const c0 = cc * pool + xx2, r0 = prr * pool + yy2
+        if (c0 >= cn || r0 >= rn) continue
+        const v2 = cov[r0 * cn + c0]; if (v2 > cvvL) cvvL = v2
+      }
+    }
+    // proximity to the lines (0 = deep void, 1 = on/near a line or the shifted-left fold band)
+    const lineProx = Math.min(1, Math.max(cvv, cvvL) / lineFoldThr)
+    // the per-column WAVE offset (FULL in the ground; it FOLDS (damps) where it hits the lines) — MIRRORED L->R
+    const waveOff = (iihyJWave((pn - 1 - pc) / Math.max(1, pn - 1)) - 0.5) * waveAmp * (1 - lineProx)
     const dv = iihyJNoise(pc + dOffX, prr + dOffY + waveOff, IYH_J.ditherSeed, IYH_J.ditherFeat)
-    // v23: the dither projects onto the brick's OPACITY, CLAMPED at a 0.05 floor on the final color level
-    // (the brick is the FULL accent color; its opacity = the dither value, never below 5% -> it pops).
-    const a = Math.max(dv, 0.05)
+    let a
+    if (isLit) {
+      // the FACE line: pull FULL color (the accent, full brightness, the v13 focus flicker). The
+      // wave folds here -> no dither shimmer on the lines. Floored at a 0.05 color level.
+      a = Math.max(contrast * (focusShift ? 1.05 : 1), 0.05)
+    } else {
+      // the GROUND dither: the brick's final color level (the dither, dv) CLAMPED at a 0.05 CEILING
+      // ("i meant % in clamp color levels on final mul" - the void is a faint dither capped at 5%,
+      // NOT a wide separate opacity), FOLDED at the lines (damped where lineProx is high). The
+      // background ripples faintly in the wave shape, the face lines pull full color.
+      a = Math.min(dv, 0.05) * (1 - lineProx)
+    }
+    if (a <= 0.004) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
     const inBand = gActive && prr >= gBand && prr < gBand + gH
     let gx = offX + pc * bwS + drift + gapX / 2, ga = a
@@ -2495,8 +2526,8 @@ const PORTRAIT_POLL_MS = 850
 // polls at the mandatory POLL_MS (5000) safety-net cadence. The primary
 // path is still the ~850ms tick push (PULSE_REDUCER_MS); the poll only
 // covers a missed push.
-const IO_WIDTH = 220   // RETIRED v0.1.12: the I/O readout moved from a fixed side column to a compact bottom-strip ticker (pulse-io-strip); the 4 lane boxes own the full width
-const NARROW_W = 480   // below this frame width the strip is docked narrow (sidebar): the I/O bottom-strip ticker stays compact, header collapses to essentials
+const IO_WIDTH = 220   // fixed I/O-frame column
+const NARROW_W = 480   // below this frame width the strip is docked narrow (sidebar): I/O column hidden, header collapses to essentials
 const TINY_W = 320     // below this the sidebar is too thin for worded tabs in the two-row header: tabs collapse to icons-only mode
 const PET_HOLD_MS = 7000  // affection faces hold this long after the LAST pat, then the operational face returns
 const PET_PATS_FOR_TO_PET = 4  // pats during wonder needed to reach the to-pet face
@@ -3455,27 +3486,6 @@ function pulseCommitLane(state, metric) {
 // Renderer-side data key: PulseLanes effects re-run only when the
 // VISIBLE lane content actually changes (identity of the polled object
 // must not re-ingest on every render).
-function dominantLaneFor(toolName, rawLanes, capNow) {
-  // v0.1.12 (bubble fix): the lane where a tool is MOST prominent — the
-  // smallest visible row index across all lanes, tie-break by PULSE_LANE_ORDER
-  // (live first). The activity whoop-up sprite lands HERE (the tool's actual
-  // dot-matrix) instead of always the live lane, so the bubbles spread across
-  // the columns where the tools are, rather than all clustering in the live
-  // column. Returns { metric, idx } or { metric: null, idx: -1 }.
-  var cap = Math.max(1, Math.floor(Number(capNow) || 1));
-  var best = null;
-  PULSE_LANE_ORDER.forEach(function (metric) {
-    var lane = (rawLanes && rawLanes[metric]) || [];
-    for (var i = 0; i < lane.length; i++) {
-      if (i >= cap) break;
-      if (lane[i] && lane[i].tool_name === toolName) {
-        if (best === null || i < best.idx) best = { metric: metric, idx: i };
-        break; // at most one row per tool per lane
-      }
-    }
-  });
-  return best ? { metric: best.metric, idx: best.idx } : { metric: null, idx: -1 };
-}
 function pulseLanesKey(lanes, capacity) {
   var cap = Math.max(1, Math.floor(Number(capacity) || 1));
   var parts = [];
@@ -3525,11 +3535,6 @@ var PULSE_BOARD_PAD = 3;    // internal box padding (tiny margins)
 var PULSE_BOARD_CHROME = PULSE_BOARD_BORDER + PULSE_BOARD_PAD; // 4px inner inset
 var PULSE_BOARD_GAP = 6;    // margin BETWEEN boxes (normal); 3 when narrow
 var PULSE_SPAWN_SPACE = 12; // reserved bottom strip the sprite flies up through
-// v0.1.12 (sharper good eval): value->dots steepness. A power curve makes
-// weak values collapse toward the 1-dot presence floor and strong values
-// expand toward the full meter, so weak vs strong read with more contrast
-// (less 'mushy/sticky'). Monotonic + engine-threshold-untouched. 1 = linear.
-var PULSE_DOT_SHARPNESS = 1.6;
 // Destination lane's dot-column x, surface-relative (the first-dot
 // column of the row's right-pinned 19px dot grid).
 function pulseDotColumnX(box, laneIdx, narrow) {
@@ -3688,11 +3693,7 @@ function createPulseBubbleCoordinator(opts) {
       var t = state.active[idx];
       state.active.splice(idx, 1);
       if (state.latest) {
-        // v0.1.12: the whoop-up bubble may land on the tool's dominant
-        // visible lane (t.metric), but the momentum DATA that changed is
-        // the live lane (t.dataLane) — commit the data lane, not the
-        // visual target, so the semantic lanes keep their V1 hold.
-        pulseCommitLane(state, t.dataLane || t.metric);
+        pulseCommitLane(state, t.metric);
       }
       state.flashes[t.slotId] = true;
       state.flashOwner[t.slotId] = t.sequence;
@@ -3747,17 +3748,19 @@ function createPulseBubbleCoordinator(opts) {
       var capNow = Math.max(1, capacity || cap);
       var accepted = 0;
       var fresh = [];
-      // v0.1.12 (bubble fix): the whoop-up sprite lands on the tool's MOST
-      // prominent visible lane (dominantLaneFor), not always 'live'.
-      function routeFor(toolName) {
-        return dominantLaneFor(toolName, rawLanes, capNow);
+      var liveLane = (rawLanes && rawLanes.live) || [];
+      function liveIndexFor(toolName) {
+        for (var i = 0; i < liveLane.length; i++) {
+          if (liveLane[i] && liveLane[i].tool_name === toolName) return i;
+        }
+        return -1;
       }
       (events || []).forEach(function (ev) {
         if (!ev || typeof ev.id !== 'number') return;
         if (ev.id <= state.lastActivityEventId) return; // delivered already
         state.lastActivityEventId = Math.max(state.lastActivityEventId, ev.id);
         accepted += 1;
-        var tgt = routeFor(ev.tool_name);
+        var idx = liveIndexFor(ev.tool_name);
         if (reduced) {
           // Reduced motion: no travel at all; the live lane content
           // still commits immediately (V2) below.
@@ -3766,16 +3769,13 @@ function createPulseBubbleCoordinator(opts) {
           state.consumedByTool[ev.tool_name] = ev.id;
           return;
         }
-        if (tgt.idx >= 0 && tgt.idx < capNow) {
+        if (idx >= 0 && idx < capNow) {
           var t = {
             kind: 'activity', semanticId: 'evt|' + ev.id, eventId: ev.id,
-            metric: tgt.metric, tool: ev.tool_name,
+            metric: 'live', tool: ev.tool_name,
             tool_call_id: ev.tool_call_id != null ? ev.tool_call_id : null,
             ts: ev.ts, reason: 'tool-call',
-            slotId: tgt.metric + '|' + tgt.idx, destinationSlot: tgt.idx,
-            // momentum data lives in the LIVE lane (the commit stays there);
-            // the sprite + arrival flash land on the tool's dominant lane.
-            dataLane: 'live',
+            slotId: 'live|' + idx, destinationSlot: idx,
             heldUntilVisible: false, sequence: state.seq += 1,
           };
           if (state.active.length < capNow) {
@@ -3791,12 +3791,13 @@ function createPulseBubbleCoordinator(opts) {
           // tracks how far it has consumed that tool's stream.
           state.consumedByTool[ev.tool_name] = ev.id;
         } else {
-          // v0.1.11 (B): not routable right now — the tool is not visible in
-          // ANY lane (tgt.idx === -1). The event was accepted (the delivered
+          // v0.1.11 (B): not routable right now — hidden behind the
+          // visible prefix (idx >= capNow) or the tool is not on the
+          // lane (idx === -1). The event was accepted (the delivered
           // cursor advanced past it) but is NOT buffered in renderer
           // memory: it stays in the persistent events table and is
           // flushed FILO (newest first) by flushTool() once the tool's
-          // cell exists in any lane. consumedByTool[ev.tool_name] is left
+          // LIVE cell exists. consumedByTool[ev.tool_name] is left
           // behind on purpose — that gap IS the tool's backlog.
         }
       });
@@ -3841,23 +3842,16 @@ function createPulseBubbleCoordinator(opts) {
     // renderer memory, so a long-hidden tool cannot grow JS heap.
     backlogTools: function (rawLanes, capacity, highWater) {
       var capNow = Math.max(1, capacity || cap);
+      var liveLane = (rawLanes && rawLanes.live) || [];
       var hw = Number(highWater) || 0;
       var out = [];
-      var seen = {};
-      // v0.1.12: a tool is visible in ANY lane (not just live) — collect the
-      // union of visible tools (deduped), then report the ones with a
-      // consumed gap. (flushTool routes each to its dominant lane.)
-      PULSE_LANE_ORDER.forEach(function (metric) {
-        var lane = (rawLanes && rawLanes[metric]) || [];
-        for (var i = 0; i < lane.length; i++) {
-          if (i >= capNow) break; // only the visible prefix can be flushed
-          var tool = lane[i] && lane[i].tool_name;
-          if (!tool || seen[tool]) continue;
-          seen[tool] = true;
-          var consumed = state.consumedByTool[tool] || 0;
-          if (consumed < hw) out.push(tool); // gap -> possible backlog
-        }
-      });
+      for (var i = 0; i < liveLane.length; i++) {
+        if (i >= capNow) break; // only the visible prefix can be flushed
+        var tool = liveLane[i] && liveLane[i].tool_name;
+        if (!tool) continue;
+        var consumed = state.consumedByTool[tool] || 0;
+        if (consumed < hw) out.push(tool); // gap -> possible backlog
+      }
       return out;
     },
     // FILO flush: animate a tool's unconsumed backlog NEWEST-FIRST so the
@@ -3878,15 +3872,15 @@ function createPulseBubbleCoordinator(opts) {
         if (nextCursor) state.consumedByTool[tool] = nextCursor;
         return { fresh: fresh };
       }
-      // v0.1.12 (bubble fix): flush to the tool's MOST prominent visible
-      // lane (dominantLaneFor), not always 'live', so the backlog whoop-ups
-      // spread across the columns where the tool actually is.
-      var tgt = dominantLaneFor(tool, rawLanes, capNow);
-      if (tgt.idx < 0 || tgt.idx >= capNow) {
-        // The tool is not visible in ANY lane right now (lane/cap changed
-        // mid-fetch): keep holding in the DB — do NOT animate, do NOT
-        // advance the cursor. The next visibility effect re-checks and
-        // re-flushes.
+      var liveLane = (rawLanes && rawLanes.live) || [];
+      var idx = -1;
+      for (var i = 0; i < liveLane.length; i++) {
+        if (liveLane[i] && liveLane[i].tool_name === tool) { idx = i; break; }
+      }
+      if (idx < 0 || idx >= capNow) {
+        // The tool is not visible right now (lane/cap changed mid-fetch):
+        // keep holding in the DB — do NOT animate, do NOT advance the
+        // cursor. The next visibility effect re-checks and re-flushes.
         return { fresh: fresh };
       }
       var consumedBefore = state.consumedByTool[tool] || 0;
@@ -3897,11 +3891,10 @@ function createPulseBubbleCoordinator(opts) {
         if (ev.id <= consumedBefore) continue; // already animated (dedupe)
         var t = {
           kind: 'activity', semanticId: 'evt|' + ev.id, eventId: ev.id,
-          metric: tgt.metric, tool: tool,
+          metric: 'live', tool: tool,
           tool_call_id: ev.tool_call_id != null ? ev.tool_call_id : null,
           ts: ev.ts, reason: 'tool-call',
-          slotId: tgt.metric + '|' + tgt.idx, destinationSlot: tgt.idx,
-          dataLane: 'live',
+          slotId: 'live|' + idx, destinationSlot: idx,
           heldUntilVisible: false, sequence: state.seq += 1,
         };
         if (state.active.length < capNow) {
@@ -4181,12 +4174,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
   });
   function dotsFor(value, evaluated) {
     var v = typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
-    // v0.1.12 (sharper good eval): steep value->dots curve (PULSE_DOT_SHARPNESS
-    // power) — weak collapses toward the 1-dot floor, strong expands toward
-    // the full meter, so weak vs strong read with more contrast (less sticky).
-    // Monotonic: the honest weak/strong label never contradicts the dots.
-    var shaped = v === null ? 0 : Math.pow(v, PULSE_DOT_SHARPNESS);
-    var filled = v === null ? 0 : Math.round(shaped * 12);
+    var filled = v === null ? 0 : Math.round(v * 12);
     // C (v0.1.11 presence floor): an EVALUATED cell (state != 'empty')
     // never renders a blank meter — at least one dot reads "present,"
     // magnitude adds on top. A weak score can no longer be mistaken for
@@ -4378,30 +4366,6 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
         },
         children: available === true ? 'no tools yet' : 'no pulse data yet',
       }),
-    })]).concat([jsx('div', {
-      key: 'pulse-io-strip',
-      'data-testid': 'pulse-io-strip',
-      // v0.1.12 (I/O -> bottom strip): the reserved spawn band doubles as
-      // a compact 1-line I/O ticker (the LATEST frame). The 4 lane boxes
-      // own the full width; the I/O readout no longer steals a 220px side
-      // column. The sprite columns fly up THROUGH this band to the lane
-      // dot columns, so it is the shared spawn space (dual-purpose).
-      style: {
-        position: 'absolute', left: 0, right: 0, bottom: 0,
-        height: PULSE_SPAWN_SPACE, display: 'flex', alignItems: 'center',
-        justifyContent: 'flex-end', gap: 4, padding: '0 4px',
-        pointerEvents: 'none', boxSizing: 'border-box', overflow: 'hidden',
-        fontSize: 10, lineHeight: PULSE_SPAWN_SPACE + 'px',
-      },
-      children: (Array.isArray(ioRecent) && ioRecent.length > 0)
-        ? [jsx(IoLine, { ev: ioRecent[0] })]   // the most recent I/O frame
-        : [jsx('span', {
-            style: {
-              fontSize: 9, color: 'var(--ui-text-quaternary)',
-              fontFamily: 'var(--ui-font-mono, monospace)',
-            },
-            children: 'no I/O yet',
-          })],
     })])],
   });
 }
@@ -5789,13 +5753,31 @@ function Strip({ source, rest, portraitPreferences }) {
         // visible tool's unconsumed backlog (which lives in the DB, not
         // in renderer memory).
         rest,
-        // v0.1.12 (I/O -> bottom strip): the I/O readout no longer owns a
-        // 220px side column. It becomes a compact 1-line ticker in the
-        // grid's reserved bottom spawn band (PULSE_SPAWN_SPACE); the 4
-        // lane boxes now get the full module width. `recent` = the I/O
-        // frames (most-recent-first); the ticker shows the latest.
-        ioRecent: recent,
       }),
+      ...(!narrow
+        ? [jsxs('div', {
+            className: 'flex flex-col justify-end overflow-hidden',
+            style: {
+              width: IO_WIDTH, gap: 2, flexShrink: 0, boxSizing: 'border-box',
+              // v0.1.12 space pass: the I/O readout suits the lane boxes —
+              // same 1px border + 3px padding + 2px radius, so it reads as
+              // a matching 5th board beside the four lanes.
+              border: '1px solid var(--ui-border, var(--border, transparent))',
+              borderRadius: 2,
+              padding: PULSE_BOARD_PAD,
+            },
+            children: [
+              recent.length > 0
+                ? recent.map((ev, i) => jsx(IoLine, { key: i, ev }))
+                : jsx('span', {
+                    style: { fontSize: 10, color: 'var(--ui-text-quaternary)' },
+                    children: metrics && metrics.events > 0
+                      ? 'I/O frames arrive with each agent call'
+                      : 'no events yet — ticks on your next agent turn',
+                  }),
+            ],
+          })]
+        : []),
     ],
   })
   const portraitModule = jsx('div', {
