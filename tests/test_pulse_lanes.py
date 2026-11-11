@@ -269,34 +269,42 @@ def test_good_friction_value_is_channel_gated_accumulation():
     assert fr["similarity"] is not None  # objective/user sim sub-field kept
 
 
-def test_balancer_degrades_thin_banks_and_caps_objective_hint():
-    """P2 balancer: a thin evidence bank cannot read 'strong' via recency
-    volume (support-gated ceiling); objective friction alone yields a display
-    value of 0.0 (user-labeled only) plus a capped objective_hint that never
-    reaches the friction threshold (0.4) -- the 'never conflated' invariant."""
+def test_value_decoupled_from_confidence():
+    """P2: value (how valuable the tool's activity is) and confidence (how much
+    evidence supports it -- the bank's support) are DECOUPLED. A thin bank
+    still yields the full accumulation value (a few calls above the floor
+    reach a valuable score); the confidence is a separate `support` field,
+    never multiplied into the value. Objective friction stays a separate
+    capped hint that can never read 'strong' and is never summed into the
+    value ('never conflated')."""
     reg = _FakeRegistry([_row("browser", 7)])
     import math
 
-    # Thin GOOD bank (1 sample) + 8 matching capsules: pure accumulation would
-    # be 1 - exp(-8/8) = 0.6321 ('strong' >= 0.6). The support gate (1/3)
-    # caps it to 0.2107 -> 'weak'. A full bank (3 samples) stays uncapped.
+    # Thin GOOD bank (1 sample -> confidence 1/3) + 8 matching capsules: the
+    # value is the PURE accumulation (1 - exp(-8/8) = 0.6321, 'strong' >= 0.6).
+    # It is NOT capped by the thin confidence -- value != confidence.
     thin = _FakeProtos({"browser": {"good": [[1.0, 0.0]], "friction": [],
                                     "objective_friction": []}})
     caps8 = [{"vector": [1.0, 0.0]} for _ in range(8)]
     g = build_lanes(reg, thin, goal_vector=[1.0, 0.0],
                     capsules_by_tool={"browser": caps8})["good"][0]
     pure = round(1.0 - math.exp(-8 / 8.0), 4)          # 0.6321
-    assert g["value"] == round(pure * (1.0 / 3.0), 4)  # 0.2107
-    assert g["level"] == "weak"
+    assert g["value"] == pure                          # decoupled: no ceiling
+    assert g["level"] == "strong"                      # the valuable score holds
+    assert g["support"]["count"] == 1
+    assert abs(g["support"]["ratio"] - 1.0 / 3.0) < 1e-3  # confidence, separate
 
+    # A full bank (3 samples -> confidence 1.0) yields the same pure value.
     full = _FakeProtos({"browser": {"good": [[1.0, 0.0]] * 3, "friction": [],
                                     "objective_friction": []}})
     gf = build_lanes(reg, full, goal_vector=[1.0, 0.0],
                      capsules_by_tool={"browser": caps8})["good"][0]
-    assert gf["value"] == pure                          # ceiling 3/3 = 1.0
+    assert gf["value"] == pure
+    assert gf["support"]["ratio"] == 1.0
 
     # Objective-friction ONLY (no user labels): the display value stays 0.0
-    # (user-labeled accumulation), while the capped objective_hint < 0.4.
+    # (user-labeled accumulation), while the capped objective_hint < 0.4
+    # (never 'strong'), reported on its own.
     obj_only = _FakeProtos({"browser": {"good": [], "friction": [],
                                         "objective_friction": [[0.0, 1.0]] * 3}})
     ocaps = [{"vector": [0.0, 1.0]} for _ in range(8)]
