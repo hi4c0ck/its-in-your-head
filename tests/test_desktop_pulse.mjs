@@ -288,10 +288,17 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   //   The earlier leading state-lamp was dropped: it was sized like a meter
   //   dot, so it read as a phantom 13th dot (friction: 2 real dots + lamp =
   //   "3") and dropped a second color onto a monochrome meter.
-  ok3(lanesSrc.includes('function dotsFor(value, evaluated)'), 'dotsFor is state-aware (presence floor wired)')
+  ok3(lanesSrc.includes('function dotsFor(value, evaluated, driftBase)'), 'dotsFor is state-aware + drift-aware (presence floor + drift order wired)')
   ok3(lanesSrc.includes('if (evaluated && filled < 1) filled = 1'),
     'C floor: an evaluated cell always shows >=1 meter dot (weak can not read as empty)')
-  ok3(lanesSrc.includes('dotsFor(val, evaluated)'), 'the meter carries the floor (dotsFor gets evaluated at the render site)')
+  ok3(lanesSrc.includes('dotsFor(val, evaluated, (coord.getState().seq || 0) + i)'),
+    'the meter gets evaluated + a deterministic drift base at the render site')
+  ok3(lanesSrc.includes('pulseDriftMask(filled, driftBase, PULSE_DOT_DRIFT_MULT)'),
+    'dotsFor places the lit dots in a deterministic drift order (pulseDriftMask)')
+  ok3(lanesSrc.includes('opacity: (mask ? mask[i] : i < filled)'),
+    'drift only reorders the lit slots; no driftBase keeps the sequential fill')
+  ok3(lanesSrc.includes("val === null ? '–' : val.toFixed(2)"),
+    'v0.1.16 narrow pane surfaces the 2-decimal score inline after the dots')
   ok3(!lanesSrc.includes('state-lamp'), 'no phantom leading lamp dot (presence is the floor, not a 13th dot)')
   ok3(!lanesSrc.includes('markerColor'), 'no separate marker color (one dot-language, no second hue)')
   // v0.1.13 honest meter: a ball only where a value EXISTS. 'learning' and
