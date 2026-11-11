@@ -2227,7 +2227,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     // No moiré (they're separate fields, not two sines beating). The wavy semantic (waveCol) modulates
     // both. Each field has its own bounded drift (the "scalable" = the feature size, not just a fit).
     const dvFar = iihyJNoise(pc + dOffX, prr, IYH_J.ditherSeed, 5)   // the FAR field: coarse, slow drift
-    const dvNear = iihyJNoise(pc + dOffX * 2.5, prr + dOffX, IYH_J.ditherSeed + 40, 1)   // the NEAR field: fine, faster drift (2.5x the far)
+    const dvNear = iihyJNoise(pc + dOffX * 2.5, prr, IYH_J.ditherSeed + 40, 1)   // the NEAR field: fine, faster X drift (2.5x the far), NO diagonal (prr unchanged)
     const waveParallax = waveCol * (0.34 * dvFar + 0.66 * dvNear)   // the WAVY SEMANTIC * the two parallax layers (0.34 far + 0.66 near)
     let a
     if (isLit) {

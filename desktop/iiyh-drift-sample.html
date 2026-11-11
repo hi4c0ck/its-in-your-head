@@ -123,7 +123,7 @@ function draw(f){
     if(pc+foldOff<pn){const cc=pc+foldOff;for(let yy2=0;yy2<pool;yy2++)for(let xx2=0;xx2<pool;xx2++){const c0=cc*pool+xx2,r0=prr*pool+yy2;if(c0>=cn||r0>=rn)continue;const v2=IYH_FACE_COV_BYTES[r0*cn+c0];if(v2>cvvL)cvvL=v2}}
     const lineProx=Math.min(1,Math.max(cvv,cvvL)/(lineFoldThr*255))   // 0 = deep void, 1 = on/near a line / the fold band
     const waveCol=waveOn?iihyJWave((pn-1-pc)/Math.max(1,pn-1)):1   // the formula as a per-column MULTIPLIER (0..1); the WAVY SEMANTIC
-    const dvFar=iihyJNoise(pc+dOffX,prr,IYH_J.ditherSeed,5),dvNear=iihyJNoise(pc+dOffX*2.5,prr+dOffX,IYH_J.ditherSeed+40,1)   // v41: the REAL PARALLAX - TWO SEPARATE noise fields at different SCALES (the coarse far + the fine near, different drift speeds)
+    const dvFar=iihyJNoise(pc+dOffX,prr,IYH_J.ditherSeed,5),dvNear=iihyJNoise(pc+dOffX*2.5,prr,IYH_J.ditherSeed+40,1)   // v41: the REAL PARALLAX - TWO SEPARATE noise fields at different SCALES (the coarse far + the fine near, different drift speeds, no diagonal)
     const waveParallax=waveCol*(0.34*dvFar+0.66*dvNear)   // v41: the WAVY SEMANTIC * the two parallax layers (0.34 far + 0.66 near)
     const vdx=pc-vigCx,vdy=prr-vigCy,vig=1-Math.pow(Math.sqrt(vdx*vdx+vdy*vdy)/vigMax,2)   // the VIGNETTE (v32): brighter at the center, darker at the corners/edges
     const groundAmp=$('groundAmp').value/100   // v39: the GROUND DITHER AMPLITUDE slider (0..2; 1 = the full parallax, 0 = the ground is fully dark)
