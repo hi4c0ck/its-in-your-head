@@ -102,7 +102,7 @@ function draw(f){
   const waveOn=($('waveOn')&&$('waveOn').checked)||false   // the checkbox: ON = the wave formula drives the dither offset; OFF = plain drift (waveOff=0)
   const ditherInvert=($('ditherInvert')&&$('ditherInvert').checked)||false   // the checkbox: ON = the ground dither is INVERTED (the near-1 becomes the fold, the near-0 becomes the bright)
   const gEvery=+$('gEvery').value,gLen=+$('gLen').value
-  const dOffX=(f/12)*(IYH_J.ditherDriftX||0.5),dOffY=(f/12)*(IYH_J.ditherDriftY||0.35)   // previous (positive) sweep sign
+  const dOffX=-((f/12)*(IYH_J.ditherDriftX||0.5)),dOffY=(f/12)*(IYH_J.ditherDriftY||0.35)   // the ground dither drifts the OPPOSITE side (negative dOffX)
   const gActive=(f%(gEvery+gLen))<gLen,gIdx=Math.floor(f/(gEvery+gLen))
   let gBand=0,gH=0,gShift=0,gColor=null
   if(gActive){
@@ -121,9 +121,9 @@ function draw(f){
     let cvvL=0
     if(pc+foldOff<pn){const cc=pc+foldOff;for(let yy2=0;yy2<pool;yy2++)for(let xx2=0;xx2<pool;xx2++){const c0=cc*pool+xx2,r0=prr*pool+yy2;if(c0>=cn||r0>=rn)continue;const v2=IYH_FACE_COV_BYTES[r0*cn+c0];if(v2>cvvL)cvvL=v2}}
     const lineProx=Math.min(1,Math.max(cvv,cvvL)/(lineFoldThr*255))   // 0 = deep void, 1 = on/near a line / the fold band
-    const waveOff=waveOn?(iihyJWave((pn-1-pc)/Math.max(1,pn-1))-0.5)*waveAmp*(1-lineProx):0   // the wave offset, FOLDED at the lines, MIRRORED L->R; 0 when the checkbox is OFF
-    const dvRaw=iihyJNoise(pc+dOffX,prr+dOffY+waveOff,IYH_J.ditherSeed,feat),dv=ditherInvert?1-dvRaw:dvRaw   // the dither, INVERTED when the checkbox is ON (the near-1 becomes the fold, the near-0 becomes the bright)
-    let a=isLit?iihyJStep7(cvv/255):iihyJStep7(Math.pow(dv,4))*(1-lineProx)   // FACE: coverage QUANTIZED to the 0.07 step; GROUND: neonwave sparkles (dv^4 -> near-1 pops), QUANTIZED, folded at the lines
+    const waveCol=waveOn?iihyJWave((pn-1-pc)/Math.max(1,pn-1)):1   // the formula as a per-column MULTIPLIER (0..1); flat 1 when the checkbox is OFF
+    const dvRaw=iihyJNoise(pc+dOffX,prr+dOffY,IYH_J.ditherSeed,feat),dv=ditherInvert?1-dvRaw:dvRaw   // the dither (the formula is no longer a noise offset); INVERTED when the checkbox is ON
+    let a=isLit?iihyJStep7(cvv/255):iihyJStep7(Math.pow(dv,4))*waveCol*(1-lineProx)   // FACE: coverage QUANTIZED to the 0.07 step; GROUND: sparkles * wave formula (col) * fold
     if(a<=0.004)continue
     const inBand=gActive&&isLit&&prr>=gBand&&prr<gBand+gH   // the glitch is on the FACE lines
     let gx=offX+pc*bwS+gapX/2,ga=a

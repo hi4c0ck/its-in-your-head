@@ -2155,7 +2155,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const drift = 0                                             // v17: face position FIXED (no whole-picture sway); the DRIFT = the dither mask's thin lines sweeping the face
   // v18: the DITHER MASK drift offsets — a value-noise field fit to the image size, drifting
   // NON-diagonally (x + y at different slow rates). No per-brick state (the mask drives the bricks).
-  const dOffX = (frame / 12) * (IYH_J.ditherDriftX || 0.5)
+  const dOffX = -((frame / 12) * (IYH_J.ditherDriftX || 0.5))
   const dOffY = (frame / 12) * (IYH_J.ditherDriftY || 0.35)
   // v19: the GLITCH burst (a TV-tracking glitch). Mostly the stable dither; then a periodic
   // random horizontal band rips sideways + takes a glitch (RGB-split) color + its bricks
@@ -2204,9 +2204,10 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     }
     // proximity to the lines (0 = deep void, 1 = on/near a line or the shifted-left fold band)
     const lineProx = Math.min(1, Math.max(cvv, cvvL) / lineFoldThr)
-    // the per-column WAVE offset (FULL in the ground; it FOLDS (damps) where it hits the lines) — MIRRORED L->R
-    const waveOff = (iihyJWave((pn - 1 - pc) / Math.max(1, pn - 1)) - 0.5) * waveAmp * (1 - lineProx)
-    const dv = iihyJNoise(pc + dOffX, prr + dOffY + waveOff, IYH_J.ditherSeed, IYH_J.ditherFeat)
+    // the per-column WAVE multiplier (the owner's formula applied to MULTIPLY the col into the fold,
+    // NOT as a noise offset). 0..1, mirrored L->R.
+    const waveCol = iihyJWave((pn - 1 - pc) / Math.max(1, pn - 1))
+    const dv = iihyJNoise(pc + dOffX, prr + dOffY, IYH_J.ditherSeed, IYH_J.ditherFeat)
     let a
     if (isLit) {
       // the FACE line: the coverage (vc in [0,1]) QUANTIZED to the nearest 0.07 STEP (the owner's
@@ -2214,10 +2215,10 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       // -> ~1.0; the rest -> the nearest 7% step.
       a = iihyJStep7(vc)
     } else {
-      // the GROUND dither (neonwave "small sparkles"): dv^4 -> the near-1 pops as a small bright
-      // spot, the near-0 stays dim (the "small sparkles in the neonwave style"). QUANTIZED to the
-      // nearest 0.07 STEP, FOLDED at the lines (damped where lineProx is high).
-      a = iihyJStep7(Math.pow(dv, 4)) * (1 - lineProx)
+      // the GROUND dither (neonwave "small sparkles"): dv^4 sparkles, QUANTIZED to the 0.07 STEP,
+      // MULTIPLIED by the per-column WAVE formula (col), then FOLDED at the lines (damped where
+      // lineProx is high) -> "apply formula to mul col/fold".
+      a = iihyJStep7(Math.pow(dv, 4)) * waveCol * (1 - lineProx)
     }
     if (a <= 0.004) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
