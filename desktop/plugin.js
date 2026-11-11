@@ -2207,11 +2207,11 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       // wave folds here -> no dither shimmer on the lines. Floored at a 0.05 color level.
       a = Math.max(contrast * (focusShift ? 1.05 : 1), 0.05)
     } else {
-      // the GROUND dither: the brick's final color level (the dither, dv) CLAMPED at a 0.05 CEILING
-      // ("i meant % in clamp color levels on final mul" - the void is a faint dither capped at 5%,
-      // NOT a wide separate opacity), FOLDED at the lines (damped where lineProx is high). The
-      // background ripples faintly in the wave shape, the face lines pull full color.
-      a = Math.min(dv, 0.05) * (1 - lineProx)
+      // the GROUND dither: the brick's final color level (the dither, dv in [0,1]) SCALED into the
+      // 0.05 CEILING (dv*0.05 -> the dither varies 0..5% brick-by-brick, NOT a flat 5% wash), FOLDED
+      // at the lines (damped where lineProx is high). The background ripples faintly in the wave
+      // shape, the face lines pull full color.
+      a = dv * 0.05 * (1 - lineProx)
     }
     if (a <= 0.004) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
