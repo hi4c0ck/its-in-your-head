@@ -321,12 +321,21 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   ok3(!src.includes("metric: 'live', tool: ev.tool_name"),
     'activity no longer hard-codes metric:"live" (the one-column clustering bug)')
   ok3(src.includes("dataLane: 'live'"), 'the momentum commit stays on the live lane (visual spreads, data holds)')
-  // v0.1.12 sharper good eval: a monotonic power curve steepens value->dots
-  // (weak collapses to the 1-dot floor, strong expands) without touching the
-  // engine threshold.
-  ok3(src.includes('PULSE_DOT_SHARPNESS'), 'a value->dots sharpness curve is defined')
-  ok3(lanesSrc.includes('Math.pow(v, PULSE_DOT_SHARPNESS)'),
-    'dotsFor applies the steep (monotonic) value->dots curve')
+  // v0.1.12 sharper good eval: the PULSE_DOT_SHARPNESS power curve is now
+  // retired from the fill (retained as a constant) — superseded below.
+  ok3(src.includes('PULSE_DOT_SHARPNESS'), 'the legacy sharpness constant is retained')
+  // v0.1.14: the owner's X-space wave (the "bubbles count" formula) drives the
+  // fill: dots = round(wave(value) * 12); the honest 0-dot floor for
+  // value=null (learning/empty) is preserved.
+  ok3(src.includes('function pulseDotWave('),
+    'the owner X-space value->dots wave is defined')
+  ok3(src.includes('0.350 * Math.sin(3 * PI * u)')
+        && src.includes('Math.pow(v, 0.67)'),
+    'the wave uses the owner coefficients + the x^0.67 X-space transform')
+  ok3(lanesSrc.includes('pulseDotWave(v)'),
+    'dotsFor fills the meter from the wave (round(wave * 12))')
+  ok3(lanesSrc.includes('Math.round(shaped * 12)'),
+    'the wave fraction scales to the 12-dot meter')
   // v0.1.12 distinct dequeued dots: a whoop-up is ONE per tool (its newest
   // event), not one per call — the cursor queue exists to surface a NEW
   // tool, not the same tool N times. activity() dedupes via the helper;

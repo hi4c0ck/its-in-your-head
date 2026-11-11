@@ -26,13 +26,12 @@ const IYH_J = {
   shiftHoldMs: 1300,   // normal phase (main lines in focus) before the focus shift
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
-  ditherFeat: 8,       // v18 dither mask feature size, in BRICKS (~8 => ~27 features across the face; fit/cropped to the image size, not a scaled-up grain) -> the bricks visibly shimmer as it drifts
-  ditherFloor: 0.4,    // a face brick's opacity where the dither mask is 0 (the floor, so the face holds its shape)
-  ditherDriftX: 12,    // dither mask drift, X (bricks/sec; features crawl, the face visibly shimmers)
-  ditherDriftY: 8,     // dither mask drift, Y (bricks/sec; DIFFERENT from X -> NON-diagonal)
+  ditherFeat: 1,       // v32: the dither mask feature size, in BRICKS (~1 => very grained, the "small sparkles" the owner wants)
+  ditherDriftX: 3,    // v32: the dither mask drift, X (bricks/sec) - SLOWED (was 12, too fast) + the drift is now mostly horizontal
+  ditherDriftY: 1,    // v32: the dither mask drift, Y (bricks/sec) - tiny (was 8, made it too diagonal); now the drift is a slow near-horizontal sweep
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
   waveAmp: 6,          // v20 the WAVE-FORMULA offset-mask amplitude (noise-units): how far the dither field ripples in the wave shape (iihyJWave)
-  foldOffset: 1,      // v20 the SECONDARY fold mask = the SVG lines shifted LEFT by this many pooled bricks (~1 ≈ 10px ≈ the avg line width); the fold band that prevents mess
+  foldOffset: 3,      // v28: the SECONDARY fold mask = the SVG lines shifted RIGHT by this many pooled bricks (the "stretch" from the original position to the goal; 1 was too tiny)
   lineFoldThr: 0.5,   // v20 coverage (0..1) at/above which the wave FOLDS (damps) at a brick -> crisp lines, no mess near the SVG lines
   glitchEvery: 90,    // v19 the GLITCH burst cadence: frames between glitch bursts (~7.5s at 12fps)
   glitchLen: 10,       // v19 how long a glitch burst lasts, in frames (~0.83s) -> a brief rip, then snap-back
@@ -96,6 +95,7 @@ function draw(f){
   g.clearRect(0,0,480,506)
   const pool=IYH_J.pool,cn=IYH_FACE_COV.cn,rn=IYH_FACE_COV.rn,p=IYH_J.grout
   const bw=IYH_J.bw*pool,bh=IYH_J.bh*pool,pn=Math.ceil(cn/pool),pm=Math.ceil(rn/pool)
+  const vigCx=(pn-1)/2,vigCy=(pm-1)/2,vigMax=Math.sqrt(vigCx*vigCx+vigCy*vigCy)||1   // the VIGNETTE radius (v32)
   const sc=Math.min(480/720,506/760),offX=(480-720*sc)/2,offY=(506-760*sc)/2
   const bwS=bw*sc,bhS=bh*sc,gapX=bwS*p,gapY=bhS*p
   const feat=1
@@ -124,7 +124,8 @@ function draw(f){
     const lineProx=Math.min(1,Math.max(cvv,cvvL)/(lineFoldThr*255))   // 0 = deep void, 1 = on/near a line / the fold band
     const waveCol=waveOn?iihyJWave((pn-1-pc)/Math.max(1,pn-1)):1   // the formula as a per-column MULTIPLIER (0..1); flat 1 when the checkbox is OFF
     const dvRaw=iihyJNoise(pc+dOffX,prr+dOffY,IYH_J.ditherSeed,feat),dv=ditherInvert?1-dvRaw:dvRaw   // the dither (the formula is no longer a noise offset); INVERTED when the checkbox is ON
-    let a=isLit?iihyJStep7(cvv/255):iihyJStep7(Math.pow(dv,4))*waveCol*(1-lineProx)   // FACE: coverage QUANTIZED to the 0.07 step; GROUND: sparkles * wave formula (col) * fold
+    const vdx=pc-vigCx,vdy=prr-vigCy,vig=1-Math.pow(Math.sqrt(vdx*vdx+vdy*vdy)/vigMax,2)   // the VIGNETTE (v32): brighter at the center, darker at the corners/edges
+    let a=isLit?iihyJStep7(cvv/255):iihyJStep7(Math.pow(dv,4))*waveCol*(1-lineProx)*vig   // FACE: coverage QUANTIZED to the 0.07 step; GROUND: sparkles * wave formula (col) * fold * vignette
     if(a<=0.004)continue
     const inBand=gActive&&isLit&&prr>=gBand&&prr<gBand+gH   // the glitch is on the FACE lines
     let gx=offX+pc*bwS+gapX/2,ga=a

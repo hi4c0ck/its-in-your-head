@@ -1915,8 +1915,8 @@ const IYH_J = {
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
   ditherFeat: 1,       // v29: the dither mask feature size, in BRICKS (~1 => very grained, the "small sparkles" the owner wants; NOT the smooth ~8-cell v18 version)
-  ditherDriftX: 12,    // dither mask drift, X (bricks/sec; features crawl, the face visibly shimmers)
-  ditherDriftY: 8,     // dither mask drift, Y (bricks/sec; DIFFERENT from X -> NON-diagonal)
+  ditherDriftX: 3,    // v32: the dither mask drift, X (bricks/sec) - SLOWED (was 12, too fast) + the drift is now mostly horizontal
+  ditherDriftY: 1,    // v32: the dither mask drift, Y (bricks/sec) - tiny (was 8, made it too diagonal); now the drift is a slow near-horizontal sweep
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
   waveAmp: 6,            // v20: the WAVE offset amplitude (noise-units) - how hard the mask ripples in the wave shape
   foldOffset: 3,         // v28: the SECONDARY fold mask = the SVG lines shifted RIGHT this many pooled bricks (the "stretch" from the original position to the goal; 1 was too tiny) -> prevents mess near the lines
@@ -2149,6 +2149,10 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const p = IYH_J.grout || 0                                   // grout gap as a fraction of brick width
   const bw = IYH_J.bw * pool, bh = IYH_J.bh * pool             // pooled brick footprint (viewBox units)
   const pn = Math.ceil(cn / pool), pm = Math.ceil(rn / pool)   // pooled grid dims
+  // v32: the VIGNETTE radius (the half-diagonal of the pooled grid) — the ground dither is brighter
+  // at the center, darker at the corners/edges.
+  const vigCx = (pn - 1) / 2, vigCy = (pm - 1) / 2
+  const vigMax = Math.sqrt(vigCx * vigCx + vigCy * vigCy) || 1
   const scale = Math.min(W / 720, H / 760)
   const offX = (W - 720 * scale) / 2, offY = (H - 760 * scale) / 2
   const bwS = bw * scale, bhS = bh * scale
@@ -2218,8 +2222,10 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     } else {
       // the GROUND dither (neonwave "small sparkles"): dv^4 sparkles, QUANTIZED to the 0.07 STEP,
       // MULTIPLIED by the per-column WAVE formula (col), then FOLDED at the lines (damped where
-      // lineProx is high) -> "apply formula to mul col/fold".
-      a = iihyJStep7(Math.pow(dv, 4)) * waveCol * (1 - lineProx)
+      // lineProx is high), then VIGNETTED (brighter at the center, darker at the corners/edges).
+      const vdx = pc - vigCx, vdy = prr - vigCy
+      const vig = 1 - Math.pow(Math.sqrt(vdx * vdx + vdy * vdy) / vigMax, 2)
+      a = iihyJStep7(Math.pow(dv, 4)) * waveCol * (1 - lineProx) * vig
     }
     if (a <= 0.004) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
@@ -3596,6 +3602,22 @@ var PULSE_SPAWN_SPACE = 12; // reserved bottom strip the sprite flies up through
 // expand toward the full meter, so weak vs strong read with more contrast
 // (less 'mushy/sticky'). Monotonic + engine-threshold-untouched. 1 = linear.
 var PULSE_DOT_SHARPNESS = 1.6;
+// v0.1.14: the owner's X-space value->meter wave (the "bubbles count" formula).
+// x = the lane value (0..1); u = x^0.67; y = the tuned wave, clamped to [0,1];
+// the meter's fill fraction is y, so dots = round(y * 12). Supersedes the
+// PULSE_DOT_SHARPNESS power curve for the fill (constant retained for the
+// pre-v0.1.14 path / other references).
+function pulseDotWave(x) {
+  var v = (typeof x === 'number' && Number.isFinite(x))
+    ? Math.min(1, Math.max(0, x)) : 0;
+  var PI = 3.1416;
+  var u = Math.pow(v, 0.67);
+  var y = 0.400
+    - 0.050 * Math.sin(PI * u) + 0.310 * Math.cos(PI * u)
+    - 0.080 * Math.sin(2 * PI * u) - 0.300 * Math.cos(2 * PI * u)
+    + 0.350 * Math.sin(3 * PI * u) - 0.300 * Math.cos(3 * PI * u);
+  return Math.min(1, Math.max(0, y));
+}
 // Destination lane's dot-column x, surface-relative (the first-dot
 // column of the row's right-pinned 19px dot grid).
 function pulseDotColumnX(box, laneIdx, narrow) {
@@ -4267,7 +4289,9 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
     // power) — weak collapses toward the 1-dot floor, strong expands toward
     // the full meter, so weak vs strong read with more contrast (less sticky).
     // Monotonic: the honest weak/strong label never contradicts the dots.
-    var shaped = v === null ? 0 : Math.pow(v, PULSE_DOT_SHARPNESS);
+    // v0.1.14: the owner's X-space wave drives the fill (dots = round(y*12));
+    // supersedes the PULSE_DOT_SHARPNESS power curve.
+    var shaped = v === null ? 0 : pulseDotWave(v);
     var filled = v === null ? 0 : Math.round(shaped * 12);
     // C (v0.1.11 presence floor): an EVALUATED cell (state != 'empty')
     // never renders a blank meter — at least one dot reads "present,"
