@@ -1917,7 +1917,7 @@ const IYH_J = {
   ditherFeat: 5,       // v33: "ocean wave smooth lean" - SMOOTH rolling waves (was 1, the grainy sparkles; now ~5 => big smooth features, the ocean-wave look)
   ditherDriftX: 1,    // v35: the dither drift X AMPLITUDE (a fraction of the half-grid; the drift is now a BOUNDED sine oscillation, not a linear sweep) - 1 = the full sway
   ditherDriftY: 0,    // v36: the dither drift Y AMPLITUDE - ZEROED (the Y sway was the "awkward one from the top"); now the drift is a pure X oscillation
-  groundAmp: 1,       // v39: the GROUND DITHER AMPLITUDE (a 0..1+ multiplier on the ground wave; 1 = the full parallax, 0 = the ground is fully dark) - the "slider to influence the amplify of ground"
+  groundAmp: 0.70,    // v43: max GROUND EFFECT -30% (owner's call): 1.0 -> 0.70 (was the full parallax)
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
   waveAmp: 6,            // v20: the WAVE offset amplitude (noise-units) - how hard the mask ripples in the wave shape
   foldOffset: 3,         // v28: the SECONDARY fold mask = the SVG lines shifted RIGHT this many pooled bricks (the "stretch" from the original position to the goal; 1 was too tiny) -> prevents mess near the lines
