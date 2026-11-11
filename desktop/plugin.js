@@ -2186,7 +2186,7 @@ function iiyhRasterizeTemplateCoverage(templateId) {
 }
 // Per-frame CANVAS renderer. `cov` is the 214x240 coverage grid (default the baked
 // IYH_FACE_COV_BYTES; a template-rasterized grid when a drawing template is selected).
-function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
+function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false, invert = false) {
   ctx.clearRect(0, 0, W, H)                                  // transparent bg
   cov = cov || IYH_FACE_COV_BYTES
   const cn = IYH_FACE_COV.cn, rn = IYH_FACE_COV.rn
@@ -2236,7 +2236,8 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     for (let yy = 0; yy < pool; yy++) for (let xx = 0; xx < pool; xx++) {
       const c0 = pc * pool + xx, r0 = prr * pool + yy
       if (c0 >= cn || r0 >= rn) continue
-      const idx = r0 * cn + c0, v = cov[idx]
+      const idx = r0 * cn + c0, raw = cov[idx]
+      const v = invert ? 255 - raw : raw    // INVERT SOURCE: negate the raster polarity (white<->ink)
       if (v > cvv) cvv = v
       found = true
     }
@@ -2252,7 +2253,8 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       for (let yy2 = 0; yy2 < pool; yy2++) for (let xx2 = 0; xx2 < pool; xx2++) {
         const c0 = cc * pool + xx2, r0 = prr * pool + yy2
         if (c0 >= cn || r0 >= rn) continue
-        const v2 = cov[r0 * cn + c0]; if (v2 > cvvL) cvvL = v2
+        const raw2 = cov[r0 * cn + c0], v2 = invert ? 255 - raw2 : raw2
+        if (v2 > cvvL) cvvL = v2
       }
     }
     // proximity to the lines (0 = deep void, 1 = on/near a line or the shifted-left fold band)
@@ -2315,9 +2317,11 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
 // Self-driven 12fps canvas renderer. The pane's OWN rAF loop (throttled to
 // IYH_BRICK_FPS) draws the field each frame — not a static image. Started when
 // active, re-fit on resize, stopped on cleanup. Returns the <canvas> ref to attach.
-function useIyhBrickCanvas(active, templateId) {
+function useIyhBrickCanvas(active, templateId, invert) {
   const ref = useRef(null)
   const covRef = useRef(IYH_FACE_COV_BYTES)   // current brick coverage (baked default; a template raster overrides it)
+  const invertRef = useRef(false)             // INVERT SOURCE polarity (studio checkbox); the rAF loop reads it live
+  invertRef.current = !!invert
   // Follow the DRAWING TEMPLATE: on template change, rasterize that face to a 214x240
   // coverage grid so the mosaic isn't stuck on the one baked face. Baked stands in
   // until the async raster resolves (and on any failure).
@@ -2365,7 +2369,7 @@ function useIyhBrickCanvas(active, templateId) {
       const shiftHold = IYH_J.shiftHoldMs || 1300, shiftOn = IYH_J.shiftMs || 400
       const cycle = shiftHold + shiftOn
       const focusShift = cycle > 0 && (ts % cycle) >= shiftHold  // timed FOCUS shift: 1.3s main-line focus, 0.4s the less-visible parts come into focus
-      iiyhBrickCanvasDraw(ctx, canvas.width, canvas.height, frame, seed, covRef.current, focusShift)
+      iiyhBrickCanvasDraw(ctx, canvas.width, canvas.height, frame, seed, covRef.current, focusShift, invertRef.current)
     }
     raf = requestAnimationFrame(loop)
     return () => { running = false; cancelAnimationFrame(raf); if (ro) ro.disconnect() }
@@ -2420,6 +2424,7 @@ function IyhPortraitCompact({ data, preferences, size = 48, fill = false }) {
 
 function IyhPortraitStudio({ data, preferences }) {
   const [selectedTemplate] = useIyhPortraitTemplate(preferences)
+  const [invert, setInvert] = useState(false)   // INVERT SOURCE: negate the raster polarity (fool around in the opposite)
   const hasEvidence = !!(data && data.available) &&
     ['directness', 'context_richness', 'exploration', 'analytical_depth', 'iteration', 'scope']
       .some((dimension) => {
@@ -2430,12 +2435,37 @@ function IyhPortraitStudio({ data, preferences }) {
           typeof value === 'number' && Number.isFinite(value),
         )
       })
-  const cRef = useIyhBrickCanvas(true, selectedTemplate)   // brick mosaic follows the selected drawing template
+  const cRef = useIyhBrickCanvas(true, selectedTemplate, invert)   // brick mosaic follows the selected drawing template
   return jsxs('div', {
     className: 'flex flex-col items-center',
     style: { width: '100%', minHeight: 0, gap: 8 },
     children: [
-      jsx(IyhPortraitTemplatePicker, { preferences }),
+      jsxs('div', {   // the source chooser + the invert toggle on one row (near the picker, as requested)
+        style: { display: 'flex', alignItems: 'center', gap: 12 },
+        children: [
+          jsx(IyhPortraitTemplatePicker, { preferences }),
+          jsxs('label', {
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              color: 'var(--ui-text-quaternary)',
+              fontSize: 9,
+              fontFamily: 'var(--ui-font-mono, monospace)',
+              letterSpacing: '.06em',
+            },
+            children: [
+              jsx('input', {
+                type: 'checkbox',
+                checked: invert,
+                onChange: (event) => setInvert(!!event.target.checked),
+                'aria-label': 'Invert source SVG polarity',
+              }),
+              jsx('span', { children: 'INVERT SOURCE' }),
+            ],
+          }),
+        ],
+      }),
       jsx('canvas', {
         ref: cRef,
         title: 'Portrait is an expressive impression, not a factual likeness',
@@ -4400,29 +4430,29 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
   var hasEntries = order.some(function (l) {
     return lanes && Array.isArray(lanes[l]) && lanes[l].length > 0;
   });
-  function dotsFor(value, evaluated, driftBase, hasData) {
-    var v = typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
-    // v0.1.12 (sharper good eval): steep value->dots curve (PULSE_DOT_SHARPNESS
-    // power) — weak collapses toward the 1-dot floor, strong expands toward
-    // the full meter, so weak vs strong read with more contrast (less sticky).
-    // Monotonic: the honest weak/strong label never contradicts the dots.
-    // v0.1.14: the owner's X-space wave drives the fill (dots = round(y*12));
-    // supersedes the PULSE_DOT_SHARPNESS power curve.
-    var shaped = v === null ? 0 : pulseDotWave(v);
-    var filled = v === null ? 0 : Math.round(shaped * 12);
-    // C (v0.1.11 presence floor, v0.1.16 zero-gate): an EVALUATED cell with a
-    // GENUINELY positive value never renders a blank meter.
-    if (evaluated && v > 0 && filled < 1) filled = 1;
-    // v0.1.20 (data-presence floor): a cell that HAS evidence (provisional/
-    // ready state, support > 0, or a nonzero objective hint) shows a small
-    // "present, low" floor even at value 0.0 -- the bar reflects the DATA,
-    // not just the value, so a ready/weak cell never reads empty. 'learning'/
-    // 'empty' (no evidence) still reads 0 dots.
-    if (hasData && filled < 2) filled = 2;
-    // v0.1.16: when a driftBase is given (the live render passes
-    // PULSE_SEQ + row), place the `filled` dots in a deterministic DRIFT
-    // order; otherwise (tests / reduced-motion) keep the honest sequential
-    // fill. The lit COUNT is unchanged -- only the slots differ.
+  // v0.1.21 (rank progressive line): a lane's dot-meters step DOWN smoothly
+  // by rank -- the lane's top tool carries the PEAK (its strongest signal: the
+  // value, or the objective data when the value is empty) and the rest decay
+  // quadratically across the lane. "The weights across should matter": the
+  // standout stands out, the tail recedes. ONE smooth function of rank; no
+  // ad-hoc floor numbers (no 2/6/12).
+  function laneSignal(e) {
+    var v = (e && typeof e.value === 'number' && Number.isFinite(e.value)) ? e.value : 0;
+    var h = (e && typeof e.objective_hint === 'number' && Number.isFinite(e.objective_hint)) ? e.objective_hint : 0;
+    var s = Math.max(v, h);
+    return s < 0 ? 0 : (s > 1 ? 1 : s);
+  }
+  function rankLineDots(peak, rank, laneSize) {
+    var t = 1 - rank / Math.max(1, laneSize);
+    if (t < 0) t = 0;
+    return Math.max(0, Math.min(12, Math.round(peak * t * t)));
+  }
+  function dotsFor(filled, driftBase) {
+    // v0.1.21: `filled` is the lane's RANK-LINE dot count (computed at the
+    // call site from the lane's peak + this entry's rank). The bar renders
+    // that many dots in a deterministic drift order (v0.1.16).
+    if (!Number.isFinite(filled)) filled = 0;
+    filled = Math.max(0, Math.min(12, Math.round(filled)));
     var mask = (driftBase !== undefined && driftBase !== null)
       ? pulseDriftMask(filled, driftBase, PULSE_DOT_DRIFT_MULT)
       : null;
@@ -4452,6 +4482,13 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
     },
     children: [order.map(function (lane) {
       var entries = lanes && Array.isArray(lanes[lane]) ? lanes[lane].slice(0, cap) : [];
+      // v0.1.21 (rank progressive line): the lane's PEAK = its top tool's
+      // strongest signal (value, or the objective data when the value is
+      // empty) scaled to a full meter. Each entry's dots = peak *
+      // (1 - rank/laneSize)^2 -- a smooth decay down the lane, so the
+      // standout stands out and the tail recedes. One smooth function of rank.
+      var laneSize = entries.length;
+      var lanePeak = laneSize ? Math.round(laneSignal(entries[0]) * 12) : 0;
       return jsxs('div', {
         key: lane,
         'data-lane': lane,
@@ -4493,14 +4530,6 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
                 : (e.support_count != null ? e.support_count : null);
               if (supCount !== null) parts.push('support ' + supCount);
               if (e.level) parts.push(String(e.level));
-              // v0.1.20 (data-presence floor): this cell HAS evidence when its
-              // state is provisional/ready, its support count is > 0, or it
-              // carries a nonzero objective hint. Drives the "present, low"
-              // floor so a ready/weak cell never reads 0 dots (the bar
-              // reflects the data, not just the value). learning/empty -> no data.
-              var hasData = (e.state === 'provisional' || e.state === 'ready')
-                || (supCount !== null && supCount > 0)
-                || (typeof e.objective_hint === 'number' && e.objective_hint > 0);
               parts.push('evidence: ' + evidenceSrc);
               var tip = parts.join(' · ');
               return jsxs('div', {
@@ -4524,7 +4553,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
                   }),
                   jsxs('span', {
                     style: { display: 'inline-grid', gridTemplateColumns: 'repeat(4, 4px)', gap: 1, flexShrink: 0 },
-                    children: dotsFor(val, evaluated, (coord.getState().seq || 0) + i, hasData),
+                    children: dotsFor(rankLineDots(lanePeak, i, laneSize), (coord.getState().seq || 0) + i),
                   }),
                 ],
               });
