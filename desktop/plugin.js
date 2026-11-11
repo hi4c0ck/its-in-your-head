@@ -1852,6 +1852,28 @@ function useIyhPortraitTemplate(preferences) {
   return [selected, (next) => preferences.set(next)]
 }
 
+// SHARED INVERT-SOURCE preference (module-level, so the studio checkbox + the
+// compact sidebar canvas reflect the same state across both React roots).
+let iyhInvertSource = false
+const iyhInvertSourceListeners = new Set()
+function iyhInvertSourceSubscribe(listener) {
+  if (typeof listener !== 'function') return function () {}
+  iyhInvertSourceListeners.add(listener)
+  return function () { iyhInvertSourceListeners.delete(listener) }
+}
+function iyhInvertSourceSet(next) {
+  const v = !!next
+  if (iyhInvertSource === v) return false
+  iyhInvertSource = v
+  iyhInvertSourceListeners.forEach((listener) => listener(v))
+  return true
+}
+function useIyhInvertSource() {
+  const [value, setValue] = useState(iyhInvertSource)
+  useEffect(function () { return iyhInvertSourceSubscribe(setValue) }, [])
+  return [value, iyhInvertSourceSet]
+}
+
 function IyhPortraitTemplatePicker({ preferences }) {
   const [selected, setSelected] = useIyhPortraitTemplate(preferences)
   const templates = IYH_PORTRAIT.listPortraitTemplates()
@@ -1871,7 +1893,7 @@ function IyhPortraitTemplatePicker({ preferences }) {
         onChange: (event) => setSelected(event.target.value),
         'aria-label': 'Portrait drawing template',
         style: {
-          minWidth: 150,
+          minWidth: 120,
           background: 'var(--ui-bg-elevated, transparent)',
           color: 'var(--ui-text-secondary)',
           border: '1px solid var(--ui-stroke-secondary)',
@@ -2153,7 +2175,7 @@ function iiyhRasterizeTemplateCoverage(templateId, invert = false) {
       if (typeof document === 'undefined' || typeof Image === 'undefined') { resolve(null); return }
       const cn = IYH_FACE_COV.cn, rn = IYH_FACE_COV.rn, vw = 720, vh = 760
       const gain = IYH_J.rasterGain
-      // INVERT SOURCE: swap the two graphite colors so the MAIN (primary-ink) and
+      // INK: swap the two graphite colors so the MAIN (primary-ink) and
       // SUPPORTING (secondary-mid) lines trade visibility. Normally the secondary
       // graphite is the darker one -> supporting lines read brighter; invert hands
       // the dark (visible) ink to the primary lines instead. Only the two are swapped;
@@ -2412,27 +2434,67 @@ function buildIyhPortraitMarkup(data, template, rendering, id) {
 
 function IyhPortraitCompact({ data, preferences, size = 48, fill = false }) {
   const [selectedTemplate] = useIyhPortraitTemplate(preferences)
+  const [invert, setInvert] = useIyhInvertSource()   // shared: the sidebar toggle + the studio INK checkbox flip together
   // Brick mosaic follows the selected DRAWING TEMPLATE (rasterized per-template
   // coverage); the baked field stands in until the raster resolves / on fallback.
-  const cRef = useIyhBrickCanvas(true, selectedTemplate)
-  return jsx('canvas', {
-    ref: cRef,
-    'aria-label': 'Interaction portrait, J brick-mosaic rendering',
-    title: 'PORTRAIT · accumulated interaction impression',
-    // fill (sidebar): the brick canvas stretches to the module's full height/width;
-    // fixed (strip): the compact 48px instrument square.
-    // contain-fit, never stretch: aspect-ratio locks the face's 720x760 ratio; the
-    // 100% width + auto height is the LARGEST box that fits the container at that
-    // ratio (the draw's Math.min letterbox fills it exactly, no distortion).
+  const cRef = useIyhBrickCanvas(true, selectedTemplate, invert)
+  // A relative wrapper holds the canvas + a tiny "ink" toggle in the corner
+  // (the strip/dock layout itself is untouched — the button overlays the portrait).
+  // fill: the canvas stretches to the module's full height/width (contain-fit via
+  // aspect-ratio); fixed: the compact 48px instrument square.
+  return jsxs('div', {
+    // The wrapper carries the EXACT box the canvas originally had (strip/dock flex
+    // layout unchanged); the canvas + the tiny ink toggle are absolutely positioned
+    // inside it (out of flow, so the contain-fit / aspect-ratio sizing is untouched).
     style: fill
-      ? { width: '100%', height: 'auto', aspectRatio: '720 / 760', display: 'block', minWidth: 0, maxHeight: '100%' }
-      : { width: size, height: size, flex: '0 0 ' + size + 'px', display: 'block' },
+      ? { position: 'relative', width: '100%', height: 'auto', aspectRatio: '720 / 760', display: 'block', minWidth: 0, minHeight: 0, maxHeight: '100%' }
+      : { position: 'relative', width: size, height: size, display: 'block', flex: '0 0 ' + size + 'px' },
+    children: [
+      jsx('canvas', {
+        ref: cRef,
+        'aria-label': 'Interaction portrait, J brick-mosaic rendering',
+        title: 'PORTRAIT · accumulated interaction impression',
+        // Absolutely positioned to fill the wrapper's box (out of flow — the wrapper
+        // owns the layout; the 720x760 backing store is letterboxed by the draw).
+        style: { position: 'absolute', inset: 0, width: '100%', height: '100%', display: 'block' },
+      }),
+      jsx('button', {
+        type: 'button',
+        title: 'Ink',
+        'aria-label': 'Toggle ink',
+        'aria-pressed': invert,
+        onClick: () => setInvert(!invert),
+        style: {
+          position: 'absolute',
+          top: 4,
+          right: 4,
+          width: 14,
+          height: 14,
+          borderRadius: '50%',
+          border: 'none',
+          padding: 0,
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: invert ? 'rgba(8,8,10,0.82)' : 'rgba(8,8,10,0.44)',
+          color: invert ? 'var(--ui-text-secondary)' : 'var(--ui-text-quaternary)',
+          boxShadow: '0 0 0 1px var(--ui-stroke-secondary) inset',
+          transition: 'background 120ms ease, color 120ms ease',
+          zIndex: 1,
+        },
+        children: jsx('span', {
+          style: { fontSize: 9, lineHeight: 1, fontFamily: 'var(--ui-font-mono, monospace)' },
+          children: invert ? '◐' : '○',
+        }),
+      }),
+    ],
   })
 }
 
 function IyhPortraitStudio({ data, preferences }) {
   const [selectedTemplate] = useIyhPortraitTemplate(preferences)
-  const [invert, setInvert] = useState(false)   // INVERT SOURCE: negate the raster polarity (fool around in the opposite)
+  const [invert, setInvert] = useIyhInvertSource()   // SHARED invert-source: the compact sidebar canvas tracks this too
   const hasEvidence = !!(data && data.available) &&
     ['directness', 'context_richness', 'exploration', 'analytical_depth', 'iteration', 'scope']
       .some((dimension) => {
@@ -2448,8 +2510,8 @@ function IyhPortraitStudio({ data, preferences }) {
     className: 'flex flex-col items-center',
     style: { width: '100%', minHeight: 0, gap: 8 },
     children: [
-      jsxs('div', {   // the source chooser + the invert toggle on one row (near the picker, as requested)
-        style: { display: 'flex', alignItems: 'center', gap: 12 },
+      jsxs('div', {   // source chooser + ink toggle on one row (wraps on narrow panels; no overlap)
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap', gap: 10, rowGap: 4 },
         children: [
           jsx(IyhPortraitTemplatePicker, { preferences }),
           jsxs('label', {
@@ -2457,6 +2519,7 @@ function IyhPortraitStudio({ data, preferences }) {
               display: 'flex',
               alignItems: 'center',
               gap: 4,
+              cursor: 'pointer',
               color: 'var(--ui-text-quaternary)',
               fontSize: 9,
               fontFamily: 'var(--ui-font-mono, monospace)',
@@ -2467,9 +2530,9 @@ function IyhPortraitStudio({ data, preferences }) {
                 type: 'checkbox',
                 checked: invert,
                 onChange: (event) => setInvert(!!event.target.checked),
-                'aria-label': 'Invert source SVG polarity',
+                'aria-label': 'Toggle ink (reverse which layer is bright)',
               }),
-              jsx('span', { children: 'INVERT SOURCE' }),
+              jsx('span', { children: 'INK' }),
             ],
           }),
         ],
@@ -4783,15 +4846,18 @@ const SETTING_KEYS = [
 // — the pane only lists them for reference (you run them in chat), it does
 // not execute them itself.
 const MIRROR_COMMANDS = [
-  { cmd: '/mirror', hint: 'status · engine on/off' },
+  { cmd: '/mirror', hint: 'status (events + tokens)' },
   { cmd: '/mirror pulse', hint: 'PULSE tool matrix' },
   { cmd: '/mirror portrait', hint: 'PORTRAIT snapshot' },
+  { cmd: '/mirror portrait draw', hint: 'ASCII face of the current portrait state' },
   { cmd: '/mirror drift', hint: 'DRIFT history' },
   { cmd: '/mirror context', hint: 'context inspector' },
   { cmd: '/mirror adaptation on', hint: 'experimental mode on' },
   { cmd: '/mirror adaptation off', hint: 'experimental mode off' },
+  { cmd: '/mirror adaptation status', hint: 'experimental mode state + last injection' },
   { cmd: '/mirror adaptation rules', hint: 'injection rules' },
-  { cmd: '/mirror reset', hint: 'wipe portrait data (asks to confirm)' },
+  { cmd: '/mirror reset', hint: 'wipe portrait data (asks to confirm; /mirror reset --yes skips the prompt)' },
+  { cmd: '/mirror engine', hint: 'ONNX Tier-1 status · enable · disable' },
 ]
 
 // Shared theme-var strings for the portrait/drift views, defined once so the

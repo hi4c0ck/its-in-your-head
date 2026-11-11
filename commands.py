@@ -1,12 +1,14 @@
 """Slash commands: /mirror and its subcommands (C7 Lane C, S5).
 
 Registration: register_commands(ctx) calls ctx.register_command("mirror", ...)
-once; subcommands (pulse|portrait|drift|context|reset|adaptation ...) are parsed
-from trailing args. Output is compact plain text (the user-facing surface),
-never JSON dumps. S7: adaptation on/off toggle adaptation.enabled
+once; subcommands (pulse|portrait [draw]|drift|context|reset|adaptation|engine ...)
+are parsed from trailing args. Output is compact plain text (the user-facing
+surface), never JSON dumps. S7: adaptation on/off toggle adaptation.enabled
 (persisted via ctx.set_config when available, else ephemeral), status
 reports the toggle + last applied injection, rules lists the
-deterministic rule definitions.
+deterministic rule definitions. Spec §13: reset requires EXPLICIT
+confirmation — /mirror reset asks via ctx.ask_choice when available
+(Wipe/Cancel), else refuses and points at the flag: /mirror reset --yes.
 
 Data comes from dashboard.plugin_api's sync shape helpers (guarded import —
 commands degrade to "no data" text, never raise into the dispatcher).
@@ -32,8 +34,8 @@ except Exception:
         _settings = None
 
 USAGE = (
-    "/mirror — usage: /mirror [pulse|portrait|drift|context|reset|"
-    "adaptation on|off|status|rules]"
+    "/mirror — usage: /mirror [pulse|portrait [draw]|drift|context|reset [--yes]|"
+    "adaptation on|off|status|rules|engine status|enable|disable]"
 )
 
 _ctx = None  # plugin ctx, remembered for handler closures
@@ -144,6 +146,30 @@ def _portrait_text() -> str:
     return "\n".join(lines)
 
 
+def _portrait_draw_text() -> str:
+    """ASCII face of the CURRENT portrait state (perception.portrait_ascii):
+    the deterministic 25x14 character face (axes-derived expression,
+    persisted morphology structure, drawing treatment) + the six-axis
+    evidence strip in pane flank codes. Plain text, never JSON."""
+    if _api is None:
+        return "portrait draw: no backend"
+    try:
+        shape = _api._portrait_shape()
+    except Exception:
+        return "portrait draw: no data yet"
+    try:
+        try:
+            from .perception import portrait_ascii as _pa
+        except Exception:
+            from perception import portrait_ascii as _pa  # type: ignore
+    except Exception:
+        return "portrait draw: renderer unavailable"
+    try:
+        return "portrait draw:\n" + _pa.render_portrait_ascii(shape)
+    except Exception:
+        return "portrait draw: no data yet"
+
+
 def _drift_text() -> str:
     if _api is None:
         return "drift: no history yet"
@@ -174,9 +200,33 @@ def _context_text() -> str:
     return "\n".join(lines)
 
 
-def _reset_text() -> str:
+def _reset_text(force: bool = False) -> str:
+    """Wipe the dataset — only behind explicit confirmation (spec §13).
+
+    Confirmation path, in order: (1) a ``--yes`` argument, (2) the host's
+    interactive ``ctx.ask_choice`` when available. With neither, the command
+    refuses to wipe and says which flag to use — the safe default is never
+    a silent wipe."""
     if _api is None:
         return "reset: no backend"
+    if not force:
+        ask = getattr(_ctx, "ask_choice", None) if _ctx is not None else None
+        if callable(ask):
+            try:
+                choice = ask(
+                    "Wipe IYH analytics data? (events + portrait history + "
+                    "PULSE; config untouched)",
+                    ["wipe", "cancel"],
+                )
+            except Exception:
+                choice = None
+            if choice == "wipe":
+                force = True
+            else:
+                return "reset: cancelled (nothing wiped)"
+        else:
+            return ("reset: confirmation required — re-run as "
+                    "/mirror reset --yes (host has no confirmation prompt)")
     try:
         result = _api._reset_dataset()
     except Exception:
@@ -484,13 +534,17 @@ def mirror_handler(raw_args: str = "", **kwargs) -> str:
     if head == "pulse":
         return _pulse_text()
     if head == "portrait":
+        sub = args[1] if len(args) > 1 else ""
+        if sub == "draw":
+            return _portrait_draw_text()
         return _portrait_text()
     if head == "drift":
         return _drift_text()
     if head == "context":
         return _context_text()
     if head == "reset":
-        return _reset_text()
+        sub = args[1] if len(args) > 1 else ""
+        return _reset_text(force=(sub == "--yes"))
     if head == "adaptation":
         sub = args[1] if len(args) > 1 else "status"
         if sub in ("on", "off", "status", "rules"):
@@ -521,8 +575,8 @@ def register_commands(ctx) -> list:
             "mirror",
             mirror_handler,
             description="It's in Your Head — prompt analytics mirror "
-                        "(pulse/portrait/drift/context/reset/adaptation)",
-            args_hint="[pulse|portrait|drift|context|reset|adaptation ...]",
+                        "(pulse/portrait/drift/context/reset/adaptation/engine)",
+            args_hint="[pulse|portrait [draw]|drift|context|reset [--yes]|adaptation|engine ...]",
         )
     except Exception:
         logger.exception("its-in-your-head: /mirror registration failed")
