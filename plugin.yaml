@@ -1,5 +1,5 @@
 name: its-in-your-head
-version: 0.1.17
+version: 0.1.18
 manifest_version: 2
 description: "It's in Your Head — observes how you work (tools, turns, friction) with local-only telemetry, a six-dimension perception engine, deterministic directional adaptation (opt-in: independent GOOD / user-FRICTION / objective-FRICTION channels, GOAL-independence, one bounded instruction per turn), and a 96px desktop signal strip. Zero-network default (Tier-0 sketch embeddings); optional local ONNX Tier-1 behind the same interface. Raw prompts and reasoning are never stored — transient buffer, derived features only."
 provides_hooks:

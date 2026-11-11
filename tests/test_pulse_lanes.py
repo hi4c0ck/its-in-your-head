@@ -179,7 +179,9 @@ def test_friction_user_objective_parts_independent():
     (fr,) = lanes["friction"]
     assert set(fr) == {"tool_id", "tool_name", "rank", "value", "threshold",
                        "level", "state", "dominant_source", "similarity",
-                       "user", "objective"}
+                       "user", "objective",
+                       "user_accumulation", "objective_hint",
+                       "objective_hint_cap"}
     assert fr["threshold"] == 0.4
     # P2: value = channel-gated accumulation (0.0 — no capsules passed here);
     # the single-prompt strongest similarity is preserved as the sub-field.
@@ -213,8 +215,11 @@ def test_good_friction_value_is_channel_gated_accumulation():
     tool's OWN labeled bank (0-baseline saturation), not one prompt's
     similarity. The strongest similarity is preserved as `similarity`."""
     reg = _FakeRegistry([_row("browser", 7)])
+    # Banks carry 3 samples each -> support ceiling = 3/3 = 1.0, so these
+    # assertions verify the PURE channel-gated accumulation. The balancer's
+    # support-gate (thin bank -> capped) is covered by its own dedicated test.
     protos = _FakeProtos({
-        "browser": {"good": [[1.0, 0.0]], "friction": [[0.0, 1.0]],
+        "browser": {"good": [[1.0, 0.0]] * 3, "friction": [[0.0, 1.0]] * 3,
                     "objective_friction": []},
     })
     import math
@@ -262,6 +267,46 @@ def test_good_friction_value_is_channel_gated_accumulation():
     fr = next(e for e in lanesf["friction"] if e["tool_name"] == "browser")
     assert fr["value"] == _val(4, True)
     assert fr["similarity"] is not None  # objective/user sim sub-field kept
+
+
+def test_balancer_degrades_thin_banks_and_caps_objective_hint():
+    """P2 balancer: a thin evidence bank cannot read 'strong' via recency
+    volume (support-gated ceiling); objective friction alone yields a display
+    value of 0.0 (user-labeled only) plus a capped objective_hint that never
+    reaches the friction threshold (0.4) -- the 'never conflated' invariant."""
+    reg = _FakeRegistry([_row("browser", 7)])
+    import math
+
+    # Thin GOOD bank (1 sample) + 8 matching capsules: pure accumulation would
+    # be 1 - exp(-8/8) = 0.6321 ('strong' >= 0.6). The support gate (1/3)
+    # caps it to 0.2107 -> 'weak'. A full bank (3 samples) stays uncapped.
+    thin = _FakeProtos({"browser": {"good": [[1.0, 0.0]], "friction": [],
+                                    "objective_friction": []}})
+    caps8 = [{"vector": [1.0, 0.0]} for _ in range(8)]
+    g = build_lanes(reg, thin, goal_vector=[1.0, 0.0],
+                    capsules_by_tool={"browser": caps8})["good"][0]
+    pure = round(1.0 - math.exp(-8 / 8.0), 4)          # 0.6321
+    assert g["value"] == round(pure * (1.0 / 3.0), 4)  # 0.2107
+    assert g["level"] == "weak"
+
+    full = _FakeProtos({"browser": {"good": [[1.0, 0.0]] * 3, "friction": [],
+                                    "objective_friction": []}})
+    gf = build_lanes(reg, full, goal_vector=[1.0, 0.0],
+                     capsules_by_tool={"browser": caps8})["good"][0]
+    assert gf["value"] == pure                          # ceiling 3/3 = 1.0
+
+    # Objective-friction ONLY (no user labels): the display value stays 0.0
+    # (user-labeled accumulation), while the capped objective_hint < 0.4.
+    obj_only = _FakeProtos({"browser": {"good": [], "friction": [],
+                                        "objective_friction": [[0.0, 1.0]] * 3}})
+    ocaps = [{"vector": [0.0, 1.0]} for _ in range(8)]
+    f = build_lanes(reg, obj_only, goal_vector=[1.0, 0.0],
+                    capsules_by_tool={"browser": ocaps})["friction"][0]
+    assert f["value"] == 0.0                            # user-labeled only
+    assert f["level"] == "weak"
+    assert f["user_accumulation"] == 0.0
+    assert 0.0 < f["objective_hint"] <= 0.30            # capped hint
+    assert f["objective_hint"] < 0.4                     # never 'strong'
 
 
 def test_goal_and_good_reach_ready_independently():
