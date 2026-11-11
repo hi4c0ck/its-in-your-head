@@ -54,18 +54,6 @@ PULSE_ACCUM_HALF_LIFE = 8
 PULSE_OBJ_HINT_CAP = 0.30
 
 
-def _accum_ceiling(count: int, required: int) -> float:
-    """Support-gated ceiling: a channel's accumulation may not exceed the
-    fraction of its readiness support that the evidence bank actually meets.
-    Thin banks (few samples) are capped below "strong" no matter how much
-    recent recency volume resembles them; a full bank (count >= required)
-    is uncapped. count == 0 -> 0.0 (the quality gate)."""
-    required = max(1, int(required))
-    count = max(0, int(count))
-    if count <= 0:
-        return 0.0
-    return min(1.0, count / required)
-
 
 def neutral_cell(state: str = "neutral", value=None) -> dict:
     return {"value": value, "state": state, "level": "neutral"}
@@ -569,13 +557,15 @@ def build_lanes(registry, prototypes, session_state=None,
         good_count = len(bank["good"])  # raw evidence fact
         good_similarity = _floor(strongest_similarity(goal_vector, good_scored))
         # P2: display value = channel-gated accumulation (recent calls that
-        # resemble this tool's own labeled good bank), support-gated by the
-        # bank's readiness so a thin bank cannot read "strong" via recency
-        # volume. The single-prompt similarity stays the `similarity` field.
+        # resemble this tool's own labeled good bank). VALUE (how valuable the
+        # tool's activity is) and CONFIDENCE (how much evidence supports it --
+        # the bank's support below) are DECOUPLED: a few calls above the floor
+        # reach a valuable score even on a thin bank; the confidence is a
+        # separate field, never multiplied into the value. The single-prompt
+        # similarity stays the `similarity` field.
         good_value = round(
             _lane_accumulation(capsules, good_scored, thr["good"],
-                               PULSE_ACCUM_HALF_LIFE)
-            * _accum_ceiling(len(good_supported), good_req), 4)
+                               PULSE_ACCUM_HALF_LIFE), 4)
         good.append({
             "tool_id": tid, "tool_name": tool, "rank": 0,
             "value": good_value, "threshold": thr["good"],
@@ -612,21 +602,20 @@ def build_lanes(registry, prototypes, session_state=None,
                 has_goal,
                 user_count if dominant == "user" else obj_count,
                 user_fric_req if dominant == "user" else obj_fric_req)
-        # P2 balancer: the friction DISPLAY value is the USER-labeled
-        # friction accumulation only, support-gated by the user bank's
-        # readiness. Objective friction (a thin system-detected signal) is a
-        # SEPARATE capped hint that can never read "strong" and is never
+        # P2 balancer: the friction DISPLAY value is the USER-labeled friction
+        # accumulation only. Objective friction (a thin system-detected signal)
+        # is a SEPARATE capped hint that can never read "strong" and is never
         # summed into the value -- honoring the module invariant ("never
-        # conflated"). Without user labels the value is 0.0 (quality gate).
+        # conflated"). VALUE and CONFIDENCE are DECOUPLED: the bank's support
+        # is a separate field, never multiplied into value, so a few calls
+        # above the floor still reach a valuable score on a thin bank. Without
+        # user labels the value is 0.0.
         user_acc = _lane_accumulation(
             capsules, user_scored, thr["friction"], PULSE_ACCUM_HALF_LIFE)
-        user_hint = round(
-            user_acc * _accum_ceiling(user_count, user_fric_req), 4)
+        user_hint = round(user_acc, 4)
         obj_acc = _lane_accumulation(
             capsules, obj_scored, thr["friction"], PULSE_ACCUM_HALF_LIFE)
-        obj_hint = round(
-            min(obj_acc, PULSE_OBJ_HINT_CAP)
-            * _accum_ceiling(obj_count, obj_fric_req), 4)
+        obj_hint = round(min(obj_acc, PULSE_OBJ_HINT_CAP), 4)
         friction_value = user_hint
         friction.append({
             "tool_id": tid, "tool_name": tool, "rank": 0,
