@@ -74,7 +74,7 @@ function iihyJNoise(nx, ny, seed, feat) {
 }
 function iihyJWave(x) {
   const PI = 3.1416
-  const u = Math.pow(x, 0.67)   // the X-space transformation
+  const u = Math.pow(Math.max(0, x), 0.67)   // the X-space transformation; clamp >= 0: pow(x<0, 0.67) = NaN
   // v42: KILL THE COSINE HARMONIC (the 0.310·cos(πu) that piled a hard specular pool on the
   // ground dither: 0.71 right (x=0) -> 0.09 left (x=1)). Single arch = the wavy semantic (blank start ->
   // big ampl -> solid descent -> clear end): 0.400·sin(πu), peak at center, 0 at both edges.
@@ -128,7 +128,7 @@ function draw(f){
     const vdx=pc-vigCx,vdy=prr-vigCy,vig=1-Math.pow(Math.sqrt(vdx*vdx+vdy*vdy)/vigMax,2)   // the VIGNETTE (v32): brighter at the center, darker at the corners/edges
     const groundAmp=$('groundAmp').value/100   // v39: the GROUND DITHER AMPLITUDE slider (0..2; 1 = the full parallax, 0 = the ground is fully dark)
     let a=isLit?iihyJStep7(cvv/255):iihyJStep7(waveParallax)*groundAmp*(1-lineProx)*vig   // v41: GROUND: wavy semantic * two-field parallax * groundAmp * fold * vignette
-    if(a<=0.004)continue
+    if(!Number.isFinite(a)||a<=0.004)continue   // v44: NaN/±Inf fail-safe (a<=... is false for NaN -> would draw at stale alpha; void instead)
     const inBand=gActive&&isLit&&prr>=gBand&&prr<gBand+gH   // the glitch is on the FACE lines
     let gx=offX+pc*bwS+gapX/2,ga=a
     if(inBand){gx+=gShift+Math.sin(f*0.9+prr*1.3)*bwS*0.3;ga=Math.min(1,Math.max(a,0.85)*(0.6+0.4*iihyJHash(pc*7+f,gIdx,IYH_J.ditherSeed+90)))}

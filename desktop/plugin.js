@@ -2045,7 +2045,7 @@ function iihyJNoise(nx, ny, seed, feat) {
 // offset -> the dither field ripples in this wave shape across the face (the "impress" drift).
 function iihyJWave(x) {
   const PI = 3.1416
-  const u = Math.pow(x, 0.67)   // the X-space transformation (the owner's "formula should be in X-space")
+  const u = Math.pow(Math.max(0, x), 0.67)   // the X-space transformation (the owner's "formula should be in X-space"); clamp >= 0: pow(x<0, 0.67) = NaN
   // v42: KILL THE COSINE HARMONIC. v34 removed the 2π+3π terms ("the other temp wave"), but the
   // leftover fundamental's 0.310·cos(πu) piled a HARD SPECULAR POOL onto the ground dither:
   // profile 0.71 (right, x=0) -> 0.09 (left, x=1) = a 7.9x asymmetric pool. As the parallax drift slides
@@ -2248,7 +2248,11 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       const vig = 1 - Math.pow(Math.sqrt(vdx * vdx + vdy * vdy) / vigMax, 2)
       a = iihyJStep7(waveParallax) * (IYH_J.groundAmp || 1) * (1 - lineProx) * vig
     }
-    if (a <= 0.004) continue
+    // NaN fail-safe (v44): `a <= 0.004` is FALSE for NaN, so a corrupted upstream value would draw
+    // the brick at the PREVIOUS alpha (ctx.globalAlpha=NaN is silently ignored). Non-finite or
+    // sub-threshold values become VOID bricks — no silent strikes, even a +Infinity (which
+    // `!(a>0.004)` alone would not catch).
+    if (!Number.isFinite(a) || a <= 0.004) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
     // v42: the band stays ON THE FACE LINES ONLY (the sample's semantics: "the magenta glitch band
     // stays on the face lines"). Production was missing `isLit`, so every ~8.3s the band piled a
