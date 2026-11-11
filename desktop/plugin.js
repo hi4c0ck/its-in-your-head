@@ -2149,7 +2149,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const drift = 0                                             // v17: face position FIXED (no whole-picture sway); the DRIFT = the dither mask's thin lines sweeping the face
   // v18: the DITHER MASK drift offsets — a value-noise field fit to the image size, drifting
   // NON-diagonally (x + y at different slow rates). No per-brick state (the mask drives the bricks).
-  const dOffX = -((frame / 12) * (IYH_J.ditherDriftX || 0.5))
+  const dOffX = (frame / 12) * (IYH_J.ditherDriftX || 0.5)
   const dOffY = (frame / 12) * (IYH_J.ditherDriftY || 0.35)
   // v19: the GLITCH burst (a TV-tracking glitch). Mostly the stable dither; then a periodic
   // random horizontal band rips sideways + takes a glitch (RGB-split) color + its bricks

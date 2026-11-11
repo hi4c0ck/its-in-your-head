@@ -98,7 +98,7 @@ function draw(f){
   const feat=8,dFloor=+$('floor').value/100
   const waveAmp=+$('waveAmp').value,foldOff=+$('foldOffset').value,lineFoldThr=+$('lineFoldThr').value/100
   const gEvery=+$('gEvery').value,gLen=+$('gLen').value
-  const dOffX=-((f/12)*(IYH_J.ditherDriftX||0.5)),dOffY=(f/12)*(IYH_J.ditherDriftY||0.35)   // L->R sweep (negative dOffX)
+  const dOffX=(f/12)*(IYH_J.ditherDriftX||0.5),dOffY=(f/12)*(IYH_J.ditherDriftY||0.35)   // previous (positive) sweep sign
   const gActive=(f%(gEvery+gLen))<gLen,gIdx=Math.floor(f/(gEvery+gLen))
   let gBand=0,gH=0,gShift=0,gColor=null
   if(gActive){
