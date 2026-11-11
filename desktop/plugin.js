@@ -4400,7 +4400,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
   var hasEntries = order.some(function (l) {
     return lanes && Array.isArray(lanes[l]) && lanes[l].length > 0;
   });
-  function dotsFor(value, evaluated, driftBase) {
+  function dotsFor(value, evaluated, driftBase, hasData) {
     var v = typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
     // v0.1.12 (sharper good eval): steep value->dots curve (PULSE_DOT_SHARPNESS
     // power) — weak collapses toward the 1-dot floor, strong expands toward
@@ -4411,12 +4411,14 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
     var shaped = v === null ? 0 : pulseDotWave(v);
     var filled = v === null ? 0 : Math.round(shaped * 12);
     // C (v0.1.11 presence floor, v0.1.16 zero-gate): an EVALUATED cell with a
-    // GENUINELY positive value (state != 'empty' AND v > 0) never renders a
-    // blank meter — a weak-but-present score reads "present, not empty." A
-    // true ZERO value (friction with no matching evidence, etc.) still reads
-    // as nothing: 0 dots, like 'empty'. So the floor only lifts a positive
-    // value the wave rounds down to 0 -- never an actual zero.
+    // GENUINELY positive value never renders a blank meter.
     if (evaluated && v > 0 && filled < 1) filled = 1;
+    // v0.1.20 (data-presence floor): a cell that HAS evidence (provisional/
+    // ready state, support > 0, or a nonzero objective hint) shows a small
+    // "present, low" floor even at value 0.0 -- the bar reflects the DATA,
+    // not just the value, so a ready/weak cell never reads empty. 'learning'/
+    // 'empty' (no evidence) still reads 0 dots.
+    if (hasData && filled < 2) filled = 2;
     // v0.1.16: when a driftBase is given (the live render passes
     // PULSE_SEQ + row), place the `filled` dots in a deterministic DRIFT
     // order; otherwise (tests / reduced-motion) keep the honest sequential
@@ -4491,6 +4493,14 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
                 : (e.support_count != null ? e.support_count : null);
               if (supCount !== null) parts.push('support ' + supCount);
               if (e.level) parts.push(String(e.level));
+              // v0.1.20 (data-presence floor): this cell HAS evidence when its
+              // state is provisional/ready, its support count is > 0, or it
+              // carries a nonzero objective hint. Drives the "present, low"
+              // floor so a ready/weak cell never reads 0 dots (the bar
+              // reflects the data, not just the value). learning/empty -> no data.
+              var hasData = (e.state === 'provisional' || e.state === 'ready')
+                || (supCount !== null && supCount > 0)
+                || (typeof e.objective_hint === 'number' && e.objective_hint > 0);
               parts.push('evidence: ' + evidenceSrc);
               var tip = parts.join(' · ');
               return jsxs('div', {
@@ -4514,7 +4524,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
                   }),
                   jsxs('span', {
                     style: { display: 'inline-grid', gridTemplateColumns: 'repeat(4, 4px)', gap: 1, flexShrink: 0 },
-                    children: dotsFor(val, evaluated, (coord.getState().seq || 0) + i),
+                    children: dotsFor(val, evaluated, (coord.getState().seq || 0) + i, hasData),
                   }),
                 ],
               });
