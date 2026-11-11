@@ -304,11 +304,53 @@ def test_mirror_unknown_subcommand_usage(tmp_path):
     assert "/mirror" in ctx.commands["mirror"]("bogus")
 
 
-def test_mirror_reset_wipes_events(tmp_path):
+def test_mirror_reset_requires_confirmation(tmp_path):
+    """Spec §13: a bare /mirror reset never wipes without explicit
+    confirmation. FakeCtx has no ask_choice prompt, so the command
+    refuses and points at the --yes flag; the dataset stays intact."""
     import commands
     c = _client(tmp_path, seed=True)
     ctx = FakeCtx()
     commands.register_commands(ctx)
     out = ctx.commands["mirror"]("reset")
+    assert "confirmation required" in out
+    assert c.get("/metrics").json()["events"] == 4  # untouched
+
+
+def test_mirror_reset_yes_flag_wipes(tmp_path):
+    """The --yes flag IS the explicit confirmation: it wipes directly."""
+    import commands
+    c = _client(tmp_path, seed=True)
+    ctx = FakeCtx()
+    commands.register_commands(ctx)
+    out = ctx.commands["mirror"]("reset --yes")
+    assert "wiped 4 events" in out
+    assert c.get("/metrics").json()["events"] == 0
+
+
+class AskCtx(FakeCtx):
+    """FakeCtx + the host's interactive ask_choice (Wipe/Cancel prompt)."""
+
+    def __init__(self, answer="wipe", config=None):
+        super().__init__(config=config)
+        self._answer = answer
+
+    def ask_choice(self, question, choices):
+        return self._answer
+
+
+def test_mirror_reset_ask_choice(tmp_path):
+    """With a host prompt available, Wipe confirms the wipe, Cancel
+    (or an unanswerable prompt) leaves the dataset intact."""
+    import commands
+    c = _client(tmp_path, seed=True)
+    cancelled = AskCtx(answer="cancel")
+    commands.register_commands(cancelled)
+    out = cancelled.commands["mirror"]("reset")
+    assert "cancelled" in out
+    assert c.get("/metrics").json()["events"] == 4
+    wiped = AskCtx(answer="wipe")
+    commands.register_commands(wiped)
+    out = wiped.commands["mirror"]("reset")
     assert "wiped 4 events" in out
     assert c.get("/metrics").json()["events"] == 0

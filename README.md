@@ -1,5 +1,10 @@
 # It's in Your Head
 
+![It's in Your Head — official plugin main view](assets/iyyh-main-view.jpg)
+
+> **Official main-view artwork** (plugin release). Lives in `assets/iyyh-main-view.jpg`;
+> referenced here as the repo banner + the release cover.
+
 Hermes Agent plugin: local work-signal observation + a 96px desktop signal
 strip. Watches HOW you work (tools, turns, friction) — it does not claim to
 know what you think. v0.1.0 functional preview; v0.1.1 hardening release:
