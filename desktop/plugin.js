@@ -2044,11 +2044,12 @@ function iihyJNoise(nx, ny, seed, feat) {
 // offset -> the dither field ripples in this wave shape across the face (the "impress" drift).
 function iihyJWave(x) {
   const PI = 3.1416
-  // The owner's ENHANCED formula (the latest, in the [0..1]x[0..1] space):
-  return 0.5
-    - 0.45 * Math.cos(PI * x)
-    - 0.12 * Math.sin(2 * PI * x)
-    + 0.05 * Math.cos(3 * PI * x)
+  const u = Math.pow(x, 0.67)   // the X-space transformation (the owner's "formula should be in X-space")
+  // The owner's X-space formula (the latest):
+  return 0.400
+    - 0.050 * Math.sin(PI * u) + 0.310 * Math.cos(PI * u)
+    - 0.080 * Math.sin(2 * PI * u) - 0.300 * Math.cos(2 * PI * u)
+    + 0.350 * Math.sin(3 * PI * u) - 0.300 * Math.cos(3 * PI * u)
 }
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1
