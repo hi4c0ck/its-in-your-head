@@ -828,14 +828,21 @@ class Engine:
                 return  # vector space mismatch: no evidence, not an error
             scores = resemblance_all(vec, anchor_vectors)
             conf = confidence_profile(scores, self.portrait.calibration)
-            targets = {d: (conf[d], conf[d]) for d in _dims() if d in conf}
+            # P0: value = the measured trait O_d = (S_d + 1)/2; confidence is
+            # the separate calibrated reliability. (Previously both slots
+            # carried conf[d], so an ambiguous resemblance read ~0.5 and the
+            # interpreted track was pulled toward a false neutral.)
+            targets = {
+                d: ((float(scores[d]["S"]) + 1.0) / 2.0, conf[d])
+                for d in _dims() if d in scores and d in conf
+            }
             if not targets:
                 return
             self.portrait.update_interpreted(targets)
             self._interpreted_evidence_count += 1
             self._interpreted_last_ts = ev.get("ts")
             try:
-                plain = [t[0] for t in targets.values()]
+                plain = [t[1] for t in targets.values()]
                 self._interpreted_last_confidence = (
                     sum(plain) / len(plain))
             except (TypeError, ZeroDivisionError):
