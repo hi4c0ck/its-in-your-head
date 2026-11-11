@@ -2045,11 +2045,11 @@ function iihyJNoise(nx, ny, seed, feat) {
 function iihyJWave(x) {
   const PI = 3.1416
   const u = Math.pow(x, 0.67)   // the X-space transformation (the owner's "formula should be in X-space")
-  // The owner's X-space formula (the latest):
+  // The owner's X-space formula (the latest) - v34: KEEP ONLY THE FUNDAMENTAL (πu). The 2π + 3π
+  // harmonics were the "other temp wave" that started swinging after a while; removed them so the
+  // wave is a single smooth ocean swell (no secondary oscillation).
   return 0.400
     - 0.050 * Math.sin(PI * u) + 0.310 * Math.cos(PI * u)
-    - 0.080 * Math.sin(2 * PI * u) - 0.300 * Math.cos(2 * PI * u)
-    + 0.350 * Math.sin(3 * PI * u) - 0.300 * Math.cos(3 * PI * u)
 }
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1
