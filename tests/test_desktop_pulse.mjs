@@ -297,13 +297,29 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   console.log('ok ' + (++n) + ' - v0.1.11 presence floor (C) carried by the meter; phantom lamp dropped')
   // v0.1.12 PULSE space pass: each lane is a bordered box that fills its 1fr
   // column (fluid on resize), tiny padding, a reserved bubble-spawn strip at
-  // the surface bottom; the I/O readout column suits the same box language.
+  // the surface bottom; the I/O readout is a compact bottom-strip ticker.
   ok3(lanesSrc.includes("border: '1px solid var(--ui-border, var(--border, transparent))'"),
     'each lane is a bordered box (fills its 1fr column)')
   ok3(lanesSrc.includes('PULSE_BOARD_PAD'), 'lane boxes carry tiny internal padding (margins)')
   ok3(src.includes('PULSE_SPAWN_SPACE'), 'a reserved bubble-spawn strip is defined')
   ok3(src.includes('pulseReserve: PULSE_SPAWN_SPACE + PULSE_BOARD_CHROME'),
     'the Strip opts the spawn strip + box chrome into the row capacity')
-  console.log('ok ' + (++n) + ' - v0.1.12 space pass: bordered lane boxes + reserved spawn strip + suited I/O column')
+  ok3(src.includes("'data-testid': 'pulse-io-strip'"),
+    'I/O readout is the compact bottom-strip ticker (not a 220px side column)')
+  // v0.1.12 bubble fix: activity whoop-ups land on the tool's DOMINANT visible
+  // lane (spread across columns), not always 'live'; the momentum DATA commit
+  // stays on the live lane via dataLane (V1 hold preserved).
+  ok3(src.includes('function dominantLaneFor('),
+    'activity bubbles route to the tool\'s most-prominent visible lane')
+  ok3(!src.includes("metric: 'live', tool: ev.tool_name"),
+    'activity no longer hard-codes metric:"live" (the one-column clustering bug)')
+  ok3(src.includes("dataLane: 'live'"), 'the momentum commit stays on the live lane (visual spreads, data holds)')
+  // v0.1.12 sharper good eval: a monotonic power curve steepens value->dots
+  // (weak collapses to the 1-dot floor, strong expands) without touching the
+  // engine threshold.
+  ok3(src.includes('PULSE_DOT_SHARPNESS'), 'a value->dots sharpness curve is defined')
+  ok3(lanesSrc.includes('Math.pow(v, PULSE_DOT_SHARPNESS)'),
+    'dotsFor applies the steep (monotonic) value->dots curve')
+  console.log('ok ' + (++n) + ' - v0.1.12: I/O bottom-strip ticker + dominant-lane bubble routing + sharper good curve')
 }
 console.log('PASS pulse: ' + n + ' assertions')
