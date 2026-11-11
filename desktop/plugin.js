@@ -2221,10 +2221,14 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     // modulation (NO spatial term -> zero moiré/"stripy") that breathes the base shape at two rates:
     // the FAR layer (0..0.34 band, slow 18s) + the NEAR layer (0..0.66 band, fast 6s). The base shape
     // is MULTIPLIED by the parallax modulation -> the wavy semantic is preserved, no stripes.
-    const waveFar = 0.34 * (0.5 + 0.5 * Math.sin(secs / 18 * 6.2832))   // the FAR layer: 0..0.34 band, slow (18s), NO spatial term
-    const waveNear = 0.66 * (0.5 + 0.5 * Math.sin(secs / 6 * 6.2832))   // the NEAR layer: 0..0.66 band, fast (6s), NO spatial term
-    const waveParallax = waveCol * (waveFar + waveNear)   // the BASE wavy semantic * the parallax modulation (no moiré)
-    const dv = iihyJNoise(pc + dOffX, prr + dOffY, IYH_J.ditherSeed, IYH_J.ditherFeat)
+    // v41: REAL PARALLAX - two SEPARATE noise fields at different SCALES (the "scalable, not just fit"):
+    // the FAR layer = coarse/big features (ditherFeat=5) drifting SLOWLY; the NEAR layer = fine/small
+    // features (ditherFeat=1) drifting FASTER. Different scales + different speeds = parallax depth.
+    // No moiré (they're separate fields, not two sines beating). The wavy semantic (waveCol) modulates
+    // both. Each field has its own bounded drift (the "scalable" = the feature size, not just a fit).
+    const dvFar = iihyJNoise(pc + dOffX, prr, IYH_J.ditherSeed, 5)   // the FAR field: coarse, slow drift
+    const dvNear = iihyJNoise(pc + dOffX * 2.5, prr + dOffX, IYH_J.ditherSeed + 40, 1)   // the NEAR field: fine, faster drift (2.5x the far)
+    const waveParallax = waveCol * (0.34 * dvFar + 0.66 * dvNear)   // the WAVY SEMANTIC * the two parallax layers (0.34 far + 0.66 near)
     let a
     if (isLit) {
       // the FACE line: the coverage (vc in [0,1]) QUANTIZED to the nearest 0.07 STEP (the owner's
@@ -2232,13 +2236,13 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       // -> ~1.0; the rest -> the nearest 7% step.
       a = iihyJStep7(vc)
     } else {
-      // the GROUND dither ("ocean wave smooth lean" + v37 PARALLAX): SMOOTH value-noise (dv, no
-      // sparkles) QUANTIZED to the 0.07 STEP, MULTIPLIED by the LEVELED PARALLAX wave (the two
-      // layers: the far 0-0.34 band + the near 0.34-1 band, different periods -> parallax depth),
-      // FOLDED at the lines, then VIGNETTED (brighter at the center, darker at the corners/edges).
+      // the GROUND dither ("ocean wave smooth lean" + v41 REAL PARALLAX): the WAVY SEMANTIC (waveCol)
+      // drives TWO SEPARATE noise fields at different scales (the coarse dvFar + the fine dvNear, each
+      // with its own drift speed -> parallax depth, no moiré). QUANTIZED to the 0.07 STEP, FOLDED at
+      // the lines, then VIGNETTED (brighter at the center, darker at the corners/edges).
       const vdx = pc - vigCx, vdy = prr - vigCy
       const vig = 1 - Math.pow(Math.sqrt(vdx * vdx + vdy * vdy) / vigMax, 2)
-      a = iihyJStep7(dv) * (waveParallax * (IYH_J.groundAmp || 1)) * (1 - lineProx) * vig
+      a = iihyJStep7(waveParallax) * (IYH_J.groundAmp || 1) * (1 - lineProx) * vig
     }
     if (a <= 0.004) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).

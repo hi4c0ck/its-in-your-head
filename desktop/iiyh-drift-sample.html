@@ -122,12 +122,12 @@ function draw(f){
     let cvvL=0
     if(pc+foldOff<pn){const cc=pc+foldOff;for(let yy2=0;yy2<pool;yy2++)for(let xx2=0;xx2<pool;xx2++){const c0=cc*pool+xx2,r0=prr*pool+yy2;if(c0>=cn||r0>=rn)continue;const v2=IYH_FACE_COV_BYTES[r0*cn+c0];if(v2>cvvL)cvvL=v2}}
     const lineProx=Math.min(1,Math.max(cvv,cvvL)/(lineFoldThr*255))   // 0 = deep void, 1 = on/near a line / the fold band
-    const waveCol=waveOn?iihyJWave((pn-1-pc)/Math.max(1,pn-1)):1   // the formula as a per-column MULTIPLIER (0..1); the WAVY SEMANTIC (blank start -> big ampl -> solid descent -> extra ampl -> clear end)
-    const waveFar=0.34*(0.5+0.5*Math.sin(secs/18*6.2832)),waveNear=0.66*(0.5+0.5*Math.sin(secs/6*6.2832)),waveParallax=waveCol*(waveFar+waveNear)   // v40: the WAVY SEMANTIC (base) * the PURE TIME parallax modulation (NO spatial term -> no moiré/stripes)
-    const dvRaw=iihyJNoise(pc+dOffX,prr+dOffY,IYH_J.ditherSeed,feat),dv=ditherInvert?1-dvRaw:dvRaw   // the dither (the formula is no longer a noise offset); INVERTED when the checkbox is ON
+    const waveCol=waveOn?iihyJWave((pn-1-pc)/Math.max(1,pn-1)):1   // the formula as a per-column MULTIPLIER (0..1); the WAVY SEMANTIC
+    const dvFar=iihyJNoise(pc+dOffX,prr,IYH_J.ditherSeed,5),dvNear=iihyJNoise(pc+dOffX*2.5,prr+dOffX,IYH_J.ditherSeed+40,1)   // v41: the REAL PARALLAX - TWO SEPARATE noise fields at different SCALES (the coarse far + the fine near, different drift speeds)
+    const waveParallax=waveCol*(0.34*dvFar+0.66*dvNear)   // v41: the WAVY SEMANTIC * the two parallax layers (0.34 far + 0.66 near)
     const vdx=pc-vigCx,vdy=prr-vigCy,vig=1-Math.pow(Math.sqrt(vdx*vdx+vdy*vdy)/vigMax,2)   // the VIGNETTE (v32): brighter at the center, darker at the corners/edges
     const groundAmp=$('groundAmp').value/100   // v39: the GROUND DITHER AMPLITUDE slider (0..2; 1 = the full parallax, 0 = the ground is fully dark)
-    let a=isLit?iihyJStep7(cvv/255):iihyJStep7(dv)*((waveOn?waveParallax:1)*groundAmp)*(1-lineProx)*vig   // v39: GROUND: SMOOTH value-noise * parallax wave * groundAmp * fold * vignette
+    let a=isLit?iihyJStep7(cvv/255):iihyJStep7(waveParallax)*groundAmp*(1-lineProx)*vig   // v41: GROUND: wavy semantic * two-field parallax * groundAmp * fold * vignette
     if(a<=0.004)continue
     const inBand=gActive&&isLit&&prr>=gBand&&prr<gBand+gH   // the glitch is on the FACE lines
     let gx=offX+pc*bwS+gapX/2,ga=a
