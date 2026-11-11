@@ -842,16 +842,51 @@ function morphologyControls(data = {}) {
   const raw = data.morphology && typeof data.morphology === 'object' ? data.morphology : null;
   const active = !!(raw && raw.available === true && Number(raw.strength) > 0.02);
   const g = (k) => (active ? Math.max(-1, Math.min(1, Number(raw[k]) || 0)) : 0);
+  // The reference-seed structure offsets (per-set face structure) are gated on
+  // the SEED, not the pair strength: the rolling reference is present even when
+  // the learned-pair treatment is neutral, and that alone makes a session's
+  // face differ. No seed -> all zero (the base profile, today's look).
+  const seed = !!(raw && raw.seed === true);
+  const p = (k) => (seed ? Math.max(-1, Math.min(1, Number(raw[k]) || 0)) : 0);
   return Object.freeze({
-    available: active,
+    available: active || seed,
     pair: active && Array.isArray(raw.pair) ? raw.pair.map(String).slice(0, 2) : null,
     strength: active ? in01raw(raw.strength) : 0,
     lineDensity: g('line_density'),
     contourAsymmetry: g('contour_asymmetry'),
     echoStrength: g('echo_strength'),
     gestureBias: g('gesture_bias'),
+    seed,
+    imprintFaceWidth: p('faceWidth'),
+    imprintHeadWidth: p('headWidth'),
+    imprintJaw: p('jaw'),
+    imprintBrow: p('brow'),
+    imprintEyeAspect: p('eyeAspect'),
+    imprintHairMass: p('hairMass'),
+    imprintShoulder: p('shoulder'),
   });
   function in01raw(v) { return Math.max(0, Math.min(1, Number(v) || 0)); }
+}
+
+// Per-set face structure: the reference-seed offsets (morphologyControls.imprint*)
+// folded onto a template base profile -> a bounded, per-set profile. No seed ->
+// the base profile unchanged (fully reversible to today's look). Bounded so the
+// face stays a legible pencil study (never grotesque); abstract, not a likeness.
+function imprintProfile(base, data = {}) {
+  const m = morphologyControls(data);
+  if (!m.seed) return base;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  return Object.freeze({
+    ...base,
+    faceWidth: clamp((base.faceWidth || 0) + m.imprintFaceWidth, 1.0, 6.0),
+    jaw: clamp((base.jaw || 0) + m.imprintJaw * 0.9, 0.02, 1.2),
+    brow: clamp((base.brow || 0) + m.imprintBrow * 0.8, 0.05, 1.1),
+    headWidth: m.imprintHeadWidth,
+    eyeAspect: m.imprintEyeAspect,
+    hairMass: m.imprintHairMass,
+    shoulder: m.imprintShoulder,
+    imprint: true,
+  });
 }
 
 /**
@@ -980,21 +1015,22 @@ function buildSoftFlowPortraitSvg(data = {}, options = {}) {
   // The motion-grammar layer (shared by all three templates) adds the
   // transient live gesture and the slow morphology treatment on top.
   const m = movementFor(buildPortraitModel(data), 'soft-flow-study');
+  const morph = morphologyControls(data); // reference-seed structure (per-set face)
   const openness = d * 0.45 + e * 0.35 + s * 0.20;
   const focus = aDepth * 0.65 + d * 0.20 - e * 0.15;
   const warmth = c * 0.55 + e * 0.45;
   const gaze = d * 4.0 + e * 1.8;
   const gazeOffsetX = -26.0 + e * 1.0 + m.gazeDX * .5;
   const gazeOffsetY = 15.0 + aDepth * .6 - c * .2 + m.gazeDY * .5;
-  const browL = openness * 5.0 - focus * 3.5 + m.brow;
-  const eyeOpen = 0.82 + openness * 0.12 - focus * 0.05 + m.eyeOpen;
+  const browL = openness * 5.0 - focus * 3.5 + m.brow + morph.imprintBrow * 2.0;
+  const eyeOpen = 0.82 + openness * 0.12 - focus * 0.05 + m.eyeOpen + morph.imprintEyeAspect * 0.05;
   const mouthTension = d * 1.35 + focus * 1.0 + m.mouthTension * .5;
   const mouthLift = warmth * 5.5 + m.mouthLift;
   const faceTilt = e * 2.1 + s * 0.6 + m.headTilt * .62;
-  const hairDrift = e * 9.0;
-  const detailOpacity = 0.22 + Math.abs(aDepth) * 0.58 + m.lineDensity;
+  const hairDrift = e * 9.0 + morph.imprintHairMass * 6.0;
+  const detailOpacity = 0.22 + Math.abs(aDepth) * 0.58 + m.lineDensity + morph.imprintHairMass * 0.10;
   const hatchOpacity = 0.20 + Math.abs(c) * 0.56 + m.lineDensity * .8;
-  const shoulderSpread = 1 + s * 0.055 + m.gestureBias * 0.05;
+  const shoulderSpread = 1 + s * 0.055 + m.gestureBias * 0.05 + morph.imprintShoulder * 0.15;
   const shoulderLeftTip = compact ? 166 - (shoulderSpread - 1) * 20 : 150 - (shoulderSpread - 1) * 24;
   const shoulderRightTip = compact ? 566 + (shoulderSpread - 1) * 20 : 581 + (shoulderSpread - 1) * 24;
   const shoulderBottom = compact ? 604 : 681;
@@ -1609,13 +1645,14 @@ function buildNeutralPencilTemplate(model, options = {}, profile = neutralProfil
 }
 
 function renderNeutral(model, options) {
-  return buildNeutralPencilTemplate(model, options, neutralProfile);
+  return buildNeutralPencilTemplate(
+    model, options, imprintProfile(neutralProfile, options.data || {}));
 }
 
 function renderAngular(model, options) {
-  return buildNeutralPencilTemplate(model, options, {
+  return buildNeutralPencilTemplate(model, options, imprintProfile({
     kind: 'angular', faceWidth: 5, jaw: 1, brow: .8, hairSweep: 7,
-  });
+  }, options.data || {}));
 }
 
 function structuredDataForLegacy(model) {
@@ -1684,6 +1721,7 @@ function buildPortraitSvg(data = {}, options = {}) {
   const model = buildPortraitModel(data);
   const renderOptions = {
     ...options,
+    data, // the /portrait payload (with morphology) -> per-set imprint profile
     template: template.id,
     templateLabel: template.label,
     id: esc(options.id || `iyh-${template.id}`),
