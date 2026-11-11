@@ -66,7 +66,8 @@ Verify: `hermes -p <profile> plugins doctor its-in-your-head --ci`.
 ### The strip (what you see at all times)
 
 The 96px instrument docks to the bottom of the desktop app: live
-tool-call matrix, portrait sketch, four trend bars and a ticker. Labels
+tool-call matrix, four trend bars and a ticker (awareness only —
+PORTRAIT/DRIFT inspection lives in the expanded workspace). Labels
 ellipsize by design at the compact width.
 
 ![Compact pulse strip](assets/shot-pulse-strip.png)
