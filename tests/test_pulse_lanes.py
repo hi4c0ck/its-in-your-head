@@ -215,92 +215,112 @@ def test_good_friction_value_is_channel_gated_accumulation():
     tool's OWN labeled bank (0-baseline saturation), not one prompt's
     similarity. The strongest similarity is preserved as `similarity`."""
     reg = _FakeRegistry([_row("browser", 7)])
-    # Banks carry 3 samples each -> support ceiling = 3/3 = 1.0, so these
-    # assertions verify the PURE channel-gated accumulation. The balancer's
+    # Banks carry 3 samples each -> support ratio = 3/3 = 1.0, so these
+    # assertions verify the PURE time-decayed accumulation. The balancer's
     # support-gate (thin bank -> capped) is covered by its own dedicated test.
     protos = _FakeProtos({
         "browser": {"good": [[1.0, 0.0]] * 3, "friction": [[0.0, 1.0]] * 3,
                     "objective_friction": []},
     })
     import math
+    from pulse.matrix import PULSE_VALUE_HALF_LIFE_S
 
-    def _val(n, matching):
-        if matching:
-            return round(1.0 - math.exp(-n / 8.0), 4)
-        return 0.0
+    now = 1_000_000.0
+    hl = float(PULSE_VALUE_HALF_LIFE_S)
+    ln2 = math.log(2.0)
 
-    # 3 recent calls matching the good bank (cos 1.0 >= 0.6) accumulate.
-    good_caps = [{"vector": [1.0, 0.0]} for _ in range(3)]
+    # A matching capsule's recency weight = exp(-ln2 * age / half_life); the
+    # lane value = the MEAN of the matching capsules' weights (capped at 1.0).
+    # No matching calls -> 0.0 (the 0-baseline).
+    def _val(age_s, matching):
+        if not matching:
+            return 0.0
+        return round(min(1.0, math.exp(-ln2 * max(0.0, age_s) / hl)), 4)
+
+    # 3 FRESH calls matching the good bank (cos 1.0 >= 0.6, ts == now): the
+    # value is the mean recency weight = 1.0 (no decay, the "valuable score").
+    good_caps = [{"vector": [1.0, 0.0], "ts": now} for _ in range(3)]
     lanes = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
-                        capsules_by_tool={"browser": good_caps})
+                        capsules_by_tool={"browser": good_caps}, now=now)
     good = next(e for e in lanes["good"] if e["tool_name"] == "browser")
-    assert good["value"] == _val(3, True)            # 0.3127
+    assert good["value"] == _val(0.0, True)          # 1.0 (fresh)
     assert good["similarity"] == 1.0                 # preserved sub-field
-    # Monotonic: 6 matching calls -> strictly higher.
-    lanes6 = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
-                         capsules_by_tool={
-                             "browser": [{"vector": [1.0, 0.0]}
-                                         for _ in range(6)]})
-    assert lanes6["good"][0]["value"] > good["value"]
-    assert lanes6["good"][0]["value"] == _val(6, True)  # 0.5276
+    # Aged (ts = now - 2*half_life): the value decays (weight = 0.25).
+    aged_caps = [{"vector": [1.0, 0.0], "ts": now - 2 * hl} for _ in range(3)]
+    lanes_a = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
+                          capsules_by_tool={"browser": aged_caps}, now=now)
+    good_a = next(e for e in lanes_a["good"] if e["tool_name"] == "browser")
+    assert good_a["value"] == _val(2 * hl, True)     # 0.25 (decayed)
+    assert good_a["value"] < good["value"]            # structural decay
 
     # Quality gate: no labeled good bank -> nothing accumulates (0.0).
     empty = build_lanes(
         reg, _FakeProtos({"browser": {"good": [], "friction": [],
                                       "objective_friction": []}}),
-        goal_vector=[1.0, 0.0], capsules_by_tool={"browser": good_caps})
+        goal_vector=[1.0, 0.0],
+        capsules_by_tool={"browser": good_caps}, now=now)
     assert empty["good"][0]["value"] == 0.0
 
     # Non-similar calls (cos 0.0 < 0.6) accumulate nothing for GOOD.
     dissim = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
                          capsules_by_tool={
-                             "browser": [{"vector": [0.0, 1.0]}
-                                         for _ in range(3)]})
+                             "browser": [{"vector": [0.0, 1.0], "ts": now}
+                                         for _ in range(3)]},
+                         now=now)
     assert dissim["good"][0]["value"] == 0.0
     # ...but DO accumulate for FRICTION (match the friction bank, 0.4 gate).
-    assert dissim["friction"][0]["value"] == _val(3, True)
+    assert dissim["friction"][0]["value"] == _val(0.0, True)  # 1.0 (fresh)
 
-    # Friction accumulation: 4 calls matching the friction bank.
-    fric_caps = [{"vector": [0.0, 1.0]} for _ in range(4)]
+    # Friction accumulation: 4 FRESH calls matching the friction bank.
+    fric_caps = [{"vector": [0.0, 1.0], "ts": now} for _ in range(4)]
     lanesf = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
-                         capsules_by_tool={"browser": fric_caps})
+                         capsules_by_tool={"browser": fric_caps}, now=now)
     fr = next(e for e in lanesf["friction"] if e["tool_name"] == "browser")
-    assert fr["value"] == _val(4, True)
+    assert fr["value"] == _val(0.0, True)            # 1.0 (fresh)
     assert fr["similarity"] is not None  # objective/user sim sub-field kept
 
 
 def test_value_decoupled_from_confidence():
-    """P2: value (how valuable the tool's activity is) and confidence (how much
-    evidence supports it -- the bank's support) are DECOUPLED. A thin bank
-    still yields the full accumulation value (a few calls above the floor
-    reach a valuable score); the confidence is a separate `support` field,
-    never multiplied into the value. Objective friction stays a separate
-    capped hint that can never read 'strong' and is never summed into the
-    value ('never conflated')."""
+    """P2: value (the time-decayed accumulation) and confidence (the bank's
+    support) are DECOUPLED. A thin bank still yields the full accumulation
+    value; the confidence is a separate `support` field, never multiplied
+    into the value. The value decays on its own as capsules age (the DATA's
+    decay clock -- the capsules' ts against the request's now -- NOT a
+    per-tool stateful clock)."""
     reg = _FakeRegistry([_row("browser", 7)])
     import math
+    from pulse.matrix import PULSE_VALUE_HALF_LIFE_S
 
-    # Thin GOOD bank (1 sample -> confidence 1/3) + 8 matching capsules: the
-    # value is the PURE accumulation (1 - exp(-8/8) = 0.6321, 'strong' >= 0.6).
-    # It is NOT capped by the thin confidence -- value != confidence.
+    now = 1_000_000.0
+    hl = float(PULSE_VALUE_HALF_LIFE_S)
+    ln2 = math.log(2.0)
+
+    # Thin GOOD bank (1 sample -> confidence 1/3) + 8 matching FRESH capsules
+    # (ts == now): the value is the mean recency weight = 1.0. It is NOT
+    # capped by the thin confidence -- value != confidence.
     thin = _FakeProtos({"browser": {"good": [[1.0, 0.0]], "friction": [],
                                     "objective_friction": []}})
-    caps8 = [{"vector": [1.0, 0.0]} for _ in range(8)]
+    fresh = [{"vector": [1.0, 0.0], "ts": now} for _ in range(8)]
     g = build_lanes(reg, thin, goal_vector=[1.0, 0.0],
-                    capsules_by_tool={"browser": caps8})["good"][0]
-    pure = round(1.0 - math.exp(-8 / 8.0), 4)          # 0.6321
-    assert g["value"] == pure                          # decoupled: no ceiling
-    assert g["level"] == "strong"                      # the valuable score holds
+                    capsules_by_tool={"browser": fresh}, now=now)["good"][0]
+    assert g["value"] == 1.0                        # fresh -> full score
+    assert g["level"] == "strong"
     assert g["support"]["count"] == 1
     assert abs(g["support"]["ratio"] - 1.0 / 3.0) < 1e-3  # confidence, separate
 
-    # A full bank (3 samples -> confidence 1.0) yields the same pure value.
-    full = _FakeProtos({"browser": {"good": [[1.0, 0.0]] * 3, "friction": [],
-                                    "objective_friction": []}})
-    gf = build_lanes(reg, full, goal_vector=[1.0, 0.0],
-                     capsules_by_tool={"browser": caps8})["good"][0]
-    assert gf["value"] == pure
-    assert gf["support"]["ratio"] == 1.0
+    # Aged capsules (ts = now - half_life): each weight halves -> mean 0.5.
+    aged = [{"vector": [1.0, 0.0], "ts": now - hl} for _ in range(8)]
+    ga = build_lanes(reg, thin, goal_vector=[1.0, 0.0],
+                     capsules_by_tool={"browser": aged}, now=now)["good"][0]
+    assert ga["value"] == round(min(1.0, math.exp(-ln2 * hl / hl)), 4)  # 0.5
+    assert ga["value"] < g["value"]                 # decay: aged < fresh
+
+    # No matching calls -> 0.0 (the 0-baseline), decoupled from confidence.
+    no_match = build_lanes(reg, thin, goal_vector=[1.0, 0.0],
+                           capsules_by_tool={
+                               "browser": [{"vector": [0.0, 1.0], "ts": now}]},
+                           now=now)["good"][0]
+    assert no_match["value"] == 0.0
 
     # Objective-friction ONLY (no user labels): the display value stays 0.0
     # (user-labeled accumulation), while the capped objective_hint < 0.4

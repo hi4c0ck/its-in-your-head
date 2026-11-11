@@ -30,6 +30,7 @@ for older consumers; new consumers must read per-cell state.
 from __future__ import annotations
 
 import math
+import time
 
 from .prototypes import cosine, strongest_similarity
 from .momentum import surge_values, empty_momentum
@@ -38,12 +39,24 @@ from .velocity import PULSE_VELOCITY_WINDOW_S
 # C4 thresholds (pulse.thresholds.*); S1 settings defaults.
 DEFAULT_THRESHOLDS = {"goal": 0.8, "good": 0.6, "friction": 0.4}
 
-# P2 accumulate model: GOOD/FRICTION value is a 0-baseline call-accumulation
-# (count of recent capsules similar to the tool's OWN labeled bank, saturated),
-# not a single prompt's similarity. ``PULSE_ACCUM_HALF_LIFE`` = how many
-# channel-matched recent calls reach ~63% accumulation (n=3 -> 0.31, n=6 ->
-# 0.53, n=12 -> 0.78 at 8). The recent capsule deque is bounded, so the count
-# rolls out as old evidence ages = natural decay with NO clock. Pure + stateless.
+# P2 accumulate model: GOOD/FRICTION value is a 0-baseline call-accumulation,
+# now TIME-DECAYED. Each channel-matched recent capsule contributes a recency
+# weight exp(-ln2 * age / PULSE_VALUE_HALF_LIFE_S) that HALVES every
+# PULSE_VALUE_HALF_LIFE_S seconds; the value is the MEAN of those weights over
+# the matching capsules (0 when there is no bank or no matching call). So the
+# value decays on its own as capsules age: a tool that was active but is no
+# longer called fades toward 0 after a few half-lives. The count-based FIFO
+# deque alone would NOT decay (no new calls -> the matching capsules stay in
+# the deque -> the count is static), so recency (the capsules' own ts) is the
+# structural driver. This is a DATA decay clock (the capsules' ts + the
+# request's now), not a per-tool stateful clock: the pattern layer stays pure
+# + stateless. CONCRETE METRIC: a tool's value halves every
+# PULSE_VALUE_HALF_LIFE_S -- 1h means 0.98 -> 0.49 after an hour, 0.25 after
+# two, ~0 after five.
+PULSE_VALUE_HALF_LIFE_S = 3600
+# Kept for the legacy saturation shape / call sites that still read a count
+# half-life (n=3 -> 0.31, n=6 -> 0.53 at 8). The time-decay above supersedes
+# it for the display value; this stays as the count-scale reference.
 PULSE_ACCUM_HALF_LIFE = 8
 
 # P2 balancer: a thin evidence bank must not reach "strong" via recency volume.
@@ -101,29 +114,45 @@ def _required(prototypes, attr: str, legacy: int) -> int:
         return max(1, int(legacy))
 
 
-def _lane_accumulation(capsules, bank, threshold: float, half_life: int) -> float:
-    """P2 channel-gated call-accumulation (0-baseline), for one semantic lane.
+def _lane_accumulation(capsules, bank, threshold: float, half_life: int,
+                       now: float | None = None) -> float:
+    """P2 channel-gated call-accumulation (0-baseline), TIME-DECAYED.
 
-    Counts how many of the tool's recent capsules resemble its OWN labeled
-    bank (max cosine to ``bank`` >= ``threshold``), then saturates that count:
-    ``1 - exp(-n / half_life)``. 0 when there is no labeled bank (the quality
-    gate — a channel with no examples accumulates nothing) and 0 when no recent
-    call resembles it; rises with a few matching calls and decays as the recent
-    capsule deque rolls out. Pure + deterministic (no clock, no random).
+    Each channel-matched recent capsule contributes a recency weight
+    ``exp(-ln2 * age / PULSE_VALUE_HALF_LIFE_S)`` that halves every half-life;
+    the value is the MEAN of those weights over the matching capsules (0 when
+    there is no labeled bank or no matching call). So the value decays on its
+    own as the capsules age: a tool that was active but is no longer called
+    fades toward 0 after a few half-lives. This is a DATA decay clock (the
+    capsules' ts + the request's ``now``), not a per-tool stateful clock --
+    the pattern layer stays pure + stateless. Falls back to the legacy
+    count-saturated shape when ``now`` is None.
     """
     if not bank:
         return 0.0
-    n = 0
+    matching = []
     for capsule in capsules:
         vector = capsule.get("vector") if isinstance(capsule, dict) else None
         if not vector:
             continue
         sim = strongest_similarity(vector, bank)
         if sim is not None and sim >= threshold:
-            n += 1
-    if n <= 0:
+            matching.append(capsule)
+    if not matching:
         return 0.0
-    return round(1.0 - math.exp(-n / max(1, int(half_life))), 4)
+    if now is None:
+        # Legacy count-saturated shape (no time-decay).
+        n = len(matching)
+        return round(1.0 - math.exp(-n / max(1, int(half_life))), 4)
+    # Time-decay: mean recency weight over the matching capsules.
+    hl = max(1.0, float(PULSE_VALUE_HALF_LIFE_S))
+    ln2 = math.log(2.0)
+    weighted = 0.0
+    for capsule in matching:
+        ts = capsule.get("ts")
+        age = max(0.0, float(now) - float(ts)) if ts is not None else 0.0
+        weighted += math.exp(-ln2 * age / hl)
+    return round(min(1.0, weighted / len(matching)), 4)
 
 
 # -- v8 vector-space compatibility gate (single authoritative path) ---- #
@@ -483,7 +512,8 @@ def build_lanes(registry, prototypes, session_state=None,
                 goal_vector=None, goal_text: str | None = None,
                 backend=None, capsules_by_tool: dict | None = None,
                 thresholds: dict | None = None, vector_space=None,
-                goal_backend=None, event_rates: dict | None = None) -> dict:
+                goal_backend=None, event_rates: dict | None = None,
+                now: float | None = None) -> dict:
     """The four independent lane arrays (v2 contract). Pure projection
     over the same inputs as build_matrix — no tables, no I/O beyond
     what build_matrix already does. Returns ALL eligible tools per
@@ -503,6 +533,11 @@ def build_lanes(registry, prototypes, session_state=None,
         from .activity_encoder import encode_goal_text
         goal_vector = encode_goal_text(goal_text, backend)
     capsules_by_tool = capsules_by_tool or {}
+    # DATA decay clock: the current time (the request's now, or time.time()
+    # if not passed) drives the time-decay of the accumulation value. This is
+    # a per-request DATA clock (the capsules' ts age against it), NOT a
+    # per-tool stateful clock -- the pattern layer stays pure + stateless.
+    now_ts = float(now) if now is not None else time.time()
     legacy_min = int(getattr(prototypes, "min_labeled", 3) or 3)
     goal_req = _required(prototypes, "goal_min_references", legacy_min)
     good_req = _required(prototypes, "good_min_samples", legacy_min)
@@ -565,7 +600,7 @@ def build_lanes(registry, prototypes, session_state=None,
         # similarity stays the `similarity` field.
         good_value = round(
             _lane_accumulation(capsules, good_scored, thr["good"],
-                               PULSE_ACCUM_HALF_LIFE), 4)
+                               PULSE_ACCUM_HALF_LIFE, now_ts), 4)
         good.append({
             "tool_id": tid, "tool_name": tool, "rank": 0,
             "value": good_value, "threshold": thr["good"],
@@ -611,10 +646,10 @@ def build_lanes(registry, prototypes, session_state=None,
         # above the floor still reach a valuable score on a thin bank. Without
         # user labels the value is 0.0.
         user_acc = _lane_accumulation(
-            capsules, user_scored, thr["friction"], PULSE_ACCUM_HALF_LIFE)
+            capsules, user_scored, thr["friction"], PULSE_ACCUM_HALF_LIFE, now_ts)
         user_hint = round(user_acc, 4)
         obj_acc = _lane_accumulation(
-            capsules, obj_scored, thr["friction"], PULSE_ACCUM_HALF_LIFE)
+            capsules, obj_scored, thr["friction"], PULSE_ACCUM_HALF_LIFE, now_ts)
         obj_hint = round(min(obj_acc, PULSE_OBJ_HINT_CAP), 4)
         friction_value = user_hint
         friction.append({
