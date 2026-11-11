@@ -6153,13 +6153,12 @@ function Strip({ source, rest, portraitPreferences }) {
     children: [q.data ? '[+] ' + label + ' live' : '[ . ] ' + label + ' · no data yet'],
   })
 
-  // Compact composition (v0.1.25, owner-locked): PULSE is the compact
-  // surface. The PORTRAIT coexistence of the Stage-4 era is retired —
-  // PORTRAIT and DRIFT are inspection modes and live ONLY in the
-  // expanded workspace (host.openWorkspace). The portrait/drift queries
-  // above stay alive for the workspace; nothing portrait is mounted in
-  // compact anymore. (PortraitView itself stays defined, unmounted.)
-  // Bottom: PULSE (four lanes) takes the full content window.
+  // Compact composition (Stage 4): PORTRAIT and PULSE coexist.
+  // Controls below only move focus (activateFocus) — activating one
+  // never hides the other. DRIFT stays in the expanded workspace only
+  // (its query/cache above is untouched; no DriftView here).
+  // Bottom: PORTRAIT left module, PULSE (four lanes) right module.
+  // Sidebar: PORTRAIT top ~50/50, PULSE bottom, flex + minHeight 0.
   const pulseV2 = adaptPulseToLanes(pulseQ.data)
   const pulseModule = jsxs('div', {
     'data-module': 'pulse',
@@ -6200,21 +6199,36 @@ function Strip({ source, rest, portraitPreferences }) {
       }),
     ],
   })
-  // v0.1.25 (owner-locked): the PORTRAIT compact module was retired —
-  // inspection modes live in the expanded workspace only. PULSE takes
-  // the whole compact content window in both compositions.
+  const portraitModule = jsx('div', {
+    'data-module': 'portrait',
+    'data-focus': tab === 'portrait' ? 'active' : 'inactive',
+    className: 'flex items-stretch',
+    style: {
+      flex: '0 0 auto',
+      minHeight: 0, minWidth: 0, overflow: 'hidden',
+      outline: tab === 'portrait' ? '1px solid var(--ui-accent)' : '1px solid transparent',
+      outlineOffset: -1,
+    },
+    children: jsx(PortraitView, {
+      data: portraitQ.data,
+      drift: driftQ.data,
+      narrow: narrow || composition === 'sidebar',
+      canExpand: wsCan,
+      preferences: portraitPreferences,
+    }),
+  })
   const main = composition === 'sidebar'
     ? jsxs('div', {
         'data-composition': 'sidebar',
         className: 'flex flex-1 flex-col',
         style: { gap: 4, minHeight: 0, overflow: 'hidden' },
-        children: [pulseModule],
+        children: [portraitModule, pulseModule],
       })
     : jsxs('div', {
         'data-composition': 'bottom',
         className: 'flex flex-1 items-stretch',
         style: { gap: 8, minHeight: 0 },
-        children: [pulseModule],
+        children: [portraitModule, pulseModule],
       })
 
   const popover = panel && jsxs('div', {
@@ -6395,18 +6409,15 @@ function Strip({ source, rest, portraitPreferences }) {
     onClick: openWs,
     disabled: !wsCan,
   })
-  // The compact surface is awareness-only: PULSE (owner-locked v0.1.25).
-  // PORTRAIT and DRIFT are inspection modes — they live in the expanded
-  // workspace (host.openWorkspace), never in the compact strip/sidebar.
-  // The single PULSE tab is always active (the surface IS PULSE); its
-  // click pulls the shared tab state back to awareness after a
-  // workspace visit.
-  const compactTabs = TABS.filter((t) => t.id === 'pulse')
+  // Compact controls are activation/focus (never exclusive): PULSE and
+  // PORTRAIT stay mounted; clicking one only moves the focus outline.
+  // DRIFT is not a compact control — it lives in the expanded workspace.
+  const compactTabs = TABS.filter((t) => t.id !== 'drift')
   const tabsRow = jsxs('div', {
     className: 'flex items-center',
     style: { gap: 2, flexShrink: 0 },
     children: compactTabs.map((t) => jsx(TabButton, {
-      key: t.id, tab: t, active: true,
+      key: t.id, tab: t, active: tab === t.id,
       onClick: () => activateFocus(t.id),
       words: !tiny,
     })),

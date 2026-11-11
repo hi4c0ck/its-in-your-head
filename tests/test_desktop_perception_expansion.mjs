@@ -118,11 +118,7 @@ assert.ok(strip.length > 0, 'Strip region found')
 // renders the portrait with fill: true (full module height, dominant) + the
 // flank ticks + readout compacted to a thin centered side column (the fixed
 // 48px strip square is retired). Intentional strip edit.
-// Re-baselined at v0.1.25 (owner-locked): the compact strip went
-// PULSE-only — the PORTRAIT module (content-sized '0 0 auto') was
-// retired from compact; PORTRAIT/DRIFT inspection lives in the expanded
-// workspace. Intentional strip edit.
-const STRIP_SHA = '97a0114ba81b6347d43c2738a94068415175156836ad7fb8eb95fdf65802d0f4'
+const STRIP_SHA = '89c6a6a740d40969d5adb74aeebf11ab19127042ace6b7e6a00e02009bfbf80c'
 assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA,
   '96px strip source byte-identical to the full-height-portrait baseline')
 ok(true, 'strip byte-identity snapshot pinned')
