@@ -66,28 +66,18 @@ Verify: `hermes -p <profile> plugins doctor its-in-your-head --ci`.
 ### The strip (what you see at all times)
 
 The 96px instrument docks to the bottom of the desktop app: live
-tool-call matrix, four trend bars and a ticker (awareness only —
-PORTRAIT/DRIFT inspection lives in the expanded workspace). Labels
+tool-call matrix, portrait sketch, four trend bars and a ticker. Labels
 ellipsize by design at the compact width.
 
 ![Compact pulse strip](assets/shot-pulse-strip.png)
 
 ### The workspace (expand for inspection)
 
-The strip's expand icon (top-right, next to `?`) opens the workspace —
-the same data in three wider views:
-
-**PULSE** — per-tool table: live-calls volume + goal / good / friction state.
+The strip's expand icon (top-right, next to `?`) opens the wider PULSE
+inspection view: per-tool table with live-calls volume + goal / good /
+friction state.
 
 ![Workspace PULSE view](assets/shot-workspace-pulse.png)
-
-**PORTRAIT** — the six perception dimensions with sparklines + delta.
-
-![Workspace PORTRAIT view](assets/shot-workspace-portrait.png)
-
-**DRIFT** — the same six dimensions as recent time series.
-
-![Workspace DRIFT view](assets/shot-workspace-drift.png)
 
 ### `/mirror` — the chat quick reference
 
