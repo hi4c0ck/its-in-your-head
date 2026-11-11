@@ -1914,7 +1914,7 @@ const IYH_J = {
   shiftHoldMs: 1300,   // normal phase (main lines in focus) before the focus shift
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
-  ditherFeat: 1,       // v29: the dither mask feature size, in BRICKS (~1 => very grained, the "small sparkles" the owner wants; NOT the smooth ~8-cell v18 version)
+  ditherFeat: 5,       // v33: "ocean wave smooth lean" - SMOOTH rolling waves (was 1, the grainy sparkles; now ~5 => big smooth features, the ocean-wave look)
   ditherDriftX: 3,    // v32: the dither mask drift, X (bricks/sec) - SLOWED (was 12, too fast) + the drift is now mostly horizontal
   ditherDriftY: 1,    // v32: the dither mask drift, Y (bricks/sec) - tiny (was 8, made it too diagonal); now the drift is a slow near-horizontal sweep
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
@@ -2220,12 +2220,12 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       // -> ~1.0; the rest -> the nearest 7% step.
       a = iihyJStep7(vc)
     } else {
-      // the GROUND dither (neonwave "small sparkles"): dv^4 sparkles, QUANTIZED to the 0.07 STEP,
-      // MULTIPLIED by the per-column WAVE formula (col), then FOLDED at the lines (damped where
-      // lineProx is high), then VIGNETTED (brighter at the center, darker at the corners/edges).
+      // the GROUND dither ("ocean wave smooth lean"): SMOOTH value-noise (dv, no sparkles) QUANTIZED
+      // to the 0.07 STEP, MULTIPLIED by the per-column WAVE formula (the ocean-wave undulation),
+      // FOLDED at the lines, then VIGNETTED (brighter at the center, darker at the corners/edges).
       const vdx = pc - vigCx, vdy = prr - vigCy
       const vig = 1 - Math.pow(Math.sqrt(vdx * vdx + vdy * vdy) / vigMax, 2)
-      a = iihyJStep7(Math.pow(dv, 4)) * waveCol * (1 - lineProx) * vig
+      a = iihyJStep7(dv) * waveCol * (1 - lineProx) * vig
     }
     if (a <= 0.004) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
