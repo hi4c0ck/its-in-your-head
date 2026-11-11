@@ -41,6 +41,11 @@ jobs:
       - name: Desktop pane syntax (ESM gate)
         # stdin + explicit module type: `node --check file.js` is
         # CJS-detected and can false-green broken ESM.
+        # shell: bash — the input redirection below is not valid
+        # PowerShell; the windows-latest default shell fails it with a
+        # ParserError in the generated .ps1. Git Bash ships on both
+        # ubuntu-latest and windows-latest, so bash is the common shell.
+        shell: bash
         run: node --input-type=module --check < desktop/plugin.js
 
       - name: Desktop contract tests
