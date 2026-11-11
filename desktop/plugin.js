@@ -1917,6 +1917,7 @@ const IYH_J = {
   ditherFeat: 5,       // v33: "ocean wave smooth lean" - SMOOTH rolling waves (was 1, the grainy sparkles; now ~5 => big smooth features, the ocean-wave look)
   ditherDriftX: 1,    // v35: the dither drift X AMPLITUDE (a fraction of the half-grid; the drift is now a BOUNDED sine oscillation, not a linear sweep) - 1 = the full sway
   ditherDriftY: 0,    // v36: the dither drift Y AMPLITUDE - ZEROED (the Y sway was the "awkward one from the top"); now the drift is a pure X oscillation
+  groundAmp: 1,       // v39: the GROUND DITHER AMPLITUDE (a 0..1+ multiplier on the ground wave; 1 = the full parallax, 0 = the ground is fully dark) - the "slider to influence the amplify of ground"
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
   waveAmp: 6,            // v20: the WAVE offset amplitude (noise-units) - how hard the mask ripples in the wave shape
   foldOffset: 3,         // v28: the SECONDARY fold mask = the SVG lines shifted RIGHT this many pooled bricks (the "stretch" from the original position to the goal; 1 was too tiny) -> prevents mess near the lines
@@ -2215,11 +2216,12 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     // the per-column WAVE multiplier (the owner's formula applied to MULTIPLY the col into the fold,
     // NOT as a noise offset). 0..1, mirrored L->R.
     const waveCol = iihyJWave((pn - 1 - pc) / Math.max(1, pn - 1))
-    // v37: the LEVELED PARALLAX - split the wave into two layers with different amplitude bands +
-    // different periods (the far layer = slow + small amplitude in the 0-0.34 band; the near layer =
-    // faster + bigger amplitude in the 0.34-1 band). The two layers move at different speeds -> parallax.
-    const waveFar = 0.34 * (0.5 + 0.5 * Math.sin(pc * 6.2832 / 12 + secs / 18 * 6.2832))   // the FAR layer: 0..0.34 band, slow period (18s), small amplitude
-    const waveNear = 0.66 * (0.5 + 0.5 * Math.sin(pc * 6.2832 / 5 + secs / 6 * 6.2832))   // the NEAR layer: 0..0.66 band, fast period (6s), big amplitude
+    // v38: the LEVELED PARALLAX - two layers with the SAME spatial frequency (no moiré/"stripy"),
+    // but DIFFERENT temporal periods + amplitude bands. The far layer = 0..0.34 band, slow (18s);
+    // the near layer = 0..0.66 band, fast (6s). Same spatial freq -> they DON'T interfere/mixup.
+    const waveSp = pc * 6.2832 / 12   // the SHARED spatial frequency (same for both layers -> no moiré)
+    const waveFar = 0.34 * (0.5 + 0.5 * Math.sin(waveSp + secs / 18 * 6.2832))   // the FAR layer: 0..0.34 band, slow period (18s)
+    const waveNear = 0.66 * (0.5 + 0.5 * Math.sin(waveSp + secs / 6 * 6.2832))   // the NEAR layer: 0..0.66 band, fast period (6s)
     const waveParallax = waveFar + waveNear   // the two layers add up to the full 0..1 range (the parallax)
     const dv = iihyJNoise(pc + dOffX, prr + dOffY, IYH_J.ditherSeed, IYH_J.ditherFeat)
     let a
@@ -2235,7 +2237,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       // FOLDED at the lines, then VIGNETTED (brighter at the center, darker at the corners/edges).
       const vdx = pc - vigCx, vdy = prr - vigCy
       const vig = 1 - Math.pow(Math.sqrt(vdx * vdx + vdy * vdy) / vigMax, 2)
-      a = iihyJStep7(dv) * waveParallax * (1 - lineProx) * vig
+      a = iihyJStep7(dv) * (waveParallax * (IYH_J.groundAmp || 1)) * (1 - lineProx) * vig
     }
     if (a <= 0.004) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
