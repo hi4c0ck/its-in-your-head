@@ -79,12 +79,14 @@ Pure, deterministic, no clock.
    `status=="ok"` + a labeled-good example to count (quality gate).
 
 ## P1 (structural, empirical-calibration-dependent)
-Replace winner-share `agreement` (engine.py:532: top_wins/total_turns) with
-pattern-specific reliability (top wins / candidate appearances) + an absolute-
-affinity gate ("large margin + low affinity = least-wrong, not confident").
-NOTE: the L11 constants (patterns.py:110-117) were fit to the OLD agreement, so
-pinning new constants needs the attachment's held-out calibration set — do the
-structural separation now, keep constants, flag the re-fit.
+- DONE (structural, safe): `score_turn` prompt-only mode now ranks by prompt
+  affinity, not bank order (patterns.py:613). No calibrated constants touched.
+- FLAGGED (needs the attachment's held-out calibration set, do NOT pin new
+  constants without it = no cheats): replace winner-share `agreement`
+  (engine.py:532: top_wins/total_turns) with pattern-specific reliability +
+  the absolute-affinity ambiguity gate. The L11 constants
+  (patterns.py:110-117) were fit to the OLD agreement, so re-fitting is
+  required before pinning.
 
 ## Order: P0 (done) -> P2 accumulate (the named deliverable) -> P1 structural
 ## -> P2 desktop level/state audit + threshold recalibration.

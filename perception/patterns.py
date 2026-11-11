@@ -610,8 +610,14 @@ def score_turn(prompt_vector, reaction_vector, bank: dict) -> dict:
             "confidence": None,
         })
 
-    patterns.sort(key=lambda p: (p["agent_affinity"] is None,
-                                 -(p["agent_affinity"] or 0.0)))
+    # P1 mode fix: rank by agent affinity when it exists, else fall back to
+    # prompt affinity. In prompt-only mode every agent affinity is None, so
+    # the old key (None-last, -(agent or 0)) collapsed all entries to the
+    # same score and retained bank order — misleading. Falling back to
+    # prompt_affinity ranks the prompt-only list by actual prompt similarity.
+    patterns.sort(key=lambda p: (-((p["agent_affinity"] if p["agent_affinity"]
+                                    is not None else p["prompt_affinity"])
+                                   or 0.0),))
 
     dim_signals = {
         p["name"]: {"prompt": p["prompt_affinity"], "agent": p["agent_affinity"]}

@@ -162,6 +162,20 @@ def test_reaction_none_scores_prompt_side_only():
                for s in out["dim_signals"].values())
 
 
+def test_prompt_only_mode_ranks_by_prompt_affinity_not_bank_order():
+    """P1 mode fix: with no reaction vector, all agent affinities are None;
+    the prompt-only list must rank by prompt affinity, not retain bank
+    order (dict insertion)."""
+    bank = {
+        "low": {"prompt_anchor": [0.0, 1.0], "agent_anchor": [0.0, 1.0]},
+        "high": {"prompt_anchor": [1.0, 0.0], "agent_anchor": [1.0, 0.0]},
+    }  # 'low' first in dict, but 'high' has the higher prompt affinity.
+    out = patterns.score_turn([1.0, 0.0], None, bank)
+    assert [p["name"] for p in out["patterns"]] == ["high", "low"]
+    assert out["patterns"][0]["prompt_affinity"] == 1.0
+    assert out["patterns"][1]["prompt_affinity"] == 0.0
+
+
 # -- portrait third view ------------------------------------------------------ #
 
 def _turn(top="alpha"):
