@@ -87,6 +87,7 @@ function iiyhJContrast(c) {
   const cr = Math.acos(1 - t) / (Math.PI / 2)       // 0..1; main lines (c>=accentConf) stay 1.0
   return Math.pow(cr, IYH_J.steep)                  // steepen: shadows/mids collapse, main lines pop
 }
+const iihyJStep7=x=>x<=0?0:Math.min(1,Math.round(x/0.07)*0.07)   // the 0.07 STEP: quantize to the nearest 7% level
 
 const $=id=>document.getElementById(id), cv=$('c'), g=cv.getContext('2d')
 const ACC=(()=>{try{const cs=getComputedStyle(cv);const v=(cs.getPropertyValue('--ui-accent')||cs.getPropertyValue('--accent')||'#35C8FF').trim();return v.length>2?v:'#35C8FF'}catch(e){return '#35C8FF'}})()
@@ -121,7 +122,7 @@ function draw(f){
     const lineProx=Math.min(1,Math.max(cvv,cvvL)/(lineFoldThr*255))   // 0 = deep void, 1 = on/near a line / the fold band
     const waveOff=waveOn?(iihyJWave((pn-1-pc)/Math.max(1,pn-1))-0.5)*waveAmp*(1-lineProx):0   // the wave offset, FOLDED at the lines, MIRRORED L->R; 0 when the checkbox is OFF
     const dv=iihyJNoise(pc+dOffX,prr+dOffY+waveOff,IYH_J.ditherSeed,feat)
-    let a=isLit?Math.max(contrast,0.05):dv*0.05*(1-lineProx)   // FACE: full color, 0.05 floor; GROUND: dither SCALED 0..5% brick-by-brick (dv*0.05), folded at the lines
+    let a=isLit?iihyJStep7(cvv/255):iihyJStep7(dv)*(1-lineProx)   // FACE: coverage QUANTIZED to the 0.07 step; GROUND: dither QUANTIZED to the 0.07 step, folded at the lines
     if(a<=0.004)continue
     const inBand=gActive&&isLit&&prr>=gBand&&prr<gBand+gH   // the glitch is on the FACE lines
     let gx=offX+pc*bwS+gapX/2,ga=a

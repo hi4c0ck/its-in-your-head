@@ -2058,6 +2058,13 @@ function iiyhJContrast(c) {
   const cr = Math.acos(1 - t) / (Math.PI / 2)       // 0..1; main lines (c>=accentConf) stay 1.0
   return Math.pow(cr, IYH_J.steep)                  // steepen: shadows/mids collapse, main lines pop
 }
+// v27: the 0.07 STEP — the owner's "clamp to the nearest 7% step" (NOT a median/average fill).
+// x in [0,1] (the brick's coverage or dither value) -> the nearest 0.07 step (0, 0.07, 0.14, ..., 1.0).
+// The brick's opacity is QUANTIZED to this step, not a smooth gradient.
+function iihyJStep7(x) {
+  if (x <= 0) return 0
+  return Math.min(1, Math.round(x / 0.07) * 0.07)
+}
 // Resolve the pane's theme accent CSS variable once; fall back to IYH_J.accent
 // when unresolvable (e.g. a non-DOM context). The bricks are painted in the accent.
 let IYH_ACCENT_RESOLVED = ''
@@ -2203,15 +2210,15 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     const dv = iihyJNoise(pc + dOffX, prr + dOffY + waveOff, IYH_J.ditherSeed, IYH_J.ditherFeat)
     let a
     if (isLit) {
-      // the FACE line: pull FULL color (the accent, full brightness, the v13 focus flicker). The
-      // wave folds here -> no dither shimmer on the lines. Floored at a 0.05 color level.
-      a = Math.max(contrast * (focusShift ? 1.05 : 1), 0.05)
+      // the FACE line: the coverage (vc in [0,1]) QUANTIZED to the nearest 0.07 STEP (the owner's
+      // "clamp to the nearest %0.07 step", NOT a median/average fill). Main lines (vc>=accentConf)
+      // -> ~1.0; the rest -> the nearest 7% step.
+      a = iihyJStep7(vc)
     } else {
-      // the GROUND dither: the brick's final color level (the dither, dv in [0,1]) SCALED into the
-      // 0.05 CEILING (dv*0.05 -> the dither varies 0..5% brick-by-brick, NOT a flat 5% wash), FOLDED
-      // at the lines (damped where lineProx is high). The background ripples faintly in the wave
-      // shape, the face lines pull full color.
-      a = dv * 0.05 * (1 - lineProx)
+      // the GROUND dither: the dither value (dv in [0,1]) QUANTIZED to the nearest 0.07 STEP,
+      // FOLDED at the lines (damped where lineProx is high). The background ripples faintly in
+      // the wave shape, the face lines pull full color.
+      a = iihyJStep7(dv) * (1 - lineProx)
     }
     if (a <= 0.004) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
