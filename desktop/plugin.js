@@ -2236,8 +2236,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false, in
     for (let yy = 0; yy < pool; yy++) for (let xx = 0; xx < pool; xx++) {
       const c0 = pc * pool + xx, r0 = prr * pool + yy
       if (c0 >= cn || r0 >= rn) continue
-      const idx = r0 * cn + c0, raw = cov[idx]
-      const v = invert ? 255 - raw : raw    // INVERT SOURCE: negate the raster polarity (white<->ink)
+      const idx = r0 * cn + c0, v = cov[idx]
       if (v > cvv) cvv = v
       found = true
     }
@@ -2253,8 +2252,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false, in
       for (let yy2 = 0; yy2 < pool; yy2++) for (let xx2 = 0; xx2 < pool; xx2++) {
         const c0 = cc * pool + xx2, r0 = prr * pool + yy2
         if (c0 >= cn || r0 >= rn) continue
-        const raw2 = cov[r0 * cn + c0], v2 = invert ? 255 - raw2 : raw2
-        if (v2 > cvvL) cvvL = v2
+        const v2 = cov[r0 * cn + c0]; if (v2 > cvvL) cvvL = v2
       }
     }
     // proximity to the lines (0 = deep void, 1 = on/near a line or the shifted-left fold band)
@@ -2280,7 +2278,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false, in
       // the FACE line: the coverage (vc in [0,1]) QUANTIZED to the nearest 0.07 STEP (the owner's
       // "clamp to the nearest %0.07 step", NOT a median/average fill). Main lines (vc>=accentConf)
       // -> ~1.0; the rest -> the nearest 7% step.
-      a = iihyJStep7(vc)
+      a = iihyJStep7(invert ? 1 - vc : vc)   // INVERT SOURCE SVG: flip ONLY the source-SVG (DRAWING) face-line brightness hierarchy; the ground dither + lit/void classification stay on the original coverage
     } else {
       // the GROUND dither ("ocean wave smooth lean" + v41 REAL PARALLAX): the WAVY SEMANTIC (waveCol)
       // drives TWO SEPARATE noise fields at different scales (the coarse dvFar + the fine dvNear, each
