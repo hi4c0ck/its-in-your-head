@@ -24,3 +24,4 @@ plugin-data/
 
 # Local measurement/scratch (channel-travel harness, one-off probes)
 scratch/
+.hermes/_tmp/
