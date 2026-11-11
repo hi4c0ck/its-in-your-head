@@ -25,3 +25,6 @@ plugin-data/
 # Local measurement/scratch (channel-travel harness, one-off probes)
 scratch/
 .hermes/_tmp/
+
+# Local agent scratch state — never ships (catalog pinned tree stays lean)
+.agnes/
