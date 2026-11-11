@@ -2526,8 +2526,8 @@ const PORTRAIT_POLL_MS = 850
 // polls at the mandatory POLL_MS (5000) safety-net cadence. The primary
 // path is still the ~850ms tick push (PULSE_REDUCER_MS); the poll only
 // covers a missed push.
-const IO_WIDTH = 220   // fixed I/O-frame column
-const NARROW_W = 480   // below this frame width the strip is docked narrow (sidebar): I/O column hidden, header collapses to essentials
+const IO_WIDTH = 220   // RETIRED v0.1.12: the I/O readout moved from a fixed side column to a compact bottom-strip ticker (pulse-io-strip); the 4 lane boxes own the full width
+const NARROW_W = 480   // below this frame width the strip is docked narrow (sidebar): the I/O bottom-strip ticker stays compact, header collapses to essentials
 const TINY_W = 320     // below this the sidebar is too thin for worded tabs in the two-row header: tabs collapse to icons-only mode
 const PET_HOLD_MS = 7000  // affection faces hold this long after the LAST pat, then the operational face returns
 const PET_PATS_FOR_TO_PET = 4  // pats during wonder needed to reach the to-pet face
@@ -3486,6 +3486,27 @@ function pulseCommitLane(state, metric) {
 // Renderer-side data key: PulseLanes effects re-run only when the
 // VISIBLE lane content actually changes (identity of the polled object
 // must not re-ingest on every render).
+function dominantLaneFor(toolName, rawLanes, capNow) {
+  // v0.1.12 (bubble fix): the lane where a tool is MOST prominent — the
+  // smallest visible row index across all lanes, tie-break by PULSE_LANE_ORDER
+  // (live first). The activity whoop-up sprite lands HERE (the tool's actual
+  // dot-matrix) instead of always the live lane, so the bubbles spread across
+  // the columns where the tools are, rather than all clustering in the live
+  // column. Returns { metric, idx } or { metric: null, idx: -1 }.
+  var cap = Math.max(1, Math.floor(Number(capNow) || 1));
+  var best = null;
+  PULSE_LANE_ORDER.forEach(function (metric) {
+    var lane = (rawLanes && rawLanes[metric]) || [];
+    for (var i = 0; i < lane.length; i++) {
+      if (i >= cap) break;
+      if (lane[i] && lane[i].tool_name === toolName) {
+        if (best === null || i < best.idx) best = { metric: metric, idx: i };
+        break; // at most one row per tool per lane
+      }
+    }
+  });
+  return best ? { metric: best.metric, idx: best.idx } : { metric: null, idx: -1 };
+}
 function pulseLanesKey(lanes, capacity) {
   var cap = Math.max(1, Math.floor(Number(capacity) || 1));
   var parts = [];
@@ -3535,6 +3556,11 @@ var PULSE_BOARD_PAD = 3;    // internal box padding (tiny margins)
 var PULSE_BOARD_CHROME = PULSE_BOARD_BORDER + PULSE_BOARD_PAD; // 4px inner inset
 var PULSE_BOARD_GAP = 6;    // margin BETWEEN boxes (normal); 3 when narrow
 var PULSE_SPAWN_SPACE = 12; // reserved bottom strip the sprite flies up through
+// v0.1.12 (sharper good eval): value->dots steepness. A power curve makes
+// weak values collapse toward the 1-dot presence floor and strong values
+// expand toward the full meter, so weak vs strong read with more contrast
+// (less 'mushy/sticky'). Monotonic + engine-threshold-untouched. 1 = linear.
+var PULSE_DOT_SHARPNESS = 1.6;
 // Destination lane's dot-column x, surface-relative (the first-dot
 // column of the row's right-pinned 19px dot grid).
 function pulseDotColumnX(box, laneIdx, narrow) {
@@ -3693,7 +3719,11 @@ function createPulseBubbleCoordinator(opts) {
       var t = state.active[idx];
       state.active.splice(idx, 1);
       if (state.latest) {
-        pulseCommitLane(state, t.metric);
+        // v0.1.12: the whoop-up bubble may land on the tool's dominant
+        // visible lane (t.metric), but the momentum DATA that changed is
+        // the live lane (t.dataLane) — commit the data lane, not the
+        // visual target, so the semantic lanes keep their V1 hold.
+        pulseCommitLane(state, t.dataLane || t.metric);
       }
       state.flashes[t.slotId] = true;
       state.flashOwner[t.slotId] = t.sequence;
@@ -3748,19 +3778,17 @@ function createPulseBubbleCoordinator(opts) {
       var capNow = Math.max(1, capacity || cap);
       var accepted = 0;
       var fresh = [];
-      var liveLane = (rawLanes && rawLanes.live) || [];
-      function liveIndexFor(toolName) {
-        for (var i = 0; i < liveLane.length; i++) {
-          if (liveLane[i] && liveLane[i].tool_name === toolName) return i;
-        }
-        return -1;
+      // v0.1.12 (bubble fix): the whoop-up sprite lands on the tool's MOST
+      // prominent visible lane (dominantLaneFor), not always 'live'.
+      function routeFor(toolName) {
+        return dominantLaneFor(toolName, rawLanes, capNow);
       }
       (events || []).forEach(function (ev) {
         if (!ev || typeof ev.id !== 'number') return;
         if (ev.id <= state.lastActivityEventId) return; // delivered already
         state.lastActivityEventId = Math.max(state.lastActivityEventId, ev.id);
         accepted += 1;
-        var idx = liveIndexFor(ev.tool_name);
+        var tgt = routeFor(ev.tool_name);
         if (reduced) {
           // Reduced motion: no travel at all; the live lane content
           // still commits immediately (V2) below.
@@ -3769,13 +3797,16 @@ function createPulseBubbleCoordinator(opts) {
           state.consumedByTool[ev.tool_name] = ev.id;
           return;
         }
-        if (idx >= 0 && idx < capNow) {
+        if (tgt.idx >= 0 && tgt.idx < capNow) {
           var t = {
             kind: 'activity', semanticId: 'evt|' + ev.id, eventId: ev.id,
-            metric: 'live', tool: ev.tool_name,
+            metric: tgt.metric, tool: ev.tool_name,
             tool_call_id: ev.tool_call_id != null ? ev.tool_call_id : null,
             ts: ev.ts, reason: 'tool-call',
-            slotId: 'live|' + idx, destinationSlot: idx,
+            slotId: tgt.metric + '|' + tgt.idx, destinationSlot: tgt.idx,
+            // momentum data lives in the LIVE lane (the commit stays there);
+            // the sprite + arrival flash land on the tool's dominant lane.
+            dataLane: 'live',
             heldUntilVisible: false, sequence: state.seq += 1,
           };
           if (state.active.length < capNow) {
@@ -3791,13 +3822,12 @@ function createPulseBubbleCoordinator(opts) {
           // tracks how far it has consumed that tool's stream.
           state.consumedByTool[ev.tool_name] = ev.id;
         } else {
-          // v0.1.11 (B): not routable right now — hidden behind the
-          // visible prefix (idx >= capNow) or the tool is not on the
-          // lane (idx === -1). The event was accepted (the delivered
+          // v0.1.11 (B): not routable right now — the tool is not visible in
+          // ANY lane (tgt.idx === -1). The event was accepted (the delivered
           // cursor advanced past it) but is NOT buffered in renderer
           // memory: it stays in the persistent events table and is
           // flushed FILO (newest first) by flushTool() once the tool's
-          // LIVE cell exists. consumedByTool[ev.tool_name] is left
+          // cell exists in any lane. consumedByTool[ev.tool_name] is left
           // behind on purpose — that gap IS the tool's backlog.
         }
       });
@@ -3842,16 +3872,23 @@ function createPulseBubbleCoordinator(opts) {
     // renderer memory, so a long-hidden tool cannot grow JS heap.
     backlogTools: function (rawLanes, capacity, highWater) {
       var capNow = Math.max(1, capacity || cap);
-      var liveLane = (rawLanes && rawLanes.live) || [];
       var hw = Number(highWater) || 0;
       var out = [];
-      for (var i = 0; i < liveLane.length; i++) {
-        if (i >= capNow) break; // only the visible prefix can be flushed
-        var tool = liveLane[i] && liveLane[i].tool_name;
-        if (!tool) continue;
-        var consumed = state.consumedByTool[tool] || 0;
-        if (consumed < hw) out.push(tool); // gap -> possible backlog
-      }
+      var seen = {};
+      // v0.1.12: a tool is visible in ANY lane (not just live) — collect the
+      // union of visible tools (deduped), then report the ones with a
+      // consumed gap. (flushTool routes each to its dominant lane.)
+      PULSE_LANE_ORDER.forEach(function (metric) {
+        var lane = (rawLanes && rawLanes[metric]) || [];
+        for (var i = 0; i < lane.length; i++) {
+          if (i >= capNow) break; // only the visible prefix can be flushed
+          var tool = lane[i] && lane[i].tool_name;
+          if (!tool || seen[tool]) continue;
+          seen[tool] = true;
+          var consumed = state.consumedByTool[tool] || 0;
+          if (consumed < hw) out.push(tool); // gap -> possible backlog
+        }
+      });
       return out;
     },
     // FILO flush: animate a tool's unconsumed backlog NEWEST-FIRST so the
@@ -3872,15 +3909,15 @@ function createPulseBubbleCoordinator(opts) {
         if (nextCursor) state.consumedByTool[tool] = nextCursor;
         return { fresh: fresh };
       }
-      var liveLane = (rawLanes && rawLanes.live) || [];
-      var idx = -1;
-      for (var i = 0; i < liveLane.length; i++) {
-        if (liveLane[i] && liveLane[i].tool_name === tool) { idx = i; break; }
-      }
-      if (idx < 0 || idx >= capNow) {
-        // The tool is not visible right now (lane/cap changed mid-fetch):
-        // keep holding in the DB — do NOT animate, do NOT advance the
-        // cursor. The next visibility effect re-checks and re-flushes.
+      // v0.1.12 (bubble fix): flush to the tool's MOST prominent visible
+      // lane (dominantLaneFor), not always 'live', so the backlog whoop-ups
+      // spread across the columns where the tool actually is.
+      var tgt = dominantLaneFor(tool, rawLanes, capNow);
+      if (tgt.idx < 0 || tgt.idx >= capNow) {
+        // The tool is not visible in ANY lane right now (lane/cap changed
+        // mid-fetch): keep holding in the DB — do NOT animate, do NOT
+        // advance the cursor. The next visibility effect re-checks and
+        // re-flushes.
         return { fresh: fresh };
       }
       var consumedBefore = state.consumedByTool[tool] || 0;
@@ -3891,10 +3928,11 @@ function createPulseBubbleCoordinator(opts) {
         if (ev.id <= consumedBefore) continue; // already animated (dedupe)
         var t = {
           kind: 'activity', semanticId: 'evt|' + ev.id, eventId: ev.id,
-          metric: 'live', tool: tool,
+          metric: tgt.metric, tool: tool,
           tool_call_id: ev.tool_call_id != null ? ev.tool_call_id : null,
           ts: ev.ts, reason: 'tool-call',
-          slotId: 'live|' + idx, destinationSlot: idx,
+          slotId: tgt.metric + '|' + tgt.idx, destinationSlot: tgt.idx,
+          dataLane: 'live',
           heldUntilVisible: false, sequence: state.seq += 1,
         };
         if (state.active.length < capNow) {
@@ -4174,7 +4212,12 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
   });
   function dotsFor(value, evaluated) {
     var v = typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
-    var filled = v === null ? 0 : Math.round(v * 12);
+    // v0.1.12 (sharper good eval): steep value->dots curve (PULSE_DOT_SHARPNESS
+    // power) — weak collapses toward the 1-dot floor, strong expands toward
+    // the full meter, so weak vs strong read with more contrast (less sticky).
+    // Monotonic: the honest weak/strong label never contradicts the dots.
+    var shaped = v === null ? 0 : Math.pow(v, PULSE_DOT_SHARPNESS);
+    var filled = v === null ? 0 : Math.round(shaped * 12);
     // C (v0.1.11 presence floor): an EVALUATED cell (state != 'empty')
     // never renders a blank meter — at least one dot reads "present,"
     // magnitude adds on top. A weak score can no longer be mistaken for
@@ -4366,6 +4409,30 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
         },
         children: available === true ? 'no tools yet' : 'no pulse data yet',
       }),
+    })]).concat([jsx('div', {
+      key: 'pulse-io-strip',
+      'data-testid': 'pulse-io-strip',
+      // v0.1.12 (I/O -> bottom strip): the reserved spawn band doubles as
+      // a compact 1-line I/O ticker (the LATEST frame). The 4 lane boxes
+      // own the full width; the I/O readout no longer steals a 220px side
+      // column. The sprite columns fly up THROUGH this band to the lane
+      // dot columns, so it is the shared spawn space (dual-purpose).
+      style: {
+        position: 'absolute', left: 0, right: 0, bottom: 0,
+        height: PULSE_SPAWN_SPACE, display: 'flex', alignItems: 'center',
+        justifyContent: 'flex-end', gap: 4, padding: '0 4px',
+        pointerEvents: 'none', boxSizing: 'border-box', overflow: 'hidden',
+        fontSize: 10, lineHeight: PULSE_SPAWN_SPACE + 'px',
+      },
+      children: (Array.isArray(ioRecent) && ioRecent.length > 0)
+        ? [jsx(IoLine, { ev: ioRecent[0] })]   // the most recent I/O frame
+        : [jsx('span', {
+            style: {
+              fontSize: 9, color: 'var(--ui-text-quaternary)',
+              fontFamily: 'var(--ui-font-mono, monospace)',
+            },
+            children: 'no I/O yet',
+          })],
     })])],
   });
 }
@@ -5753,31 +5820,13 @@ function Strip({ source, rest, portraitPreferences }) {
         // visible tool's unconsumed backlog (which lives in the DB, not
         // in renderer memory).
         rest,
+        // v0.1.12 (I/O -> bottom strip): the I/O readout no longer owns a
+        // 220px side column. It becomes a compact 1-line ticker in the
+        // grid's reserved bottom spawn band (PULSE_SPAWN_SPACE); the 4
+        // lane boxes now get the full module width. `recent` = the I/O
+        // frames (most-recent-first); the ticker shows the latest.
+        ioRecent: recent,
       }),
-      ...(!narrow
-        ? [jsxs('div', {
-            className: 'flex flex-col justify-end overflow-hidden',
-            style: {
-              width: IO_WIDTH, gap: 2, flexShrink: 0, boxSizing: 'border-box',
-              // v0.1.12 space pass: the I/O readout suits the lane boxes —
-              // same 1px border + 3px padding + 2px radius, so it reads as
-              // a matching 5th board beside the four lanes.
-              border: '1px solid var(--ui-border, var(--border, transparent))',
-              borderRadius: 2,
-              padding: PULSE_BOARD_PAD,
-            },
-            children: [
-              recent.length > 0
-                ? recent.map((ev, i) => jsx(IoLine, { key: i, ev }))
-                : jsx('span', {
-                    style: { fontSize: 10, color: 'var(--ui-text-quaternary)' },
-                    children: metrics && metrics.events > 0
-                      ? 'I/O frames arrive with each agent call'
-                      : 'no events yet — ticks on your next agent turn',
-                  }),
-            ],
-          })]
-        : []),
     ],
   })
   const portraitModule = jsx('div', {
