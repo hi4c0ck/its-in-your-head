@@ -329,6 +329,13 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
     'activity() collapses a batch to the LATEST event per tool (distinct whoop-ups)')
   ok3(src.includes('newest = ev; // first unconsumed = the newest'),
     'flushTool() emits ONE whoop-up (the newest), absorbing the tool\'s backlog')
-  console.log('ok ' + (++n) + ' - v0.1.12: I/O bottom-strip + dominant-lane routing + sharper curve + distinct (one-per-tool) whoop-ups')
+  // v0.1.12 cut-off fix: the flight keyframes CSS is enumerated over LAYOUT
+  // (lane x row), not the in-flight set, so a new bubble never re-injects
+  // @keyframes and can't restart an in-flight staircase.
+  ok3(src.includes('byte-stable across bubble arrivals'),
+    'the @keyframes CSS is layout-only (pre-enumerated), so arrivals never restart in-flight flights')
+  ok3(!/active5\.forEach\([^\n]*\)\s*\{[\s\S]*?dySeen\.indexOf/.test(src.slice(src.indexOf('Per-flight staircase keyframes'))),
+    'the keyframes CSS no longer derives from the current active set')
+  console.log('ok ' + (++n) + ' - v0.1.12: I/O bottom-strip + dominant-lane routing + sharper curve + distinct whoop-ups + no-cut-off flights')
 }
 console.log('PASS pulse: ' + n + ' assertions')

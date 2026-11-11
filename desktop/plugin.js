@@ -2045,10 +2045,11 @@ function iihyJNoise(nx, ny, seed, feat) {
 // offset -> the dither field ripples in this wave shape across the face (the "impress" drift).
 function iihyJWave(x) {
   const PI = Math.PI
-  // The owner's wave formula (replaces the older 0.54+... one):
-  return 0.28 * Math.sin(PI * x) - 0.25 * Math.cos(PI * x)
-    + 0.01 * Math.sin(2 * PI * x) - 0.59 * Math.cos(2 * PI * x)
-    + 0.15 * Math.sin(3 * PI * x) - 0.37 * Math.cos(3 * PI * x)
+  // The owner's wave formula (the latest, replaces the 0.28*sin(PI*x) one):
+  return 0.28
+    + 0.29 * Math.sin(PI * x) + 0.33 * Math.cos(PI * x)
+    - 0.22 * Math.sin(2 * PI * x) - 0.24 * Math.cos(2 * PI * x)
+    + 0.23 * Math.sin(3 * PI * x) - 0.34 * Math.cos(3 * PI * x)
 }
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1
@@ -2148,7 +2149,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const drift = 0                                             // v17: face position FIXED (no whole-picture sway); the DRIFT = the dither mask's thin lines sweeping the face
   // v18: the DITHER MASK drift offsets — a value-noise field fit to the image size, drifting
   // NON-diagonally (x + y at different slow rates). No per-brick state (the mask drives the bricks).
-  const dOffX = -((frame / 12) * (IYH_J.ditherDriftX || 0.5))
+  const dOffX = (frame / 12) * (IYH_J.ditherDriftX || 0.5)
   const dOffY = (frame / 12) * (IYH_J.ditherDriftY || 0.35)
   // v19: the GLITCH burst (a TV-tracking glitch). Mostly the stable dither; then a periodic
   // random horizontal band rips sideways + takes a glitch (RGB-split) color + its bricks
@@ -2187,8 +2188,8 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     // the SECONDARY fold mask = the SVG lines shifted LEFT by foldOff pooled bricks (≈ the avg line
     // width) -> the fold band that keeps the ground ripple from getting messy near the lines.
     let cvvL = 0
-    if (pc >= foldOff) {
-      const cc = pc - foldOff
+    if (pc + foldOff < pn) {
+      const cc = pc + foldOff
       for (let yy2 = 0; yy2 < pool; yy2++) for (let xx2 = 0; xx2 < pool; xx2++) {
         const c0 = cc * pool + xx2, r0 = prr * pool + yy2
         if (c0 >= cn || r0 >= rn) continue
@@ -4363,14 +4364,21 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
         ],
       });
     }), (function () {
-      // Per-flight staircase keyframes: the DETERMINISTIC union over
-      // the current active set (dedupe by SIGNED dy, ascending) —
-      // re-renders regenerate the identical style node, so in-flight
-      // animations are never replaced or restarted.
+      // Per-flight staircase keyframes. v0.1.12 (cut-off fix): the CSS is a
+      // function of LAYOUT ONLY (box5 + cap + narrow) — NOT of which bubbles
+      // are in flight. Pre-enumerate every (lane, row) dy the instrument can
+      // animate, so the <style> node is byte-stable across bubble arrivals:
+      // a new bubble adds an in-flight SPRITE but never re-injects the
+      // @keyframes the running ones reference, so an in-flight staircase is
+      // never restarted or "cut off." (Before: the union over the current
+      // active set meant a new bubble with a new dy rewrote the <style> and
+      // the browser restarted the running animations.)
       var dySeen = [];
-      active5.forEach(function (t) {
-        var d = pulseBubbleFlight(box5, t.metric, t.destinationSlot, cap, narrow).dy;
-        if (dySeen.indexOf(d) < 0) dySeen.push(d);
+      PULSE_LANE_ORDER.forEach(function (metric) {
+        for (var s = 0; s < cap; s++) {
+          var d = pulseBubbleFlight(box5, metric, s, cap, narrow).dy;
+          if (dySeen.indexOf(d) < 0) dySeen.push(d);
+        }
       });
       dySeen.sort(function (a, b) { return a - b; });
       var css = dySeen.map(function (d) {
