@@ -68,13 +68,13 @@ eq(nextFocusFor('pulse', 'portrait'), 'portrait', 'activating PORTRAIT moves foc
 eq(nextFocusFor('portrait', 'pulse'), 'pulse', 'activating PULSE moves focus to pulse')
 eq(nextFocusFor('pulse', 'pulse'), 'pulse', 're-activating same keeps focus')
 eq(nextFocusFor('pulse', 'driftXYZ'), 'pulse', 'invalid activation keeps current (never nulls/hides)')
-ok(src.includes("'data-module': 'pulse'") && src.includes("'data-module': 'portrait'"), 'both modules always mounted (data-module attrs)')
+ok(src.includes("'data-module': 'pulse'") && !src.includes("'data-module': 'portrait'"), 'compact mounts PULSE only (PORTRAIT module retired v0.1.25 — inspection lives in the workspace)')
 ok(src.includes("'data-composition': 'bottom'") && src.includes("'data-composition': 'sidebar'"), 'both compositions rendered')
-ok(src.includes("'data-focus': tab === 'pulse'") && src.includes("'data-focus': tab === 'portrait'"), 'focus outline is the only tab effect')
+ok(src.includes("'data-focus': tab === 'pulse'") && !src.includes("'data-focus': tab === 'portrait'"), 'focus outline is PULSE-only in compact (portrait focus retired with the module)')
 ok(src.includes('activateFocus'), 'header controls call activateFocus')
 ok(src.includes("data-focus"), 'focus outline keys off tab state (no exclusive hiding)')
 // The only allowed tab=== remaining is the focus outline/expanded workspace.
-ok(src.includes("TABS.filter((t) => t.id !== 'drift')") || src.includes("compactTabs"), 'compact tabs exclude DRIFT (DRIFT stays expanded)')
+ok(src.includes("TABS.filter((t) => t.id === 'pulse')"), 'compact tabs are PULSE-only (PORTRAIT/DRIFT stay in the workspace, v0.1.25)')
 ok(src.includes("placement: 'main'") && src.includes("dock: { pane: 'workspace', pos: 'bottom' }") && src.includes("height: '96px'"), 'bottom registration verbatim')
 // Sidebar surface (the user's working view): right-zone pane on the
 // same measured Strip, gated on host signals (older hosts degrade to
@@ -134,8 +134,8 @@ eq(adaptPulseToLanes(null).lanes.goal, [], 'null payload -> empty lanes, never o
 // flexes' split was inverted when the portrait became the surface.
 ok(src.includes("flex: composition === 'sidebar' ? '1 1 0%' : 1"),
   'sidebar pulse module flexes in sidebar mode (takes the remaining space; portrait is content-sized)')
-ok(src.includes("flex: '0 0 auto'"),
-  'sidebar portrait module is fixed 0 0 auto (content-sized canvas, v18+)')
+ok(!src.includes("'data-module': 'portrait'"),
+  'no content-sized portrait module left in compact (retired v0.1.25; PULSE takes the full window)')
 ok(!/flex: composition === 'sidebar' \? '1 1 50%'/.test(src), 'no functional 50%-basis flex left (the 75/25 split is gone)')
 ok(src.includes("'data-composition': 'sidebar'"), 'sidebar composition hook present')
 ok(src.includes("className: 'flex flex-1 flex-col'") && src.includes("gap: 4, minHeight: 0, overflow: 'hidden'"),

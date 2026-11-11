@@ -254,8 +254,9 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   ok3(lanesSrc.includes('threshold ') && lanesSrc.includes('evidence: ') && lanesSrc.includes('support '),
     'tooltip/detail carries threshold + evidence source + support_count')
   ok3(!lanesSrc.includes('destination_slot'), 'no animation fields in the lane UI path')
-  const pulseModuleSrc = src.slice(src.indexOf("'data-module': 'pulse'"), src.indexOf("'data-module': 'portrait'"))
+  const pulseModuleSrc = src.slice(src.indexOf("'data-module': 'pulse'"), src.indexOf('const main ='))
   ok3(pulseModuleSrc.includes('PulseLanes'), 'compact PULSE renders the lanes surface')
+  ok3(src.includes('children: [pulseModule]') && !src.includes("'data-module': 'portrait'"), 'compact content window is PULSE-only (PORTRAIT module retired v0.1.25)')
   // native passthrough: independent ranking preserved verbatim
   const native = {
     schema_version: 2, available: true,
