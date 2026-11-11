@@ -1915,8 +1915,8 @@ const IYH_J = {
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
   ditherFeat: 5,       // v33: "ocean wave smooth lean" - SMOOTH rolling waves (was 1, the grainy sparkles; now ~5 => big smooth features, the ocean-wave look)
-  ditherDriftX: 3,    // v32: the dither mask drift, X (bricks/sec) - SLOWED (was 12, too fast) + the drift is now mostly horizontal
-  ditherDriftY: 1,    // v32: the dither mask drift, Y (bricks/sec) - tiny (was 8, made it too diagonal); now the drift is a slow near-horizontal sweep
+  ditherDriftX: 1,    // v35: the dither drift X AMPLITUDE (a fraction of the half-grid; the drift is now a BOUNDED sine oscillation, not a linear sweep) - 1 = the full sway
+  ditherDriftY: 1,    // v35: the dither drift Y AMPLITUDE (a fraction of the half-grid; the drift is now a BOUNDED sine oscillation, not a linear sweep) - 1 = the full sway
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
   waveAmp: 6,            // v20: the WAVE offset amplitude (noise-units) - how hard the mask ripples in the wave shape
   foldOffset: 3,         // v28: the SECONDARY fold mask = the SVG lines shifted RIGHT this many pooled bricks (the "stretch" from the original position to the goal; 1 was too tiny) -> prevents mess near the lines
@@ -2158,10 +2158,13 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const bwS = bw * scale, bhS = bh * scale
   const gapX = bwS * p, gapY = bhS * p                         // grout gap (px), proportional to brick
   const drift = 0                                             // v17: face position FIXED (no whole-picture sway); the DRIFT = the dither mask's thin lines sweeping the face
-  // v18: the DITHER MASK drift offsets — a value-noise field fit to the image size, drifting
-  // NON-diagonally (x + y at different slow rates). No per-brick state (the mask drives the bricks).
-  const dOffX = -((frame / 12) * (IYH_J.ditherDriftX || 0.5))
-  const dOffY = (frame / 12) * (IYH_J.ditherDriftY || 0.35)
+  // v35: the DITHER MASK drift offsets — BOUNDED SINE OSCILLATION (not a linear sweep). The
+  // previous `frame/12 * drift` grew unbounded, so the noise field kept sliding left and a new
+  // wave "swept in" every ~10-20s (the "other harmonic"). Now the drift BREATHEs (goes back and
+  // forth) with a slow period, so the ocean-wave swell is stable + nothing ever sweeps across.
+  const secs = frame / 60
+  const dOffX = -Math.sin((secs / 10) * 6.2832) * ((pn - 1) / 2) * (IYH_J.ditherDriftX || 1)
+  const dOffY =  Math.sin((secs / 14) * 6.2832) * ((pm - 1) / 2) * (IYH_J.ditherDriftY || 1)
   // v19: the GLITCH burst (a TV-tracking glitch). Mostly the stable dither; then a periodic
   // random horizontal band rips sideways + takes a glitch (RGB-split) color + its bricks
   // scramble, then snaps back. Deterministic (seeded from the burst index).
@@ -3618,6 +3621,43 @@ function pulseDotWave(x) {
     + 0.010 * Math.cos(3 * PI * u);
   return Math.min(1, Math.max(0, y));
 }
+// v0.1.16 (emphatic bubble drift): the meter's `filled` lit dots are placed
+// in a DETERMINISTIC DRIFT order, not a sequential left-to-right fill. The
+// start slot is a fast, squashable scramble (NO Math.random -- the graphic
+// path must stay cheap + reproducible):
+//   start = ((base * PULSE_DOT_DRIFT_MULT) % 12 + 12) % 12
+// `base` = the PULSE transition sequence (advances each animated score call)
+// + the tool's rank, so different tools drift to different slots and the
+// whole thing rotates as updates land. From `start`, each of the `filled`
+// dots walks forward to the FIRST FREE slot (wrapping, <=12 turns); if the
+// walk finds none free (all 12 lit) it falls back to the incremental
+// first-free from slot 0. The filled mask is cleared before the walk. The lit
+// COUNT is still the honest dotsFor value -- the drift only chooses WHICH
+// slots light, never how many. MULT is the settable "ambiguous number"; a
+// value coprime to 12 (5, 7, 11) gives a full 12-slot cycle with no repeats.
+var PULSE_DOT_DRIFT_MULT = 5;
+function pulseDriftMask(filled, base, mult) {
+  var N = 12, j;
+  filled = Math.max(0, Math.min(N, Math.round(Number.isFinite(filled) ? filled : 0)));
+  var b = Math.floor(Number.isFinite(base) ? base : 0);
+  var m = Number.isFinite(mult) && mult !== 0 ? Math.abs(Math.floor(mult)) : 1;
+  var start = (((b * m) % N) + N) % N;
+  var free = new Array(N), mask = new Array(N);
+  for (j = 0; j < N; j++) { free[j] = true; mask[j] = false; } // clear the filled-dots mask
+  for (var k = 0; k < filled; k++) {
+    var idx = -1, cand;
+    for (var t = 0; t < N; t++) {               // walk forward to first free
+      cand = (((start + t) % N) + N) % N;
+      if (free[cand]) { idx = cand; break; }
+    }
+    if (idx === -1) {                            // none free -> incremental first-free from 0
+      for (var s = 0; s < N; s++) { if (free[s]) { idx = s; break; } }
+    }
+    if (idx === -1) break;                      // fully lit
+    free[idx] = false; mask[idx] = true;
+  }
+  return mask;
+}
 // Destination lane's dot-column x, surface-relative (the first-dot
 // column of the row's right-pinned 19px dot grid).
 function pulseDotColumnX(box, laneIdx, narrow) {
@@ -4283,7 +4323,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
   var hasEntries = order.some(function (l) {
     return lanes && Array.isArray(lanes[l]) && lanes[l].length > 0;
   });
-  function dotsFor(value, evaluated) {
+  function dotsFor(value, evaluated, driftBase) {
     var v = typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
     // v0.1.12 (sharper good eval): steep value->dots curve (PULSE_DOT_SHARPNESS
     // power) — weak collapses toward the 1-dot floor, strong expands toward
@@ -4298,6 +4338,13 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
     // magnitude adds on top. A weak score can no longer be mistaken for
     // an empty one; 'empty' cells stay fully blank.
     if (evaluated && filled < 1) filled = 1;
+    // v0.1.16: when a driftBase is given (the live render passes
+    // PULSE_SEQ + row), place the `filled` dots in a deterministic DRIFT
+    // order; otherwise (tests / reduced-motion) keep the honest sequential
+    // fill. The lit COUNT is unchanged -- only the slots differ.
+    var mask = (driftBase !== undefined && driftBase !== null)
+      ? pulseDriftMask(filled, driftBase, PULSE_DOT_DRIFT_MULT)
+      : null;
     var dots = [];
     for (var i = 0; i < 12; i++) {
       dots.push(jsx('span', {
@@ -4388,6 +4435,18 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
                     style: { display: 'inline-grid', gridTemplateColumns: 'repeat(4, 4px)', gap: 1, flexShrink: 0 },
                     children: dotsFor(val, evaluated),
                   }),
+                  // v0.1.16 (narrow info): in a narrow pane the full-detail
+                  // tooltip degrades to the tool name, so surface the score
+                  // inline (2 decimals, tabular) after the aligned dot grid
+                  // instead of losing it. null (learning/empty) -> dash.
+                  narrow ? jsx('span', {
+                    style: {
+                      fontSize: 8, lineHeight: '10px', flexShrink: 0,
+                      fontFamily: 'var(--ui-font-mono, monospace)',
+                      color: 'var(--ui-text-secondary)', fontVariantNumeric: 'tabular-nums',
+                    },
+                    children: val === null ? '–' : val.toFixed(2),
+                  }) : null,
                 ],
               });
             }).concat(Array.from({ length: Math.max(0, cap - entries.length) }).map(function (_, i) {

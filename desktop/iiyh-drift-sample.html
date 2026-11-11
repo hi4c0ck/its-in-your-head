@@ -27,8 +27,8 @@ const IYH_J = {
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
   ditherFeat: 5,       // v33: "ocean wave smooth lean" - SMOOTH rolling waves (was 1, the grainy sparkles; now ~5 => big smooth features, the ocean-wave look)
-  ditherDriftX: 3,    // v32: the dither mask drift, X (bricks/sec) - SLOWED (was 12, too fast) + the drift is now mostly horizontal
-  ditherDriftY: 1,    // v32: the dither mask drift, Y (bricks/sec) - tiny (was 8, made it too diagonal); now the drift is a slow near-horizontal sweep
+  ditherDriftX: 1,    // v35: the dither drift X AMPLITUDE (a fraction of the half-grid; the drift is now a BOUNDED sine oscillation, not a linear sweep) - 1 = the full sway
+  ditherDriftY: 1,    // v35: the dither drift Y AMPLITUDE (a fraction of the half-grid; the drift is now a BOUNDED sine oscillation, not a linear sweep) - 1 = the full sway
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
   waveAmp: 6,          // v20 the WAVE-FORMULA offset-mask amplitude (noise-units): how far the dither field ripples in the wave shape (iihyJWave)
   foldOffset: 3,      // v28: the SECONDARY fold mask = the SVG lines shifted RIGHT by this many pooled bricks (the "stretch" from the original position to the goal; 1 was too tiny)
@@ -102,7 +102,7 @@ function draw(f){
   const waveOn=($('waveOn')&&$('waveOn').checked)||false   // the checkbox: ON = the wave formula drives the dither offset; OFF = plain drift (waveOff=0)
   const ditherInvert=($('ditherInvert')&&$('ditherInvert').checked)||false   // the checkbox: ON = the ground dither is INVERTED (the near-1 becomes the fold, the near-0 becomes the bright)
   const gEvery=+$('gEvery').value,gLen=+$('gLen').value
-  const dOffX=-((f/12)*(IYH_J.ditherDriftX||0.5)),dOffY=(f/12)*(IYH_J.ditherDriftY||0.35)   // the ground dither drifts the OPPOSITE side (negative dOffX)
+  const secs=f/60,dOffX=-Math.sin((secs/10)*6.2832)*((pn-1)/2)*(IYH_J.ditherDriftX||1),dOffY=Math.sin((secs/14)*6.2832)*((pm-1)/2)*(IYH_J.ditherDriftY||1)   // v35: BOUNDED sine oscillation (the drift BREATHEs, never sweeps the whole image)
   const gActive=(f%(gEvery+gLen))<gLen,gIdx=Math.floor(f/(gEvery+gLen))
   let gBand=0,gH=0,gShift=0,gColor=null
   if(gActive){
