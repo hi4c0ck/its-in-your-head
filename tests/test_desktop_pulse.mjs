@@ -294,6 +294,13 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   ok3(lanesSrc.includes('dotsFor(val, evaluated)'), 'the meter carries the floor (dotsFor gets evaluated at the render site)')
   ok3(!lanesSrc.includes('state-lamp'), 'no phantom leading lamp dot (presence is the floor, not a 13th dot)')
   ok3(!lanesSrc.includes('markerColor'), 'no separate marker color (one dot-language, no second hue)')
+  // v0.1.13 honest meter: a ball only where a value EXISTS. 'learning' and
+  // 'empty' both carry value=null -> no dots (no phantom progress); a
+  // provisional/ready value (even weak) still gets the presence floor.
+  ok3(lanesSrc.includes('var evaluated = val !== null'),
+    'v0.1.13: the meter is value-driven (learning/empty null-value -> 0 dots)')
+  ok3(!/var evaluated = e\.state \?/.test(lanesSrc),
+    'the old state-keyed floor (state != empty -> 1 dot) is gone')
   console.log('ok ' + (++n) + ' - v0.1.11 presence floor (C) carried by the meter; phantom lamp dropped')
   // v0.1.12 PULSE space pass: each lane is a bordered box that fills its 1fr
   // column (fluid on resize), tiny padding, a reserved bubble-spawn strip at

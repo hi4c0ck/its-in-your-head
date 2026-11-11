@@ -4311,13 +4311,14 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
             children: entries.map(function (e, i) {
               var val = e && typeof e.value === 'number' ? e.value
                 : (e && e.momentum && typeof e.momentum.value === 'number' ? e.momentum.value : null);
-              // C (v0.1.11 presence floor): presence is carried by the
-              // meter itself, not a separate marker. An evaluated cell
-              // (state != 'empty', or a live count) shows >=1 solid dot;
-              // an empty cell shows only the faint 0.15-opacity dots. No
-              // leading lamp — one dot-language, no phantom 13th dot, no
-              // second color.
-              var evaluated = e.state ? (e.state !== 'empty') : (val !== null);
+              // v0.1.13 (honest meter): a ball only where there IS a computed
+              // value (val != null). 'learning' and 'empty' both carry
+              // value=null (no labeled evidence yet / no goal context) -> NO
+              // dots: no phantom progress. A provisional/ready value (even a
+              // weak one) still shows its meter via the presence floor (>=1
+              // dot), so "present but weak" stays distinct from "nothing."
+              // One dot-language, no leading lamp, no phantom 13th dot.
+              var evaluated = val !== null;
               // Stage 3 detail surface: full canonical name, value,
               // state, support_count, threshold, evidence source.
               var evidenceSrc = e.evidence && e.evidence.source
