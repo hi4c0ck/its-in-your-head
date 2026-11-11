@@ -2142,14 +2142,20 @@ function iiyhJResolveAccent(el) {
 // the template SVG onto a white base canvas, measures per-cell line darkness, and
 // scales by IYH_J.rasterGain. Resolves null on any failure (the caller keeps the
 // baked field). DOM-only; a non-DOM context resolves null.
-function iiyhRasterizeTemplateCoverage(templateId) {
+function iiyhRasterizeTemplateCoverage(templateId, invert = false) {
   return new Promise(function (resolve) {
     try {
       if (typeof document === 'undefined' || typeof Image === 'undefined') { resolve(null); return }
       const cn = IYH_FACE_COV.cn, rn = IYH_FACE_COV.rn, vw = 720, vh = 760
       const gain = IYH_J.rasterGain
+      // INVERT SOURCE: swap the two graphite colors so the MAIN (primary-ink) and
+      // SUPPORTING (secondary-mid) lines trade visibility. Normally the secondary
+      // graphite is the darker one -> supporting lines read brighter; invert hands
+      // the dark (visible) ink to the primary lines instead. Only the two are swapped;
+      // construction/shade keep their own fallbacks.
+      const graphite = invert ? { primary: '#A4A8A8', secondary: '#D8D9D5' } : undefined
       let svg
-      try { svg = IYH_PORTRAIT.buildPortraitSvg({}, { template: templateId, clock: 0, id: 'iyh-rast-' + templateId }) }
+      try { svg = IYH_PORTRAIT.buildPortraitSvg({}, { template: templateId, clock: 0, id: 'iyh-rast-' + templateId, graphite: graphite }) }
       catch (e) { resolve(null); return }
       let body = String(svg).replace(/^<\?xml[^>]*\?>/, '')
       if (!/\swidth\s*=/.test(body)) body = body.replace('<svg', '<svg width="' + vw + '" height="' + vh + '"')
@@ -2186,7 +2192,7 @@ function iiyhRasterizeTemplateCoverage(templateId) {
 }
 // Per-frame CANVAS renderer. `cov` is the 214x240 coverage grid (default the baked
 // IYH_FACE_COV_BYTES; a template-rasterized grid when a drawing template is selected).
-function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false, invert = false) {
+function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   ctx.clearRect(0, 0, W, H)                                  // transparent bg
   cov = cov || IYH_FACE_COV_BYTES
   const cn = IYH_FACE_COV.cn, rn = IYH_FACE_COV.rn
@@ -2278,7 +2284,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false, in
       // the FACE line: the coverage (vc in [0,1]) QUANTIZED to the nearest 0.07 STEP (the owner's
       // "clamp to the nearest %0.07 step", NOT a median/average fill). Main lines (vc>=accentConf)
       // -> ~1.0; the rest -> the nearest 7% step.
-      a = iihyJStep7(invert ? 1 - vc : vc)   // INVERT SOURCE SVG: flip ONLY the source-SVG (DRAWING) face-line brightness hierarchy; the ground dither + lit/void classification stay on the original coverage
+      a = iihyJStep7(vc)
     } else {
       // the GROUND dither ("ocean wave smooth lean" + v41 REAL PARALLAX): the WAVY SEMANTIC (waveCol)
       // drives TWO SEPARATE noise fields at different scales (the coarse dvFar + the fine dvNear, each
@@ -2318,23 +2324,22 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false, in
 function useIyhBrickCanvas(active, templateId, invert) {
   const ref = useRef(null)
   const covRef = useRef(IYH_FACE_COV_BYTES)   // current brick coverage (baked default; a template raster overrides it)
-  const invertRef = useRef(false)             // INVERT SOURCE polarity (studio checkbox); the rAF loop reads it live
-  invertRef.current = !!invert
-  // Follow the DRAWING TEMPLATE: on template change, rasterize that face to a 214x240
-  // coverage grid so the mosaic isn't stuck on the one baked face. Baked stands in
-  // until the async raster resolves (and on any failure).
+  // Follow the DRAWING TEMPLATE: on template OR INVERT change, rasterize that face to a 214x240
+  // coverage grid so the mosaic isn't stuck on the one baked face. Baked stands in until the
+  // async raster resolves (and on any failure). INVERT swaps the two graphite colors at
+  // rasterize-time, so the MAIN vs SUPPORTING line visibility flips (re-raster, not a per-brick flip).
   useEffect(function () {
     covRef.current = IYH_FACE_COV_BYTES
     let cancelled = false
     if (templateId) {
-      iiyhRasterizeTemplateCoverage(templateId).then(function (cov) {
+      iiyhRasterizeTemplateCoverage(templateId, invert).then(function (cov) {
         if (cancelled || !cov) return
         covRef.current = cov
-        if (typeof console !== 'undefined') console.info('[iiyh] IYH-J-BRICK coverage -> template ' + templateId + ' (' + cov.length + ' cells)')
+        if (typeof console !== 'undefined') console.info('[iiyh] IYH-J-BRICK coverage -> template ' + templateId + ' (' + cov.length + ' cells)' + (invert ? ' [inverted graphite]' : ''))
       })
     }
     return function () { cancelled = true }
-  }, [templateId])
+  }, [templateId, invert])
   // Self-driven 12fps rAF loop (reads covRef.current every frame).
   useEffect(() => {
     if (!active) return undefined
@@ -2367,7 +2372,7 @@ function useIyhBrickCanvas(active, templateId, invert) {
       const shiftHold = IYH_J.shiftHoldMs || 1300, shiftOn = IYH_J.shiftMs || 400
       const cycle = shiftHold + shiftOn
       const focusShift = cycle > 0 && (ts % cycle) >= shiftHold  // timed FOCUS shift: 1.3s main-line focus, 0.4s the less-visible parts come into focus
-      iiyhBrickCanvasDraw(ctx, canvas.width, canvas.height, frame, seed, covRef.current, focusShift, invertRef.current)
+      iiyhBrickCanvasDraw(ctx, canvas.width, canvas.height, frame, seed, covRef.current, focusShift)
     }
     raf = requestAnimationFrame(loop)
     return () => { running = false; cancelAnimationFrame(raf); if (ro) ro.disconnect() }
@@ -4482,9 +4487,11 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
       var entries = lanes && Array.isArray(lanes[lane]) ? lanes[lane].slice(0, cap) : [];
       // v0.1.21 (rank progressive line): the lane's PEAK = its top tool's
       // strongest signal (value, or the objective data when the value is
-      // empty) scaled to a full meter. Each entry's dots = peak *
-      // (1 - rank/laneSize)^2 -- a smooth decay down the lane, so the
-      // standout stands out and the tail recedes. One smooth function of rank.
+      // empty), the HONEST read -- no temper, no floor, no confidence hack.
+      // Each entry's dots = peak * (1 - rank/laneSize)^2, a smooth decay down
+      // the lane. The value itself is the recent-call accumulation and it
+      // REDUCES on its own as matching calls roll out of the window -- that's
+      // how a "too confident" meter comes down, structurally, no cheat.
       var laneSize = entries.length;
       var lanePeak = laneSize ? Math.round(laneSignal(entries[0]) * 12) : 0;
       return jsxs('div', {
@@ -4506,14 +4513,9 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
             children: entries.map(function (e, i) {
               var val = e && typeof e.value === 'number' ? e.value
                 : (e && e.momentum && typeof e.momentum.value === 'number' ? e.momentum.value : null);
-              // v0.1.13 (honest meter): a ball only where there IS a computed
-              // value (val != null). 'learning' and 'empty' both carry
-              // value=null (no labeled evidence yet / no goal context) -> NO
-              // dots: no phantom progress. A provisional/ready value (even a
-              // weak one) still shows its meter via the presence floor (>=1
-              // dot), so "present but weak" stays distinct from "nothing."
-              // One dot-language, no leading lamp, no phantom 13th dot.
-              var evaluated = val !== null;
+              // v0.1.21: `val` feeds the hover tooltip only. The bar is driven
+              // by the lane's rank-line (lanePeak / rankLineDots), not the
+              // per-cell value.
               // Stage 3 detail surface: full canonical name, value,
               // state, support_count, threshold, evidence source.
               var evidenceSrc = e.evidence && e.evidence.source
