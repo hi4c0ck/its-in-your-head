@@ -9,11 +9,11 @@ h1{font-size:18px}.sub{color:#8fa0b2;font-size:13px;max-width:760px}</style></he
 <p class="sub">Re-thought from the v21 base. The <b>dither projects onto the bricks</b> (the grid): the <b>face</b> pulls <b>full color</b> (the accent), floored at a <b>0.05</b> color level; the <b>ground/void</b> dither is <b>capped at 0.05</b> (a faint dither, NOT the wide separate <b>groundMax</b> opacity you corrected). The dither's offset is driven by the <b>NEW wave formula</b>, <b>folded</b> where it hits the SVG lines + a <b>secondary fold mask</b> (the lines shifted LEFT ~8-12px). The sweep is <b>L&rarr;R</b>. The magenta glitch band stays on the face lines. Sliders: wave amplitude, fold line-threshold, fold offset, glitch cadence + length, face floor.</p>
 <div class="sld"><label>waveAmp (noise-units)</label><input id="waveAmp" type="range" min="0" max="20" value="6"><span class="v" id="waveAmpv">6</span></div>
 <div class="sld"><label>use wave formula (on/off)</label><input id="waveOn" type="checkbox" checked style="width:auto"><span class="v" id="waveOnv">on</span></div>
+<div class="sld"><label>invert ground dither (1→fold)</label><input id="ditherInvert" type="checkbox" style="width:auto"><span class="v" id="ditherInvertv">off</span></div>
 <div class="sld"><label>lineFoldThr (0..1)</label><input id="lineFoldThr" type="range" min="10" max="90" value="50"><span class="v" id="lineFoldThrv">0.50</span></div>
-<div class="sld"><label>foldOffset (bricks left)</label><input id="foldOffset" type="range" min="0" max="4" value="1"><span class="v" id="foldOffsetv">1</span></div>
+<div class="sld"><label>foldOffset (bricks right)</label><input id="foldOffset" type="range" min="0" max="4" value="3"><span class="v" id="foldOffsetv">3</span></div>
 <div class="sld"><label>glitchEvery (frames)</label><input id="gEvery" type="range" min="20" max="300" value="90"><span class="v" id="gEveryv">90</span></div>
 <div class="sld"><label>glitchLen (frames)</label><input id="gLen" type="range" min="2" max="40" value="10"><span class="v" id="gLenv">10</span></div>
-<div class="sld"><label>ditherFloor (face floor)</label><input id="floor" type="range" min="0" max="90" value="40"><span class="v" id="floorv">0.40</span></div>
 <canvas id="c" width="480" height="506"></canvas>
 <script>
 const IYH_J = {
@@ -97,9 +97,10 @@ function draw(f){
   const bw=IYH_J.bw*pool,bh=IYH_J.bh*pool,pn=Math.ceil(cn/pool),pm=Math.ceil(rn/pool)
   const sc=Math.min(480/720,506/760),offX=(480-720*sc)/2,offY=(506-760*sc)/2
   const bwS=bw*sc,bhS=bh*sc,gapX=bwS*p,gapY=bhS*p
-  const feat=8,dFloor=+$('floor').value/100
+  const feat=2
   const waveAmp=+$('waveAmp').value,foldOff=+$('foldOffset').value,lineFoldThr=+$('lineFoldThr').value/100
   const waveOn=($('waveOn')&&$('waveOn').checked)||false   // the checkbox: ON = the wave formula drives the dither offset; OFF = plain drift (waveOff=0)
+  const ditherInvert=($('ditherInvert')&&$('ditherInvert').checked)||false   // the checkbox: ON = the ground dither is INVERTED (the near-1 becomes the fold, the near-0 becomes the bright)
   const gEvery=+$('gEvery').value,gLen=+$('gLen').value
   const dOffX=(f/12)*(IYH_J.ditherDriftX||0.5),dOffY=(f/12)*(IYH_J.ditherDriftY||0.35)   // previous (positive) sweep sign
   const gActive=(f%(gEvery+gLen))<gLen,gIdx=Math.floor(f/(gEvery+gLen))
@@ -118,10 +119,10 @@ function draw(f){
     const contrast=iiyhJContrast(cvv/255)
     const isLit=cvv>=IYH_FACE_COV.thr   // a FACE line (the svg pattern hit here)
     let cvvL=0
-    if(pc>=foldOff){const cc=pc-foldOff;for(let yy2=0;yy2<pool;yy2++)for(let xx2=0;xx2<pool;xx2++){const c0=cc*pool+xx2,r0=prr*pool+yy2;if(c0>=cn||r0>=rn)continue;const v2=IYH_FACE_COV_BYTES[r0*cn+c0];if(v2>cvvL)cvvL=v2}}
+    if(pc+foldOff<pn){const cc=pc+foldOff;for(let yy2=0;yy2<pool;yy2++)for(let xx2=0;xx2<pool;xx2++){const c0=cc*pool+xx2,r0=prr*pool+yy2;if(c0>=cn||r0>=rn)continue;const v2=IYH_FACE_COV_BYTES[r0*cn+c0];if(v2>cvvL)cvvL=v2}}
     const lineProx=Math.min(1,Math.max(cvv,cvvL)/(lineFoldThr*255))   // 0 = deep void, 1 = on/near a line / the fold band
     const waveOff=waveOn?(iihyJWave((pn-1-pc)/Math.max(1,pn-1))-0.5)*waveAmp*(1-lineProx):0   // the wave offset, FOLDED at the lines, MIRRORED L->R; 0 when the checkbox is OFF
-    const dv=iihyJNoise(pc+dOffX,prr+dOffY+waveOff,IYH_J.ditherSeed,feat)
+    const dvRaw=iihyJNoise(pc+dOffX,prr+dOffY+waveOff,IYH_J.ditherSeed,feat),dv=ditherInvert?1-dvRaw:dvRaw   // the dither, INVERTED when the checkbox is ON (the near-1 becomes the fold, the near-0 becomes the bright)
     let a=isLit?iihyJStep7(cvv/255):iihyJStep7(dv)*(1-lineProx)   // FACE: coverage QUANTIZED to the 0.07 step; GROUND: dither QUANTIZED to the 0.07 step, folded at the lines
     if(a<=0.004)continue
     const inBand=gActive&&isLit&&prr>=gBand&&prr<gBand+gH   // the glitch is on the FACE lines
@@ -134,8 +135,9 @@ function draw(f){
   g.globalAlpha=1
 }
 let frame=0,_iv=null
-for(const el of ['waveAmp','lineFoldThr','foldOffset','gEvery','gLen','floor']){const inp=$(el),out=$(el+'v');inp.oninput=()=>{out.textContent=el==='floor'||el==='lineFoldThr'?(inp.value/100).toFixed(2):inp.value}}
+for(const el of ['waveAmp','lineFoldThr','foldOffset','gEvery','gLen']){const inp=$(el),out=$(el+'v');inp.oninput=()=>{out.textContent=el==='lineFoldThr'?(inp.value/100).toFixed(2):inp.value}}
 $('waveOn').onchange=()=>{$('waveOnv').textContent=$('waveOn').checked?'on':'off'}
+$('ditherInvert').onchange=()=>{$('ditherInvertv').textContent=$('ditherInvert').checked?'on':'off'}
 draw(0)
 window.__setFrame=function(f){if(_iv){clearInterval(_iv);_iv=null}frame=f;draw(f);return f}
 _iv=setInterval(()=>{frame++;draw(frame)},1000/12)

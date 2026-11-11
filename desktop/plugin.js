@@ -1914,13 +1914,12 @@ const IYH_J = {
   shiftHoldMs: 1300,   // normal phase (main lines in focus) before the focus shift
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
-  ditherFeat: 8,       // v18 dither mask feature size, in BRICKS (~8 => ~27 features across the face; fit/cropped to the image size, not a scaled-up grain) -> the bricks visibly shimmer as it drifts
-  ditherFloor: 0.4,    // a face brick's opacity where the dither mask is 0 (the floor, so the face holds its shape)
+  ditherFeat: 2,       // v28: the dither mask feature size, in BRICKS (~2 => very grained, ~35 features across the face; the "very grained" look the owner remembers, NOT the scaled-up ~9-cell v18 version)
   ditherDriftX: 12,    // dither mask drift, X (bricks/sec; features crawl, the face visibly shimmers)
   ditherDriftY: 8,     // dither mask drift, Y (bricks/sec; DIFFERENT from X -> NON-diagonal)
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
   waveAmp: 6,            // v20: the WAVE offset amplitude (noise-units) - how hard the mask ripples in the wave shape
-  foldOffset: 1,         // v20: the SECONDARY fold mask = the SVG lines shifted LEFT this many pooled bricks (~avg line width, 8-12px) -> prevents mess near the lines
+  foldOffset: 3,         // v28: the SECONDARY fold mask = the SVG lines shifted RIGHT this many pooled bricks (the "stretch" from the original position to the goal; 1 was too tiny) -> prevents mess near the lines
   lineFoldThr: 0.5,   // v20 coverage (0..1) at/above which the wave FOLDS (damps) at a brick -> crisp lines, no mess near the SVG lines
   glitchEvery: 90,    // v19 the GLITCH burst cadence: frames between glitch bursts (~7.5s at 12fps)
   glitchLen: 10,       // v19 how long a glitch burst lasts, in frames (~0.83s) -> a brief rip, then snap-back
@@ -2192,11 +2191,11 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     const vc = cvv / 255                                       // brick "confidence" 0..1
     const contrast = iiyhJContrast(vc)                          // acos spline: [0,1], full at accentConf (0.83+)
     const isLit = cvv >= IYH_FACE_COV.thr                       // a FACE line (the SVG pattern hit here)
-    // the SECONDARY fold mask = the SVG lines shifted LEFT by foldOff pooled bricks (≈ the avg line
-    // width) -> the fold band that keeps the ground ripple from getting messy near the lines.
+    // the SECONDARY fold mask = the SVG lines shifted RIGHT by foldOff pooled bricks -> the fold
+    // band that keeps the ground ripple from getting messy near the lines.
     let cvvL = 0
-    if (pc >= foldOff) {
-      const cc = pc - foldOff
+    if (pc + foldOff < pn) {
+      const cc = pc + foldOff
       for (let yy2 = 0; yy2 < pool; yy2++) for (let xx2 = 0; xx2 < pool; xx2++) {
         const c0 = cc * pool + xx2, r0 = prr * pool + yy2
         if (c0 >= cn || r0 >= rn) continue
