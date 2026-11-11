@@ -2188,8 +2188,8 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     // the SECONDARY fold mask = the SVG lines shifted LEFT by foldOff pooled bricks (≈ the avg line
     // width) -> the fold band that keeps the ground ripple from getting messy near the lines.
     let cvvL = 0
-    if (pc + foldOff < pn) {
-      const cc = pc + foldOff
+    if (pc >= foldOff) {
+      const cc = pc - foldOff
       for (let yy2 = 0; yy2 < pool; yy2++) for (let xx2 = 0; xx2 < pool; xx2++) {
         const c0 = cc * pool + xx2, r0 = prr * pool + yy2
         if (c0 >= cn || r0 >= rn) continue
