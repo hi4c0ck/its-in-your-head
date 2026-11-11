@@ -1914,7 +1914,7 @@ const IYH_J = {
   shiftHoldMs: 1300,   // normal phase (main lines in focus) before the focus shift
   shiftMs: 400,        // focus-shift phase (the less-visible parts come into focus) before reverting
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
-  ditherFeat: 2,       // v28: the dither mask feature size, in BRICKS (~2 => very grained, ~35 features across the face; the "very grained" look the owner remembers, NOT the scaled-up ~9-cell v18 version)
+  ditherFeat: 1,       // v29: the dither mask feature size, in BRICKS (~1 => very grained, the "small sparkles" the owner wants; NOT the smooth ~8-cell v18 version)
   ditherDriftX: 12,    // dither mask drift, X (bricks/sec; features crawl, the face visibly shimmers)
   ditherDriftY: 8,     // dither mask drift, Y (bricks/sec; DIFFERENT from X -> NON-diagonal)
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
@@ -2043,12 +2043,12 @@ function iihyJNoise(nx, ny, seed, feat) {
 // + 0.22 sin(2πx) - 0.23 cos(2πx) - 0.09 sin(3πx) - 0.02 cos(3πx). Drives the per-column mask
 // offset -> the dither field ripples in this wave shape across the face (the "impress" drift).
 function iihyJWave(x) {
-  const PI = Math.PI
-  // The owner's wave formula (the latest, replaces the 0.28*sin(PI*x) one):
-  return 0.28
-    + 0.29 * Math.sin(PI * x) + 0.33 * Math.cos(PI * x)
-    - 0.22 * Math.sin(2 * PI * x) - 0.24 * Math.cos(2 * PI * x)
-    + 0.23 * Math.sin(3 * PI * x) - 0.34 * Math.cos(3 * PI * x)
+  const PI = 3.1416
+  // The owner's ENHANCED formula (the latest, in the [0..1]x[0..1] space):
+  return 0.5
+    - 0.45 * Math.cos(PI * x)
+    - 0.12 * Math.sin(2 * PI * x)
+    + 0.05 * Math.cos(3 * PI * x)
 }
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1
@@ -2214,10 +2214,10 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       // -> ~1.0; the rest -> the nearest 7% step.
       a = iihyJStep7(vc)
     } else {
-      // the GROUND dither: the dither value (dv in [0,1]) QUANTIZED to the nearest 0.07 STEP,
-      // FOLDED at the lines (damped where lineProx is high). The background ripples faintly in
-      // the wave shape, the face lines pull full color.
-      a = iihyJStep7(dv) * (1 - lineProx)
+      // the GROUND dither (neonwave "small sparkles"): dv^4 -> the near-1 pops as a small bright
+      // spot, the near-0 stays dim (the "small sparkles in the neonwave style"). QUANTIZED to the
+      // nearest 0.07 STEP, FOLDED at the lines (damped where lineProx is high).
+      a = iihyJStep7(Math.pow(dv, 4)) * (1 - lineProx)
     }
     if (a <= 0.004) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).

@@ -73,12 +73,12 @@ function iihyJNoise(nx, ny, seed, feat) {
   return ab + (cd - ab) * sy
 }
 function iihyJWave(x) {
-  const PI = Math.PI
-  // The owner's wave formula (the latest):
-  return 0.28
-    + 0.29 * Math.sin(PI * x) + 0.33 * Math.cos(PI * x)
-    - 0.22 * Math.sin(2 * PI * x) - 0.24 * Math.cos(2 * PI * x)
-    + 0.23 * Math.sin(3 * PI * x) - 0.34 * Math.cos(3 * PI * x)
+  const PI = 3.1416
+  // The owner's ENHANCED formula (the latest, in the [0..1]x[0..1] space):
+  return 0.5
+    - 0.45 * Math.cos(PI * x)
+    - 0.12 * Math.sin(2 * PI * x)
+    + 0.05 * Math.cos(3 * PI * x)
 }
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1
@@ -97,7 +97,7 @@ function draw(f){
   const bw=IYH_J.bw*pool,bh=IYH_J.bh*pool,pn=Math.ceil(cn/pool),pm=Math.ceil(rn/pool)
   const sc=Math.min(480/720,506/760),offX=(480-720*sc)/2,offY=(506-760*sc)/2
   const bwS=bw*sc,bhS=bh*sc,gapX=bwS*p,gapY=bhS*p
-  const feat=2
+  const feat=1
   const waveAmp=+$('waveAmp').value,foldOff=+$('foldOffset').value,lineFoldThr=+$('lineFoldThr').value/100
   const waveOn=($('waveOn')&&$('waveOn').checked)||false   // the checkbox: ON = the wave formula drives the dither offset; OFF = plain drift (waveOff=0)
   const ditherInvert=($('ditherInvert')&&$('ditherInvert').checked)||false   // the checkbox: ON = the ground dither is INVERTED (the near-1 becomes the fold, the near-0 becomes the bright)
@@ -123,7 +123,7 @@ function draw(f){
     const lineProx=Math.min(1,Math.max(cvv,cvvL)/(lineFoldThr*255))   // 0 = deep void, 1 = on/near a line / the fold band
     const waveOff=waveOn?(iihyJWave((pn-1-pc)/Math.max(1,pn-1))-0.5)*waveAmp*(1-lineProx):0   // the wave offset, FOLDED at the lines, MIRRORED L->R; 0 when the checkbox is OFF
     const dvRaw=iihyJNoise(pc+dOffX,prr+dOffY+waveOff,IYH_J.ditherSeed,feat),dv=ditherInvert?1-dvRaw:dvRaw   // the dither, INVERTED when the checkbox is ON (the near-1 becomes the fold, the near-0 becomes the bright)
-    let a=isLit?iihyJStep7(cvv/255):iihyJStep7(dv)*(1-lineProx)   // FACE: coverage QUANTIZED to the 0.07 step; GROUND: dither QUANTIZED to the 0.07 step, folded at the lines
+    let a=isLit?iihyJStep7(cvv/255):iihyJStep7(Math.pow(dv,4))*(1-lineProx)   // FACE: coverage QUANTIZED to the 0.07 step; GROUND: neonwave sparkles (dv^4 -> near-1 pops), QUANTIZED, folded at the lines
     if(a<=0.004)continue
     const inBand=gActive&&isLit&&prr>=gBand&&prr<gBand+gH   // the glitch is on the FACE lines
     let gx=offX+pc*bwS+gapX/2,ga=a
