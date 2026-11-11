@@ -93,49 +93,6 @@ friction state.
 | `/mirror adaptation [on\|off\|status\|rules]` | directional adaptation state + rules |
 | `/mirror engine [status\|enable\|disable]` | perception tier (Tier-0 default, opt-in ONNX Tier-1) |
 
-Sample output (live dataset):
-
-```text
-$ /mirror
-mirror: 44580 events, 1124716257 tokens
-
-$ /mirror portrait draw
-portrait draw:
-                           ...
-      :    \         /  :
-      :                 :
-      :     -       -   :
-      :        v        :
-      :-----------------------:
-      dir +0.50 c   - | ctx +0.54 c   - | exp +0.51 c   -
-      dep +0.51 c   - | itr +0.50 c   - | scp +0.50 c   -
-      stage none | seed true | line 0.21 | asym 0.03 | evidence present
-
-$ /mirror context
-context:
-  user message: VISIBLE
-  history extent: KNOWN
-  system instructions: NOT EXPOSED
-  SOUL.md: KNOWN
-  USER.md: KNOWN
-  MEMORY.md: KNOWN
-  AGENTS.md: KNOWN
-  active skills: KNOWN
-  plugin adaptation: KNOWN
-  injected instruction: KNOWN
-
-$ /mirror engine status
-engine:
-  Tier 0: tier-0 (sketch, always available) [active]
-  Tier 1: tier-1-onnx (ONNX MiniLM)
-  Active tier: Tier 0
-  ONNX runtime: ok
-  Worker: dead
-```
-
-(The `portrait draw` face above is abridged — the live output is a full
-25×14 deterministic character face; the axis lines are the evidence strip.)
-
 ### Enable / disable
 
 - Settings → Plugins → **It's in Your Head**: the **backend** toggle runs
