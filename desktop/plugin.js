@@ -2215,6 +2215,12 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     // the per-column WAVE multiplier (the owner's formula applied to MULTIPLY the col into the fold,
     // NOT as a noise offset). 0..1, mirrored L->R.
     const waveCol = iihyJWave((pn - 1 - pc) / Math.max(1, pn - 1))
+    // v37: the LEVELED PARALLAX - split the wave into two layers with different amplitude bands +
+    // different periods (the far layer = slow + small amplitude in the 0-0.34 band; the near layer =
+    // faster + bigger amplitude in the 0.34-1 band). The two layers move at different speeds -> parallax.
+    const waveFar = 0.34 * (0.5 + 0.5 * Math.sin(pc * 6.2832 / 12 + secs / 18 * 6.2832))   // the FAR layer: 0..0.34 band, slow period (18s), small amplitude
+    const waveNear = 0.66 * (0.5 + 0.5 * Math.sin(pc * 6.2832 / 5 + secs / 6 * 6.2832))   // the NEAR layer: 0..0.66 band, fast period (6s), big amplitude
+    const waveParallax = waveFar + waveNear   // the two layers add up to the full 0..1 range (the parallax)
     const dv = iihyJNoise(pc + dOffX, prr + dOffY, IYH_J.ditherSeed, IYH_J.ditherFeat)
     let a
     if (isLit) {
@@ -2223,12 +2229,13 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       // -> ~1.0; the rest -> the nearest 7% step.
       a = iihyJStep7(vc)
     } else {
-      // the GROUND dither ("ocean wave smooth lean"): SMOOTH value-noise (dv, no sparkles) QUANTIZED
-      // to the 0.07 STEP, MULTIPLIED by the per-column WAVE formula (the ocean-wave undulation),
+      // the GROUND dither ("ocean wave smooth lean" + v37 PARALLAX): SMOOTH value-noise (dv, no
+      // sparkles) QUANTIZED to the 0.07 STEP, MULTIPLIED by the LEVELED PARALLAX wave (the two
+      // layers: the far 0-0.34 band + the near 0.34-1 band, different periods -> parallax depth),
       // FOLDED at the lines, then VIGNETTED (brighter at the center, darker at the corners/edges).
       const vdx = pc - vigCx, vdy = prr - vigCy
       const vig = 1 - Math.pow(Math.sqrt(vdx * vdx + vdy * vdy) / vigMax, 2)
-      a = iihyJStep7(dv) * waveCol * (1 - lineProx) * vig
+      a = iihyJStep7(dv) * waveParallax * (1 - lineProx) * vig
     }
     if (a <= 0.004) continue
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
@@ -4333,11 +4340,13 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
     // supersedes the PULSE_DOT_SHARPNESS power curve.
     var shaped = v === null ? 0 : pulseDotWave(v);
     var filled = v === null ? 0 : Math.round(shaped * 12);
-    // C (v0.1.11 presence floor): an EVALUATED cell (state != 'empty')
-    // never renders a blank meter — at least one dot reads "present,"
-    // magnitude adds on top. A weak score can no longer be mistaken for
-    // an empty one; 'empty' cells stay fully blank.
-    if (evaluated && filled < 1) filled = 1;
+    // C (v0.1.11 presence floor, v0.1.16 zero-gate): an EVALUATED cell with a
+    // GENUINELY positive value (state != 'empty' AND v > 0) never renders a
+    // blank meter — a weak-but-present score reads "present, not empty." A
+    // true ZERO value (friction with no matching evidence, etc.) still reads
+    // as nothing: 0 dots, like 'empty'. So the floor only lifts a positive
+    // value the wave rounds down to 0 -- never an actual zero.
+    if (evaluated && v > 0 && filled < 1) filled = 1;
     // v0.1.16: when a driftBase is given (the live render passes
     // PULSE_SEQ + row), place the `filled` dots in a deterministic DRIFT
     // order; otherwise (tests / reduced-motion) keep the honest sequential
@@ -4417,7 +4426,9 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
               return jsxs('div', {
                 key: e.tool_id + '-' + e.rank,
                 'data-slot': lane + '|' + i,
-                title: narrow ? String(e.tool_name || '') : tip,
+                title: narrow
+                  ? (String(e.tool_name || '') + (val === null ? '' : ' ' + Number(val).toFixed(2)))
+                  : tip,
                 style: {
                   display: 'flex', alignItems: 'center', gap: narrow ? 2 : 4, minHeight: narrow ? 10 : 14, overflow: 'hidden',
                 },
@@ -4435,18 +4446,6 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
                     style: { display: 'inline-grid', gridTemplateColumns: 'repeat(4, 4px)', gap: 1, flexShrink: 0 },
                     children: dotsFor(val, evaluated, (coord.getState().seq || 0) + i),
                   }),
-                  // v0.1.16 (narrow info): in a narrow pane the full-detail
-                  // tooltip degrades to the tool name, so surface the score
-                  // inline (2 decimals, tabular) after the aligned dot grid
-                  // instead of losing it. null (learning/empty) -> dash.
-                  narrow ? jsx('span', {
-                    style: {
-                      fontSize: 8, lineHeight: '10px', flexShrink: 0,
-                      fontFamily: 'var(--ui-font-mono, monospace)',
-                      color: 'var(--ui-text-secondary)', fontVariantNumeric: 'tabular-nums',
-                    },
-                    children: val === null ? '–' : val.toFixed(2),
-                  }) : null,
                 ],
               });
             }).concat(Array.from({ length: Math.max(0, cap - entries.length) }).map(function (_, i) {
