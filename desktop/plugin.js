@@ -3611,11 +3611,11 @@ function pulseDotWave(x) {
   var v = (typeof x === 'number' && Number.isFinite(x))
     ? Math.min(1, Math.max(0, x)) : 0;
   var PI = 3.1416;
-  var u = Math.pow(v, 0.67);
-  var y = 0.400
-    - 0.050 * Math.sin(PI * u) + 0.310 * Math.cos(PI * u)
-    - 0.080 * Math.sin(2 * PI * u) - 0.300 * Math.cos(2 * PI * u)
-    + 0.350 * Math.sin(3 * PI * u) - 0.300 * Math.cos(3 * PI * u);
+  var u = Math.pow(v, 0.78);
+  var y = 0.420
+    + 0.110 * Math.sin(PI * u) - 0.500 * Math.cos(PI * u)
+    + 0.070 * Math.cos(2 * PI * u) - 0.040 * Math.sin(3 * PI * u)
+    + 0.010 * Math.cos(3 * PI * u);
   return Math.min(1, Math.max(0, y));
 }
 // Destination lane's dot-column x, surface-relative (the first-dot

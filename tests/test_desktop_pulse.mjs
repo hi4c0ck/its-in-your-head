@@ -329,9 +329,10 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
   // value=null (learning/empty) is preserved.
   ok3(src.includes('function pulseDotWave('),
     'the owner X-space value->dots wave is defined')
-  ok3(src.includes('0.350 * Math.sin(3 * PI * u)')
-        && src.includes('Math.pow(v, 0.67)'),
-    'the wave uses the owner coefficients + the x^0.67 X-space transform')
+  ok3(src.includes('Math.pow(v, 0.78)')
+        && src.includes('0.420')
+        && src.includes('0.500 * Math.cos(PI * u)'),
+    'the wave uses the owner coefficients (0.420 base) + the x^0.78 X-space transform')
   ok3(lanesSrc.includes('pulseDotWave(v)'),
     'dotsFor fills the meter from the wave (round(wave * 12))')
   ok3(lanesSrc.includes('Math.round(shaped * 12)'),
