@@ -3768,6 +3768,29 @@ function pulseDriftMask(filled, base, mult) {
   }
   return mask;
 }
+// v0.1.22 (per-cell STABLE drift base, owner fix): the base is a function of
+// THE CELL — (lane, tool, value-bucket) — not the global transition counter
+// (`seq + i`, v0.1.16), which rotated ALL 16 rows on every bubble ("one
+// popping bubble changes the whole matrix"). The bucket is the SAME 1e-6
+// quantization transition detection uses, so: a meaningful value/level/state
+// change moves only this cell; everything else (other lanes' bubbles, other
+// tools) leaves this cell's mask byte-stable. Different tools / lanes hash to
+// different bases, so equal (peak, laneSize) no longer yields identical
+// patterns. `null` (no value at all) and 0.0 are distinct buckets: a
+// learning row with no value stays an honest absence.
+function pulseFnv32(str) {
+  var h = 2166136261;
+  for (var i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function pulseCellBase(lane, entry) {
+  var raw = pulseEntryValue(entry);
+  var bucket = raw === null ? 'null' : String(pulseQuantizedScore(raw));
+  return pulseFnv32(String(lane) + '|' + String(entry && entry.tool_name || '') + '|' + bucket) % 12;
+}
 // Destination lane's dot-column x, surface-relative (the first-dot
 // column of the row's right-pinned 19px dot grid).
 function pulseDotColumnX(box, laneIdx, narrow) {
@@ -4440,10 +4463,23 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
   // standout stands out, the tail recedes. ONE smooth function of rank; no
   // ad-hoc floor numbers (no 2/6/12).
   function laneSignal(e) {
-    var v = (e && typeof e.value === 'number' && Number.isFinite(e.value)) ? e.value : 0;
+    // v0.1.22 (owner fix): read the value exactly like pulseEntryValue does —
+    // LIVE entries carry it at e.momentum.value, NOT e.value. The v0.1.21
+    // rank line read e.value only, so every LIVE lane's peak was structurally
+    // 0 no matter how busy the tool was (the "always active yet empty" report).
+    var raw = pulseEntryValue(e);
+    var v = raw === null ? 0 : (raw < 0 ? 0 : raw);
     var h = (e && typeof e.objective_hint === 'number' && Number.isFinite(e.objective_hint)) ? e.objective_hint : 0;
     var s = Math.max(v, h);
-    return s < 0 ? 0 : (s > 1 ? 1 : s);
+    return s > 1 ? 1 : s;
+  }
+  // v0.1.22 (presence floor, restored from v0.1.12): a row whose entry CARRIES
+  // a value (value or momentum — not null) is never a pitch-black meter: the
+  // rank-line decay floors it at 1 dot ("present, weak"). Entries with no
+  // value at all (honest absence, state learning) stay empty, and the
+  // placeholder rows for lanes with fewer entries still render nothing.
+  function pulsePresenceFloor(dots, e) {
+    return pulseEntryValue(e) !== null && dots < 1 ? 1 : dots;
   }
   function rankLineDots(peak, rank, laneSize) {
     var t = 1 - rank / Math.max(1, laneSize);
@@ -4553,7 +4589,11 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
                   }),
                   jsxs('span', {
                     style: { display: 'inline-grid', gridTemplateColumns: 'repeat(4, 4px)', gap: 1, flexShrink: 0 },
-                    children: dotsFor(rankLineDots(lanePeak, i, laneSize), (coord.getState().seq || 0) + i),
+                    // v0.1.22: presence floor (an entry that carries a value is
+                    // never a pitch-black row) + the per-cell STABLE drift base
+                    // (lane, tool, value-bucket) — bubbles in other lanes no
+                    // longer re-roll this cell's pattern.
+                    children: dotsFor(pulsePresenceFloor(rankLineDots(lanePeak, i, laneSize), e), pulseCellBase(lane, e)),
                   }),
                 ],
               });
