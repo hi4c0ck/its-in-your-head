@@ -1916,7 +1916,7 @@ const IYH_J = {
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
   ditherFeat: 5,       // v33: "ocean wave smooth lean" - SMOOTH rolling waves (was 1, the grainy sparkles; now ~5 => big smooth features, the ocean-wave look)
   ditherDriftX: 1,    // v35: the dither drift X AMPLITUDE (a fraction of the half-grid; the drift is now a BOUNDED sine oscillation, not a linear sweep) - 1 = the full sway
-  ditherDriftY: 1,    // v35: the dither drift Y AMPLITUDE (a fraction of the half-grid; the drift is now a BOUNDED sine oscillation, not a linear sweep) - 1 = the full sway
+  ditherDriftY: 0,    // v36: the dither drift Y AMPLITUDE - ZEROED (the Y sway was the "awkward one from the top"); now the drift is a pure X oscillation
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
   waveAmp: 6,            // v20: the WAVE offset amplitude (noise-units) - how hard the mask ripples in the wave shape
   foldOffset: 3,         // v28: the SECONDARY fold mask = the SVG lines shifted RIGHT this many pooled bricks (the "stretch" from the original position to the goal; 1 was too tiny) -> prevents mess near the lines
@@ -4351,7 +4351,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
         key: i,
         style: {
           width: 4, height: 4, borderRadius: 2, display: 'inline-block',
-          background: 'var(--ui-accent)', opacity: i < filled ? 0.9 : 0.15,
+          background: 'var(--ui-accent)', opacity: (mask ? mask[i] : i < filled) ? 0.9 : 0.15,
         },
       }));
     }
@@ -4433,7 +4433,7 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
                   }),
                   jsxs('span', {
                     style: { display: 'inline-grid', gridTemplateColumns: 'repeat(4, 4px)', gap: 1, flexShrink: 0 },
-                    children: dotsFor(val, evaluated),
+                    children: dotsFor(val, evaluated, (coord.getState().seq || 0) + i),
                   }),
                   // v0.1.16 (narrow info): in a narrow pane the full-detail
                   // tooltip degrades to the tool name, so surface the score

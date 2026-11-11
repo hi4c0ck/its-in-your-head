@@ -28,7 +28,7 @@ const IYH_J = {
   focusFloor: 0.70,    // in the focus-shift phase the faint (non-main) bricks lift to this floor -> they read; main lines stay FULL (no polarity inversion, no folding of shades)
   ditherFeat: 5,       // v33: "ocean wave smooth lean" - SMOOTH rolling waves (was 1, the grainy sparkles; now ~5 => big smooth features, the ocean-wave look)
   ditherDriftX: 1,    // v35: the dither drift X AMPLITUDE (a fraction of the half-grid; the drift is now a BOUNDED sine oscillation, not a linear sweep) - 1 = the full sway
-  ditherDriftY: 1,    // v35: the dither drift Y AMPLITUDE (a fraction of the half-grid; the drift is now a BOUNDED sine oscillation, not a linear sweep) - 1 = the full sway
+  ditherDriftY: 0,    // v36: the dither drift Y AMPLITUDE - ZEROED (the Y sway was the "awkward one from the top"); now the drift is a pure X oscillation
   ditherSeed: 7,       // deterministic value-noise seed (stable across frames + loads)
   waveAmp: 6,          // v20 the WAVE-FORMULA offset-mask amplitude (noise-units): how far the dither field ripples in the wave shape (iihyJWave)
   foldOffset: 3,      // v28: the SECONDARY fold mask = the SVG lines shifted RIGHT by this many pooled bricks (the "stretch" from the original position to the goal; 1 was too tiny)
