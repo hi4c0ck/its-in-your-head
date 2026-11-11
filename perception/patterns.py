@@ -937,13 +937,25 @@ GENERIC_MOTIF = {
 }
 MORPH_PARAMS = ("line_density", "contour_asymmetry",
                "echo_strength", "gesture_bias")
+# Per-set face STRUCTURE offsets, seeded from the rolling reference
+# ("expand the algo" — the learned-pair treatment alone gates to neutral and
+# makes every session's portrait look the same). Bounded to [-1,1] so the face
+# stays a legible pencil portrait; abstract (a metaphor of the session's own
+# signal geometry) — NOT a likeness or a demographic.
+MORPH_STRUCTURE_PARAMS = ("faceWidth", "headWidth", "jaw", "brow",
+                          "eyeAspect", "hairMass", "shoulder")
 
 
 def neutral_morphology() -> dict:
-    """No learned mutation: a documented empty shape, never fabricated."""
-    return {"pair": None, "strength": 0.0, "confidence": 0.0, "evidence": 0,
-            "available": False,
-            **{p: 0.0 for p in MORPH_PARAMS}}
+    """No learned mutation + no reference seed: a documented empty shape,
+    never fabricated. Carries the full morphology keyset (4 treatment params,
+    7 structure params, the seed flag) so consumers see one consistent shape
+    whether or not a seed is present — all structure offsets are 0.0."""
+    out = {"pair": None, "strength": 0.0, "confidence": 0.0, "evidence": 0,
+           "available": False, "seed": False, "centers": 0,
+           **{p: 0.0 for p in MORPH_PARAMS}}
+    out.update({p: 0.0 for p in MORPH_STRUCTURE_PARAMS})
+    return out
 
 
 def group_turns(rows) -> list:
@@ -1079,6 +1091,10 @@ def morphology_from_summary(summary) -> dict:
     }
     for param in MORPH_PARAMS:
         out[param] = round(motif.get(param, 0.0) * s, 4)
+    # Shape-consistency: the pair layer carries the structure keys too (the
+    # reference seed is a separate layer merged on top by merge_morphology).
+    out.update({p: 0.0 for p in MORPH_STRUCTURE_PARAMS})
+    out.update({"seed": False, "centers": 0})
     return out
 
 
@@ -1086,3 +1102,117 @@ def morphology_from_rows(rows, now_s=None) -> dict:
     """One-call path: history rows -> gated pair summary -> morphology."""
     return morphology_from_summary(
         pattern_pair_summary(group_turns(rows), now_s=now_s))
+
+
+# ============================================================================
+# Reference-seed structure morphology (per-set face structure)
+#
+# "Expand the algo": the learned-pair treatment alone gates to neutral (thin
+# 2-pattern bank) so every session's portrait is the same neutral face. The
+# rolling reference (per-dim L2 windows of derived vectors) is a rich,
+# per-set signal that is ALWAYS present once a session has reassembled. We
+# project it to a bounded, deterministic signature and drive the face
+# STRUCTURE (faceWidth / jaw / shoulders / ...) so each set gets a genuinely
+# different, stable portrait. Abstract + bounded + order-invariant: a metaphor
+# of the session's own signal geometry, never a likeness or demographic.
+# ============================================================================
+
+def reference_centers(reference_state, dims) -> dict | None:
+    """Per-dim 'territory center': the L2-normalized element-wise mean of a
+    dim's rolling window vectors. Deterministic (mean is order-invariant),
+    abstract, derived-vectors-only (no raw text). A dim with no vectors is
+    omitted; all-missing -> None (callers keep the neutral structure)."""
+    centers: dict = {}
+    if not isinstance(reference_state, dict):
+        return None
+    for d in dims:
+        entry = reference_state.get(d) or {}
+        vectors = [v for v in (entry.get("vectors") or [])
+                   if isinstance(v, (list, tuple)) and v]
+        if not vectors:
+            continue
+        width = max(len(v) for v in vectors)
+        acc = [0.0] * width
+        for v in vectors:
+            for i in range(min(width, len(v))):
+                try:
+                    acc[i] += float(v[i])
+                except (TypeError, ValueError):
+                    continue
+        mean = [a / len(vectors) for a in acc]
+        norm = math.sqrt(sum(x * x for x in mean))
+        if norm <= 1e-9:
+            continue
+        centers[str(d)] = [x / norm for x in mean]
+    return centers or None
+
+
+def reference_signature(centers, dims) -> dict:
+    """Bounded, order-invariant pairwise-cosine signature of the territory
+    centers: for each dim pair, how similar the session's two
+    dimension-territories are (a value in [-1,1]). The centers are already
+    L2-normalized, so the cosine is their dot product. A different session has
+    different territory geometry -> a different signature -> a different face
+    structure. Abstract + deterministic; a missing dim contributes nothing.
+    """
+    names = [d for d in dims if (centers or {}).get(d)]
+    out = {}
+    for a in range(len(names)):
+        for b in range(a + 1, len(names)):
+            u, v = centers[names[a]], centers[names[b]]
+            dot = sum(x * y for x, y in zip(u, v))
+            out[frozenset((names[a], names[b]))] = max(-1.0, min(1.0, round(dot, 4)))
+    return out
+
+
+def structure_morphology(reference_state, dims) -> dict:
+    """Per-set face STRUCTURE offsets seeded from the rolling reference.
+
+    Each structure param is a bounded ([-1,1]) artistic combination of the
+    pairwise-cosine geometry of the 6 territory centers: how a session's
+    dimensions relate to each other shapes the face. The magnitudes are
+    chosen so the offsets sit in a visible-but-legible band (never grotesque).
+    Empty / no-vectors reference -> neutral (all zero offsets, available
+    False, seed False): today's look, fully reversible.
+    """
+    neutral = neutral_morphology()
+    centers = reference_centers(reference_state, dims)
+    if not centers:
+        return neutral
+    sig = reference_signature(centers, dims)
+
+    def cos(*pair):
+        return sig.get(frozenset(pair), 0.0)
+
+    raw = {
+        "faceWidth": 0.45 * cos("directness", "exploration"),
+        "headWidth": 0.35 * (1.0 - cos("directness", "context_richness")),
+        "jaw":       0.30 * cos("scope", "analytical_depth"),
+        "brow":      0.30 * cos("analytical_depth", "iteration"),
+        "eyeAspect": 0.35 * cos("context_richness", "exploration"),
+        "hairMass":  0.30 * cos("iteration", "scope"),
+        "shoulder":  0.25 * cos("directness", "scope"),
+    }
+    out = dict(neutral)
+    for p in MORPH_STRUCTURE_PARAMS:
+        out[p] = round(max(-1.0, min(1.0, raw[p])), 4)
+    out.update({"available": True, "seed": True, "centers": len(centers)})
+    return out
+
+
+def merge_morphology(pair_morphology, structure_morphology) -> dict:
+    """Compose the learned-pair treatment (4 MORPH_PARAMS) with the
+    reference-seed structure (MORPH_STRUCTURE_PARAMS). Either layer may be
+    neutral. available is True when EITHER layer mutates the drawing; the
+    structure seed alone is enough to make a session's face differ — that is
+    the point of the expansion. Bounded + deterministic + abstract."""
+    m = neutral_morphology()
+    m.update(pair_morphology or {})
+    s = structure_morphology or {}
+    for p in MORPH_STRUCTURE_PARAMS:
+        if p in s:
+            m[p] = s[p]
+    m["seed"] = bool(s.get("seed"))
+    m["centers"] = int(s.get("centers") or 0)
+    m["available"] = bool(m.get("available")) or bool(m.get("seed"))
+    return m

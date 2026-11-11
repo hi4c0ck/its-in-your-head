@@ -154,4 +154,24 @@ ok(src.includes('createIyhPortraitTemplatePreferences(ctx)'), 'one shared prefer
 ok(src.includes("rest('/pulse'") && src.includes("rest('/drift')") && src.includes("rest('/portrait')"),
   'PULSE / DRIFT / PORTRAIT routes all intact')
 
+// (11) the per-set reference-seed structure ("expand the algo"): the portrait
+// face differs by seed, is deterministic, and no-seed == today's baseline.
+const noSeed = { available: true, seed: false, faceWidth: 0, jaw: 0, brow: 0 }
+const seedA = { seed: true, available: true, faceWidth: 0.43, jaw: 0.29, brow: 0.28,
+                headWidth: -0.1, eyeAspect: 0.2, hairMass: 0.25, shoulder: -0.15 }
+const seedB = { seed: true, available: true, faceWidth: -0.4, jaw: -0.25, brow: 0.1,
+                headWidth: 0.2, eyeAspect: -0.3, hairMass: -0.2, shoulder: 0.2 }
+for (const t of ['neutral-pencil', 'angular-pencil', 'soft-flow-study']) {
+  for (const r of ['compact', 'studio']) {
+    const base_ = IYH_PORTRAIT.buildPortraitSvg({ ...payload, morphology: noSeed }, { template: t, rendering: r })
+    const a = IYH_PORTRAIT.buildPortraitSvg({ ...payload, morphology: seedA }, { template: t, rendering: r })
+    const b = IYH_PORTRAIT.buildPortraitSvg({ ...payload, morphology: seedB }, { template: t, rendering: r })
+    const a2 = IYH_PORTRAIT.buildPortraitSvg({ ...payload, morphology: seedA }, { template: t, rendering: r })
+    assert.ok(a !== base_, t + '/' + r + ': seed changes the face from the neutral baseline')
+    assert.ok(a !== b, t + '/' + r + ': two seeds render different faces (per-set)')
+    assert.ok(a === a2, t + '/' + r + ': the seed is deterministic')
+  }
+}
+ok(true, 'the reference-seed structure differentiates every set, deterministically, across all templates')
+
 console.log('PASS portrait_engine: ' + n + ' assertions')

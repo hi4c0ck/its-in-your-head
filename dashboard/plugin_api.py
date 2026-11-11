@@ -1004,8 +1004,13 @@ _NEUTRAL_LIVE_EXPRESSION: dict = {
 }
 _NEUTRAL_MORPHOLOGY: dict = {
     "pair": None, "strength": 0.0, "confidence": 0.0, "evidence": 0,
-    "available": False, "line_density": 0.0, "contour_asymmetry": 0.0,
+    "available": False, "seed": False, "centers": 0,
+    "line_density": 0.0, "contour_asymmetry": 0.0,
     "echo_strength": 0.0, "gesture_bias": 0.0,
+    # reference-seed structure offsets (the "expand the algo" per-set seed;
+    # all zero / seed False here -> the neutral pencil face)
+    "faceWidth": 0.0, "headWidth": 0.0, "jaw": 0.0, "brow": 0.0,
+    "eyeAspect": 0.0, "hairMass": 0.0, "shoulder": 0.0,
 }
 
 
@@ -1036,6 +1041,58 @@ def _morphology_from_history(conn) -> dict:
     except Exception:
         return dict(_NEUTRAL_MORPHOLOGY)
     return morpho if isinstance(morpho, dict) else dict(_NEUTRAL_MORPHOLOGY)
+
+
+def _reference_seed_morphology() -> dict:
+    """The per-set reference-seed structure morphology (or neutral). Reads
+    ``meta.reference_state`` (the rolling per-dim L2 windows) and projects it
+    to a bounded, deterministic face-structure signature. Any fault -> the
+    neutral morphology shape (never a 500). This is the 'expand the algo'
+    seed: every session's face differs without a demographic / likeness.
+    """
+    try:
+        from perception import patterns as _pats
+    except Exception:
+        try:
+            from ..perception import patterns as _pats  # type: ignore
+        except Exception:
+            return dict(_NEUTRAL_MORPHOLOGY)
+    try:
+        conn = _connect()
+    except Exception:
+        return dict(_NEUTRAL_MORPHOLOGY)
+    reference_state = None
+    try:
+        _migration.schema_bootstrap(conn)
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='reference_state'").fetchone()
+        if row and row[0]:
+            import json
+            reference_state = json.loads(row[0])
+    except Exception:
+        reference_state = None
+    finally:
+        conn.close()
+    try:
+        return _pats.structure_morphology(reference_state, _dimensions())
+    except Exception:
+        return dict(_NEUTRAL_MORPHOLOGY)
+
+
+def _merge_morphology_with_seed(current_morphology, dims) -> dict:
+    """Compose the learned-pair treatment (``current_morphology``) with the
+    reference-seed structure. Reversible: an empty reference -> neutral seed
+    -> the current morphology passes through unchanged (today's look)."""
+    try:
+        from perception import patterns as _pats
+    except Exception:
+        try:
+            from ..perception import patterns as _pats  # type: ignore
+        except Exception:
+            return dict(current_morphology or _NEUTRAL_MORPHOLOGY)
+    seed = _reference_seed_morphology()
+    return _pats.merge_morphology(
+        current_morphology or dict(_NEUTRAL_MORPHOLOGY), seed)
 
 
 def _portrait_db_fallback(shape: dict, dims) -> dict:
@@ -1255,6 +1312,12 @@ def _portrait_shape() -> dict:
     # so persisted observations survive restarts and process boundaries.
     if not shape["available"]:
         shape = _portrait_db_fallback(shape, dims)
+    # Per-set reference-seed structure ("expand the algo"): make every
+    # session's face differ via a bounded, deterministic projection of its
+    # rolling reference — additive on the learned-pair treatment, reversible
+    # (empty reference -> neutral seed -> today's look).
+    shape["morphology"] = _merge_morphology_with_seed(
+        shape.get("morphology"), dims)
     return shape
 
 
