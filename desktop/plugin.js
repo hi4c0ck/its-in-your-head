@@ -3592,8 +3592,18 @@ function dominantLaneFor(toolName, rawLanes, capNow) {
         if (metric === 'live') {
           if (live === null) live = { metric: metric, idx: i };
         } else {
-          // most-prominent semantic lane = smallest row among semantic lanes
-          if (semantic === null || i < semantic.idx) semantic = { metric: metric, idx: i };
+          // v0.1.19 balancer: a whoop-up must not land on a 0.00 cell. A
+          // semantic lane is a landing candidate only when it carries a
+          // POSITIVE value (a real signal). After the support-gated ceiling,
+          // an empty/thin good or friction bank reads 0.0 -- those cells are
+          // skipped so the whoop-up falls through to the next positive lane,
+          // or live when no semantic lane has a real signal.
+          if ((pulseEntryValue(lane[i]) || 0) > 0) {
+            // most-prominent = smallest row among the positive-value lanes
+            if (semantic === null || i < semantic.idx) {
+              semantic = { metric: metric, idx: i };
+            }
+          }
         }
         break; // at most one row per tool per lane
       }
