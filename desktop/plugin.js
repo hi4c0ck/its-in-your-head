@@ -62,7 +62,12 @@ function getTrack(data, key) {
 function effective(value, confidence, available) {
   const v = value == null ? 0.5 : clamp01(value);
   const c = confidence == null ? (available && value != null ? 0.32 : 0) : clamp01(confidence);
-  return { value: v, strength: c, deviation: (v - 0.5) * 2 * c, present: value != null };
+  // Geometry is a pure function of the CURRENT value V: deviation = 2V - 1.
+  // The confidence-gated step already moved V on the python side, so re-multiplying
+  // deviation by confidence would compress the full-range dynamics again. `strength`
+  // (confidence) stays an independent data value for display, never folded back into
+  // the geometry (spec §5: three independent quantities, none substituting another).
+  return { value: v, strength: c, deviation: (v - 0.5) * 2, present: value != null };
 }
 
 function channelSet(data) {

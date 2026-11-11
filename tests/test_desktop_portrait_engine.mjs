@@ -174,4 +174,14 @@ for (const t of ['neutral-pencil', 'angular-pencil', 'soft-flow-study']) {
 }
 ok(true, 'the reference-seed structure differentiates every set, deterministically, across all templates')
 
+// --- adaptive model (spec §4): geometry is a PURE function of V --------
+// The confidence-gated step already moved V on the python side; the desktop
+// must render deviation = 2V - 1 and never re-multiply by confidence (that
+// would compress the full-range dynamics again). Source-shape pins:
+ok(/deviation:\s*\(\s*v\s*-\s*0\.5\s*\)\s*\*\s*2\s*,/.test(src),
+   'effective(): deviation = 2V - 1 (a pure function of the current value)')
+ok(!/deviation:\s*\(\s*v\s*-\s*0\.5\s*\)\s*\*\s*2\s*\*\s*c\b/.test(src),
+   'effective(): deviation is NOT re-multiplied by confidence (c)')
+ok(/strength: c/.test(src), 'effective(): confidence stays an independent `strength` data value')
+
 console.log('PASS portrait_engine: ' + n + ' assertions')

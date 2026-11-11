@@ -165,6 +165,7 @@ def test_portrait_fallback_empty_db_returns_documented_shape(tmp_path):
     dims = list(shape["dimensions"].keys())
     assert shape == {"available": False,
                      "dimensions": {d: None for d in dims},
+                     "targets": {d: None for d in dims},
                      "confidence": {d: None for d in dims},
                      "user": {d: None for d in dims},
                      "agent": {d: None for d in dims},

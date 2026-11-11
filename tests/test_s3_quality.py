@@ -105,7 +105,8 @@ def test_one_criticism_capped_delta(vecs):
     p.update_observed(_extreme_scores(-1.0))  # one maximally negative observation
     after = p.snapshot()["values"]
     for d in anchors.DIMENSIONS:
-        assert abs(after[d] - before[d]) <= portrait.MAX_STEP + 1e-9
+        # observed session-track step is capped at DELTA_MAX (spec §2)
+        assert abs(after[d] - before[d]) <= portrait.DELTA_MAX + 1e-9
         assert 0.0 <= after[d] <= 1.0
 
 
@@ -115,7 +116,7 @@ def test_three_independent_problems_exceed_cap():
     for _ in range(3):
         p.update_observed(_extreme_scores(-1.0))
     after = p.snapshot()["values"]["directness"]
-    assert abs(after - start) > portrait.MAX_STEP
+    assert abs(after - start) > portrait.DELTA_MAX
     assert after < start  # moved toward the negative evidence
 
 
@@ -173,6 +174,94 @@ def test_retain_days_drives_window():
     assert portrait.evidence_window_for(10) == 10
     assert portrait.Portrait(retain_days=7).window == 7
     assert portrait.Portrait().window == portrait.DEFAULT_RETAIN_DAYS
+
+
+# ---------------- adaptive observed model (spec §1-5) ----------------
+def test_target_full_range_monotone():
+    p = portrait.Portrait()  # strong_r default 0.5 -> T = 0.5 + R/(2*0.5)
+    for r, want in [(0.5, 1.0), (0.25, 0.75), (0.0, 0.5),
+                    (-0.25, 0.25), (-0.5, 0.0)]:
+        assert p._target(r, "directness") == pytest.approx(want)
+    # beyond the strong threshold it saturates at both range ends
+    assert p._target(1.0, "directness") == pytest.approx(1.0)
+    assert p._target(-1.0, "directness") == pytest.approx(0.0)
+
+
+def test_confidence_symmetric_in_abs_r():
+    p = portrait.Portrait()
+    # a strong NEGATIVE earns as much confidence as a strong POSITIVE
+    assert p._confidence(-0.5, "directness") == pytest.approx(
+        p._confidence(0.5, "directness"))
+    assert p._confidence(0.5, "directness") == pytest.approx(1.0)
+    assert p._confidence(0.25, "directness") == pytest.approx(0.5)
+    assert p._confidence(1.0, "directness") == pytest.approx(1.0)
+    # optional multipliers only cut, never invent a boost (absent -> 1.0)
+    assert p._confidence(0.5, "directness", agreement=0.5) == pytest.approx(0.5)
+    assert p._confidence(0.5, "directness", support=0.0) == pytest.approx(0.0)
+
+
+def test_two_sided_full_range_dynamics():
+    def drive(sign):
+        p = portrait.Portrait()
+        p._observed.values["directness"] = 0.52
+        seq = []
+        for _ in range(5):
+            p.update_observed(
+                {d: {"S": sign, "C": -sign, "R": 2.0 * sign}
+                 for d in anchors.DIMENSIONS})
+            seq.append(p.snapshot()["values"]["directness"])
+        return seq
+    hi = drive(+1.0)   # spec reference: 0.70 0.865 0.939 0.973 0.987
+    assert hi[0] == pytest.approx(0.700, abs=1e-3)
+    assert hi[4] == pytest.approx(0.987, abs=1e-3)
+    assert all(a <= b + 1e-12 for a, b in zip(hi, hi[1:]))
+    lo = drive(-1.0)   # spec reference: 0.340 0.153 0.069 0.031 0.014
+    assert lo[0] == pytest.approx(0.340, abs=1e-3)
+    assert lo[4] == pytest.approx(0.014, abs=1e-3)
+    assert all(a >= b - 1e-12 for a, b in zip(lo, lo[1:]))
+
+
+def test_absence_of_positive_does_not_drive_to_zero():
+    # Neutral evidence (R=0) carries ZERO confidence (Q = |R|/r_d = 0): the
+    # value does not move AT ALL, and the target is neutral 0.5, NOT 0.
+    # Absence of a positive signal is not evidence of absence (spec §4) --
+    # neither time nor low confidence invents a downward push.
+    p = portrait.Portrait()
+    p._observed.values["directness"] = 0.9
+    for _ in range(6):
+        p.update_observed({d: {"S": 0.0, "C": 0.0, "R": 0.0}
+                           for d in anchors.DIMENSIONS})
+    snap = p.snapshot()
+    assert snap["values"]["directness"] == pytest.approx(0.9)  # unmoved (Q=0)
+    assert snap["targets"]["directness"] == pytest.approx(0.5)  # neutral, not 0
+    assert snap["confidences"]["directness"] == pytest.approx(0.0)
+
+
+def test_three_independent_quantities_diverge():
+    p = portrait.Portrait()
+    p.update_observed({d: {"S": 0.6, "C": -0.4, "R": 1.0}
+                       for d in anchors.DIMENSIONS})
+    snap = p.snapshot()
+    d = "directness"
+    val, tgt = snap["observed"]["values"][d], snap["observed"]["targets"][d]
+    conf, res = snap["confidences"][d], snap["resemblance"][d]
+    assert tgt == pytest.approx(1.0)                 # strong positive -> top
+    assert conf == pytest.approx(portrait.CONF_BETA)  # 0.25 * Q, from 0
+    assert val == pytest.approx(0.5 + portrait.DELTA_MAX)
+    assert val != tgt and conf != val and conf != res  # none substitutes another
+
+
+def test_desktop_deviation_is_pure_function_of_value():
+    # spec §4: the geometry receives the already-updated V via deviation = 2V-1
+    # and must NOT re-multiply by confidence. Pin the formula end to end.
+    p = portrait.Portrait()
+    p._observed.values["directness"] = 0.72
+    p._observed.confidence["directness"] = 0.30  # deliberately low
+    snap = p.snapshot()
+    deviation = 2 * snap["values"]["directness"] - 1
+    assert deviation == pytest.approx(0.44, abs=1e-9)
+    # ...and is NOT the old (2V-1)*c product:
+    assert deviation != pytest.approx((2 * 0.72 - 1) * 0.30)
 
 
 # ---------------------------------------------------------------- renderer

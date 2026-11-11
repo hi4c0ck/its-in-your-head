@@ -1261,6 +1261,7 @@ def _portrait_shape() -> dict:
     shape = {
         "available": False,
         "dimensions": {d: None for d in dims},
+        "targets": {d: None for d in dims},
         "confidence": {d: None for d in dims},
         "user": {d: None for d in dims},
         "agent": {d: None for d in dims},
@@ -1288,11 +1289,14 @@ def _portrait_shape() -> dict:
                 dim_src = result.get("dimensions") or result.get("resemblance") \
                     or result.get("values") or {}
                 conf_src = result.get("confidence") or {}
+                targets_src = result.get("targets") or {}
                 user_src = result.get("user") or {}
                 agent_src = result.get("agent") or {}
                 for d in dims:
                     if isinstance(dim_src, dict) and dim_src.get(d) is not None:
                         shape["dimensions"][d] = dim_src[d]
+                    if isinstance(targets_src, dict) and targets_src.get(d) is not None:
+                        shape["targets"][d] = targets_src[d]
                     if isinstance(conf_src, dict) and conf_src.get(d) is not None:
                         shape["confidence"][d] = conf_src[d]
                     if isinstance(user_src, dict) and user_src.get(d) is not None:

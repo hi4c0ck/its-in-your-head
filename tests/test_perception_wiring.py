@@ -108,7 +108,7 @@ def test_portrait_view_perception_empty_shape():
     eng = _eng()
     view = eng.portrait_view()
     # S16: the two additive keys ride along (neutral on a fresh engine).
-    assert set(view) == {"available", "dimensions", "confidence",
+    assert set(view) == {"available", "dimensions", "targets", "confidence",
                          "user", "agent", "perception",
                          "live_expression", "morphology"}
     assert view["live_expression"]["stage"] == "none"

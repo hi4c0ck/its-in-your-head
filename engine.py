@@ -1339,6 +1339,10 @@ class Engine:
                   if has_observed else {d: None for d in dims})
         conf = ({d: snap.get("confidences", {}).get(d) for d in dims}
                 if has_observed else {d: None for d in dims})
+        # Additive third quantity (spec §5): where the latest evidence points
+        # (the recomputed target), kept separate from `values` and `conf`.
+        targets = ({d: snap.get("targets", {}).get(d) for d in dims}
+                   if has_observed else {d: None for d in dims})
         # Agent (interpreted) track: values only when reasoning
         # evidence exists; otherwise None, never the neutral defaults.
         agent = ({d: interp.get(d) for d in dims} if has_interpreted
@@ -1349,6 +1353,7 @@ class Engine:
             # None values (structural defaults are NOT data).
             return {"available": False,
                     "dimensions": {d: None for d in dims},
+                    "targets": {d: None for d in dims},
                     "confidence": {d: None for d in dims},
                     "user": {d: None for d in dims},
                     "agent": {d: None for d in dims},
@@ -1356,7 +1361,7 @@ class Engine:
                     "live_expression": self._live_expression_display(),
                     "morphology": self.morphology_view()}
         return {"available": True,
-                "dimensions": values, "confidence": conf,
+                "dimensions": values, "targets": targets, "confidence": conf,
                 "user": dict(values), "agent": agent,
                 "perception": perception,
                 "live_expression": self._live_expression_display(),
