@@ -75,10 +75,10 @@ function iihyJNoise(nx, ny, seed, feat) {
 function iihyJWave(x) {
   const PI = 3.1416
   const u = Math.pow(x, 0.67)   // the X-space transformation
-  // The owner's X-space formula (the latest) - v34: KEEP ONLY THE FUNDAMENTAL (πu); the 2π + 3π
-  // harmonics were the "other temp wave" that started swinging; removed -> a single smooth ocean swell.
-  return 0.400
-    - 0.050 * Math.sin(PI * u) + 0.310 * Math.cos(PI * u)
+  // v42: KILL THE COSINE HARMONIC (the 0.310·cos(πu) that piled a hard specular pool on the
+  // ground dither: 0.71 right (x=0) -> 0.09 left (x=1)). Single arch = the wavy semantic (blank start ->
+  // big ampl -> solid descent -> clear end): 0.400·sin(πu), peak at center, 0 at both edges.
+  return 0.400 * Math.sin(PI * u)
 }
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1

@@ -2046,11 +2046,15 @@ function iihyJNoise(nx, ny, seed, feat) {
 function iihyJWave(x) {
   const PI = 3.1416
   const u = Math.pow(x, 0.67)   // the X-space transformation (the owner's "formula should be in X-space")
-  // The owner's X-space formula (the latest) - v34: KEEP ONLY THE FUNDAMENTAL (πu). The 2π + 3π
-  // harmonics were the "other temp wave" that started swinging after a while; removed them so the
-  // wave is a single smooth ocean swell (no secondary oscillation).
-  return 0.400
-    - 0.050 * Math.sin(PI * u) + 0.310 * Math.cos(PI * u)
+  // v42: KILL THE COSINE HARMONIC. v34 removed the 2π+3π terms ("the other temp wave"), but the
+  // leftover fundamental's 0.310·cos(πu) piled a HARD SPECULAR POOL onto the ground dither:
+  // profile 0.71 (right, x=0) -> 0.09 (left, x=1) = a 7.9x asymmetric pool. As the parallax drift slides
+  // the noise field under it, step-7 bricks pop in and out across the ground — the "later
+  // things going crazy" mess. Now a single arch (the owner's wavy semantic: blank start ->
+  // big ampl -> solid descent -> clear end): 0.400·sin(πu) — peak 0.40 at the center (under
+  // the face; the vignette + line-folds keep the ground a subtle swell), 0 at both edges.
+  // No cosine term, no pool, no secondary oscillation.
+  return 0.400 * Math.sin(PI * u)
 }
 function iiyhJContrast(c) {
   if (c >= IYH_J.accentConf) return 1
