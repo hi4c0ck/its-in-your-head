@@ -3487,25 +3487,35 @@ function pulseCommitLane(state, metric) {
 // VISIBLE lane content actually changes (identity of the polled object
 // must not re-ingest on every render).
 function dominantLaneFor(toolName, rawLanes, capNow) {
-  // v0.1.12 (bubble fix): the lane where a tool is MOST prominent — the
-  // smallest visible row index across all lanes, tie-break by PULSE_LANE_ORDER
-  // (live first). The activity whoop-up sprite lands HERE (the tool's actual
-  // dot-matrix) instead of always the live lane, so the bubbles spread across
-  // the columns where the tools are, rather than all clustering in the live
-  // column. Returns { metric, idx } or { metric: null, idx: -1 }.
+  // v0.1.12 (bubble fix + spread): where a tool's whoop-up lands. Its most-
+  // PROMINENT SEMANTIC lane (goal/good/friction — the smallest visible row
+  // among them) wins over live; live is the FALLBACK (a tool only in live).
+  // Rationale: live is the generic momentum lane, so routing every whoop-up
+  // there is exactly the "all in one column" bug. A tool flagged in a
+  // semantic lane whoops THERE, so goal/good/friction stay alive instead of
+  // starving. The momentum DATA still commits to live (dataLane), so live's
+  // own values/dots are unaffected. Returns { metric, idx } or
+  // { metric: null, idx: -1 }.
   var cap = Math.max(1, Math.floor(Number(capNow) || 1));
-  var best = null;
+  var semantic = null;
+  var live = null;
   PULSE_LANE_ORDER.forEach(function (metric) {
     var lane = (rawLanes && rawLanes[metric]) || [];
     for (var i = 0; i < lane.length; i++) {
       if (i >= cap) break;
       if (lane[i] && lane[i].tool_name === toolName) {
-        if (best === null || i < best.idx) best = { metric: metric, idx: i };
+        if (metric === 'live') {
+          if (live === null) live = { metric: metric, idx: i };
+        } else {
+          // most-prominent semantic lane = smallest row among semantic lanes
+          if (semantic === null || i < semantic.idx) semantic = { metric: metric, idx: i };
+        }
         break; // at most one row per tool per lane
       }
     }
   });
-  return best ? { metric: best.metric, idx: best.idx } : { metric: null, idx: -1 };
+  var pick = semantic || live;
+  return pick ? { metric: pick.metric, idx: pick.idx } : { metric: null, idx: -1 };
 }
 // v0.1.12 (distinct dequeued dots): collapse a batch of tool_start events to
 // ONE per tool — its LATEST (newest id). A tool called N times in a batch
