@@ -147,12 +147,12 @@ def validate_onnx_signature(model_dir: Path, manifest: dict) -> dict:
 
 def run_smoke(model_dir: Path, manifest_path: Path) -> dict:
     """CPU smoke inference through the PM-ensured onnx-worker env."""
-    import pm.client
+    import pm
 
     project = ROOT / "onnx-worker"
     # ensure_project_environment returns the venv interpreter path itself
     # (verified: <root>/.../venv/Scripts/python.exe on Windows).
-    python = pm.client.ensure_project_environment(
+    python = pm.ensure_project_environment(
         "its-in-your-head-onnx", project=project, explicit=True)
     if not Path(python).is_file():
         raise RuntimeError(f"PM env interpreter not found: {python}")

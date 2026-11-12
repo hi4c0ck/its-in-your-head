@@ -15,7 +15,6 @@ dimensions' lines are byte-identical to v1.0.0.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from . import encoder
@@ -202,19 +201,32 @@ def validate_bank(bank: AnchorBank) -> None:
 
 
 def resolve_data_dir(explicit: str | Path | None = None) -> Path:
-    """Plugin data dir. Never the plugin install dir (wiped by update)."""
+    """Plugin data dir. Never the plugin install dir (wiped by update).
+
+    Same resolution as storage/database.py and
+    perception/worker_client.py: the active profile's plugin-data dir
+    via plugins.plugin_storage (hermes_constants fallback when the
+    plugins package is not importable) — never a silent home-dir
+    catalog. No env override: tests pass explicit; user
+    configuration is a declared plugin setting, not a free-form
+    env var.
+    """
     if explicit is not None:
         return Path(explicit)
-    env = os.environ.get("ITS_IN_YOUR_HEAD_DATA_DIR")
-    if env:
-        return Path(env)
     try:  # pragma: no cover - lazy import; no I/O at module load
-        from hermes_cli.plugin_storage import plugin_db  # noqa: F401
-        # Storage path itself is derived by the caller when available.
+        from plugins.plugin_storage import plugin_data_dir
+
+        return plugin_data_dir(encoder.PLUGIN_ID)
     except Exception:
-        pass
-    home = Path.home()
-    return home / "hermes-plugin-data" / encoder.PLUGIN_ID
+        try:
+            from hermes_constants import get_hermes_home
+
+            return Path(get_hermes_home()) / "plugin-data" / encoder.PLUGIN_ID
+        except Exception:
+            raise RuntimeError(
+                "its-in-your-head: cannot resolve the plugin data dir: "
+                "Hermes plugin storage is unavailable. Run under Hermes "
+                "or pass an explicit data dir.")
 
 
 def get_cache_path(data_dir: str | Path) -> Path:

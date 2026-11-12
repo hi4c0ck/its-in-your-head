@@ -9,9 +9,13 @@ Contract (from onnx-worker/worker.py):
   any error -> {"request_id":...,"error":"<class>: <msg>"}
 Startup verifies sha256 of every manifest file; non-zero exit on failure.
 
-Runtime env is the verified PM API:
-  pm.client.ensure_project_environment("its-in-your-head-onnx",
-      project=onnx-worker dir, explicit=True) -> interpreter path itself.
+Runtime env is a READ-ONLY pm.environment_python() lookup — no
+provisioning on the encode path. The env is provisioned only by
+explicit user actions (/mirror engine enable, maintainer --repin) via
+pm.ensure_project_environment(..., explicit=True).
+The worker subprocess runs in an isolated env (_worker_env()): a
+minimal allowlist, so it never inherits Hermes provider keys,
+*_TOKEN / *_SECRET, PYTHONPATH or PYTHONHOME.
 ``pm`` import is guarded: unavailable means runtime unavailable, never raises
 at import time. The client never downloads a model (enable flow owns that).
 """
@@ -20,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -51,7 +56,13 @@ def _safe_model_dirname(model_id: str) -> str:
 
 
 def resolve_data_root() -> Path:
-    """Same resolution as storage/database.py / tools/fetch_onnx_model.py."""
+    """Same resolution as storage/database.py / tools/fetch_onnx_model.py.
+
+    The active profile's plugin-data dir, via plugin_storage — never a
+    silent home-dir fallback: that would land outside the active
+    profile. When Hermes storage is unavailable this is an explicit
+    error, not a guess.
+    """
     try:
         from plugins.plugin_storage import plugin_data_dir
 
@@ -60,11 +71,30 @@ def resolve_data_root() -> Path:
         try:
             from hermes_constants import get_hermes_home
 
-            return get_hermes_home() / "plugin-data" / PLUGIN_ID
+            return Path(get_hermes_home()) / "plugin-data" / PLUGIN_ID
         except Exception:
-            from pathlib import Path as _P
+            raise RuntimeError(
+                "its-in-your-head: cannot resolve the plugin data dir: "
+                "Hermes plugin storage is unavailable. Run under Hermes "
+                "or pass an explicit model dir.")
 
-            return _P.home() / ".hermes" / "plugin-data" / PLUGIN_ID
+
+def _worker_env() -> dict[str, str]:
+    """Isolated env for the worker subprocess.
+
+    The ONNX worker must not inherit Hermes runtime state: provider
+    keys, *_TOKEN / *_SECRET, PYTHONPATH, PYTHONHOME. Copy only a
+    minimal allowlist, each only when present in the parent:
+
+    - always: PATH, HOME, LANG, LC_ALL
+    - Windows: SYSTEMROOT, TEMP, TMP
+
+    Regression: tests/test_worker_env_isolation.py
+    """
+    names = ("PATH", "HOME", "LANG", "LC_ALL")
+    if os.name == "nt":
+        names += ("SYSTEMROOT", "TEMP", "TMP")
+    return {n: os.environ[n] for n in names if n in os.environ}
 
 
 def resolve_model_dir(model_dir: str | Path | None = None) -> Path:
@@ -181,11 +211,29 @@ class OnnxWorkerClient:
         if self._pm is None:
             raise Tier1Failure("runtime-unavailable", "pm is not importable")
         try:
-            # Verified: returns the interpreter path itself.
-            python = self._pm.client.ensure_project_environment(
-                PM_ENV_NAME, project=ONNX_WORKER_DIR, explicit=True)
+            lookup = self._pm.environment_python
+        except AttributeError:
+            raise Tier1Failure(
+                "runtime-unavailable",
+                "pm facade lacks environment_python; "
+                "Tier-1 ONNX requires the Hermes PM API")
+        try:
+            # READ-ONLY lookup: the interpreter of the env provisioned by
+            # an explicit /mirror engine enable (or maintainer --repin),
+            # or None when the env is not installed. No provisioning and
+            # no state writes on the encode path — the Tier-0 fallback
+            # owns that case.
+            python = lookup(PM_ENV_NAME)
         except Exception as exc:
-            raise Tier1Failure("runtime-unavailable", f"PM env ensure failed: {type(exc).__name__}: {exc}") from exc
+            # A corrupt selection record / mid-write venv degrades to
+            # Tier-0 instead of crashing the encode path.
+            raise Tier1Failure(
+                "runtime-unavailable",
+                f"PM env read failed: {type(exc).__name__}: {exc}") from exc
+        if python is None:
+            raise Tier1Failure(
+                "runtime-unavailable",
+                "PM env not provisioned; run /mirror engine enable")
         if not Path(str(python)).is_file():
             raise Tier1Failure("runtime-unavailable", f"PM env interpreter not found: {python}")
         self.interpreter = str(python)
@@ -202,10 +250,13 @@ class OnnxWorkerClient:
         if model_status == "hash-mismatch":
             raise Tier1Failure("hash-mismatch", "; ".join(merr) or "hash mismatch")
         try:
+            # Isolated env: the worker never inherits Hermes provider
+            # keys, *_TOKEN / *_SECRET, PYTHONPATH or PYTHONHOME.
             self._proc = subprocess.Popen(
                 [interp, str(self.worker_path), str(self.model_dir), str(self.manifest_path)],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1)
+                text=True, bufsize=1,
+                env=_worker_env())
         except Exception as exc:
             raise Tier1Failure("spawn-failed", f"{type(exc).__name__}: {exc}") from exc
         # ping handshake on start

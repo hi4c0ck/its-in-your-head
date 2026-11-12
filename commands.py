@@ -417,7 +417,7 @@ def _op_pm_env():
         from .perception import worker_client as _wc
     except Exception:
         from perception import worker_client as _wc  # type: ignore[no-redef]
-    python = pm.client.ensure_project_environment(
+    python = pm.ensure_project_environment(
         _wc.PM_ENV_NAME, project=_wc.ONNX_WORKER_DIR, explicit=True)
     if not _P(str(python)).is_file():
         raise RuntimeError(f"PM env interpreter not found: {python}")
