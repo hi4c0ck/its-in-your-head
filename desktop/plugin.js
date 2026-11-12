@@ -1989,8 +1989,8 @@ const IYH_J = {
   waveAmp: 6,            // v20: the WAVE offset amplitude (noise-units) - how hard the mask ripples in the wave shape
   foldOffset: 3,         // v28: the SECONDARY fold mask = the SVG lines shifted RIGHT this many pooled bricks (the "stretch" from the original position to the goal; 1 was too tiny) -> prevents mess near the lines
   lineFoldThr: 0.5,   // v20 coverage (0..1) at/above which the wave FOLDS (damps) at a brick -> crisp lines, no mess near the SVG lines
-  glitchEvery: 90,    // v19 the GLITCH burst cadence: frames between glitch bursts (~7.5s at 12fps)
-  glitchLen: 10,       // v19 how long a glitch burst lasts, in frames (~0.83s) -> a brief rip, then snap-back
+  glitchEvery: 90,    // v19 GLITCH cadence — RETIRED in v0.1.26: the glitch is now FRICTION-DRIVEN (fires only when a PULSE friction-lane bubble lands, via IYH_FRICTION_TRIGGER). No longer read by the renderer; kept for schema continuity only.
+  glitchLen: 10,       // how long a friction-driven glitch rip lasts, in frames (~0.83s at 12fps) — the window after a friction bubble lands
   floor: 0.30,            // dimmest line-brick gain (brighter so bricks are clearly visible, not faint)
   lift: 0.06,             // brightness lift -> effFloor = floor + lift
   tint: 0.10,             // gamma: pow(v.c, 1 + 1.5*tint)
@@ -2217,6 +2217,16 @@ function iiyhRasterizeTemplateCoverage(templateId, invert = false) {
     } catch (e) { resolve(null) }
   })
 }
+// v0.1.26: the SHARED friction trigger. A PULSE friction-lane bubble landing
+// (PulseLanes -> iiyhFrictionPulse()) stamps `at`; the brick-mosaic portrait
+// renderer reads it in its per-frame loop and glitches ONLY inside the
+// friction window (see iiyhBrickCanvasDraw) — the old periodic-timer glitch
+// is retired. `at === 0` = never pulsed -> no glitch. Wall-clock (ms), so
+// the PULSE side and the brick canvas need no shared frame counter.
+const IYH_FRICTION_TRIGGER = { at: 0 }
+function iiyhFrictionPulse() {
+  IYH_FRICTION_TRIGGER.at = (typeof performance !== 'undefined') ? performance.now() : Date.now()
+}
 // Per-frame CANVAS renderer. `cov` is the 214x240 coverage grid (default the baked
 // IYH_FACE_COV_BYTES; a template-rasterized grid when a drawing template is selected).
 function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
@@ -2243,12 +2253,18 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const secs = frame / 60
   const dOffX = -Math.sin((secs / 10) * 6.2832) * ((pn - 1) / 2) * (IYH_J.ditherDriftX || 1)
   const dOffY =  Math.sin((secs / 14) * 6.2832) * ((pm - 1) / 2) * (IYH_J.ditherDriftY || 1)
-  // v19: the GLITCH burst (a TV-tracking glitch). Mostly the stable dither; then a periodic
-  // random horizontal band rips sideways + takes a glitch (RGB-split) color + its bricks
-  // scramble, then snaps back. Deterministic (seeded from the burst index).
-  const gEvery = IYH_J.glitchEvery || 90, gLen = IYH_J.glitchLen || 10
-  const gActive = (frame % (gEvery + gLen)) < gLen
-  const gIdx = Math.floor(frame / (gEvery + gLen))
+  // v0.1.26: the GLITCH burst is now FRICTION-DRIVEN — the periodic timer
+  // (glitchEvery) is retired. The magenta rip fires ONLY inside the friction
+  // window: one `gLen`-frame window after a PULSE friction-lane bubble landed
+  // (IYH_FRICTION_TRIGGER, stamped by iiyhFrictionPulse()). Each pulse is
+  // seeded by the trigger TIME, so successive bursts differ; no timer, no
+  // random push. Between pulses the portrait is the stable dither.
+  const gLen = IYH_J.glitchLen || 10
+  const gNow = (typeof performance !== 'undefined') ? performance.now() : Date.now()
+  const gWin = gLen * (1000 / IYH_BRICK_FPS)   // the friction window, ms (glitchLen frames)
+  const gAge = gNow - IYH_FRICTION_TRIGGER.at
+  const gActive = IYH_FRICTION_TRIGGER.at > 0 && gAge >= 0 && gAge <= gWin
+  const gIdx = Math.floor(IYH_FRICTION_TRIGGER.at / 250)   // per-pulse band seed (stable across the window)
   let gBand = 0, gH = 0, gShift = 0, gColor = null
   if (gActive) {
     gBand = 30 + Math.floor(iihyJHash(gIdx * 31 + 1, gIdx * 7 + 2, IYH_J.ditherSeed + 100) * 15)   // the face's LIT middle (eye/nose), so the rip always shows
@@ -2344,7 +2360,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   }
   ctx.globalAlpha = 1
 }
-// iiyhJCanvas v20: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + DITHER-MASK DRIFT (v18, THE SIMPLE model): face position FIXED; each face brick's opacity = its base brightness * a DRIFTING value-noise DITHER MASK (fit to the image size via IYH_J.ditherFeat, drifting NON-diagonally via ditherDriftX/Y) -> the face shimmers with the drift, no per-brick state, no thin-line sim, no impulse arrays. + contain-fit + PULSE fills remaining height. Tune IYH_J.ditherFeat/ditherFloor/ditherDriftX/ditherDriftY/ditherSeed + waveAmp/foldOffset/lineFoldThr (v20 wave-formula fold) + glitchEvery/glitchLen (sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
+// iiyhJCanvas v20: transparent SVG-native brick-mosaic portrait — pure-JS base64 decode + baked fallback + grout + arccos contrast + accent (off the canvas) + template-following DARKNESS raster (bright) + FOCUS-SHIFT flicker (faint parts lift to focusFloor, main lines stay full; NO polarity inversion) + DITHER-MASK DRIFT (v18, THE SIMPLE model): face position FIXED; each face brick's opacity = its base brightness * a DRIFTING value-noise DITHER MASK (fit to the image size via IYH_J.ditherFeat, drifting NON-diagonally via ditherDriftX/Y) -> the face shimmers with the drift, no per-brick state, no thin-line sim, no impulse arrays. + contain-fit + PULSE fills remaining height. Tune IYH_J.ditherFeat/ditherFloor/ditherDriftX/ditherDriftY/ditherSeed + waveAmp/foldOffset/lineFoldThr (v20 wave-formula fold) + glitchLen (v0.1.26: GLITCH is FRICTION-DRIVEN — fires only inside the window after a PULSE friction-lane bubble lands; glitchEvery retired; sample: desktop/iiyh-drift-sample.html). The 850ms model poll stays untouched.
 // Self-driven 12fps canvas renderer. The pane's OWN rAF loop (throttled to
 // IYH_BRICK_FPS) draws the field each frame — not a static image. Started when
 // active, re-fit on resize, stopped on cleanup. Returns the <canvas> ref to attach.
@@ -4465,8 +4481,18 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
   useEffect(function () {
     var res = coord.ingest(rawLanes, cap, { reducedMotion: reducedRef.current });
     if (res.immediate) {
+      // Reduced motion: lanes commit STATICALLY (no bubble animates) -> the
+      // glitch (a visual animation) must NOT fire. No pulse.
       setTick5(function (v) { return v + 1; });
       return;
+    }
+    // v0.1.26: FRICTION-DRIVEN portrait glitch — when a friction-lane bubble
+    // is generated this ingest (arrival / rank move; exits commit statically
+    // and never animate), stamp the shared trigger so the brick-mosaic
+    // portrait glitches for one window. No timer: between friction landings
+    // the portrait stays the stable dither.
+    if (res.transitions && res.transitions.some(function (t) { return t && t.metric === 'friction'; })) {
+      iiyhFrictionPulse();
     }
     var active = (res.active || []).slice();
     active.forEach(scheduleArrival);
