@@ -110,6 +110,28 @@ def _metrics_line() -> str:
         return "mirror: no data yet"
 
 
+def _pulse_cell(cell, source: bool = False) -> str:
+    """One PULSE channel cell, compact: `state value (sup/req)[ src]`.
+
+    Never a raw dict dump: the value is the display number (None -> an
+    honest dash), the state is the readiness word, the support is the
+    labelled-count against its readiness threshold, and `source=True`
+    appends the friction dominant-source tag when one won.
+    """
+    if not isinstance(cell, dict):
+        return _fmt(cell)
+    value = cell.get("value")
+    val_s = "—" if value is None else f"{value:.2f}"
+    state = str(cell.get("state", "?"))
+    sup = cell.get("support") or {}
+    cell_s = f"{state} {val_s} ({sup.get('count', 0)}/{sup.get('required', 0)})"
+    if source:
+        src = cell.get("dominant_source")
+        if src:
+            cell_s += f" [{src}]"
+    return cell_s
+
+
 def _pulse_text() -> str:
     if _api is None:
         return "pulse: no data yet"
@@ -117,16 +139,26 @@ def _pulse_text() -> str:
         shape = _api._pulse_shape()
     except Exception:
         return "pulse: no data yet"
-    rows = shape.get("rows") or []
+    rows = [r for r in (shape.get("rows") or []) if isinstance(r, dict)]
     if not rows:
         return "pulse: no data yet (engine lands in S4)"
-    lines = ["pulse: " + " | ".join(str(c) for c in shape.get("columns", []))]
-    for row in rows[:8]:
-        if isinstance(row, dict):
-            lines.append("  " + " | ".join(
-                f"{c}={_fmt(row.get(c))}" for c in shape.get("columns", [])))
-        else:
-            lines.append(f"  {_fmt(row)}")
+    # Compact aligned table: tool label + goal/good/friction cells. The
+    # legacy 'unlabeled' column is dropped — the row carries no such cell
+    # (it printed a dead '—' in the raw dump).
+    shown = rows[:8]
+    labels = [str(r.get("tool_name", "?")) for r in shown]
+    goal = [_pulse_cell(r.get("goal")) for r in shown]
+    good = [_pulse_cell(r.get("good")) for r in shown]
+    fric = [_pulse_cell(r.get("friction"), source=True) for r in shown]
+    w_label = min(max(max(len(x) for x in ["tool", *labels]), 4), 20)
+    w_goal = max(len("goal"), *(len(x) for x in goal))
+    w_good = max(len("good"), *(len(x) for x in good))
+    lines = [f"pulse: {len(rows)} tool(s)"]
+    lines.append(f"  {'tool':<{w_label}} {'goal':<{w_goal}} {'good':<{w_good}} friction")
+    for label, g, gd, f in zip(labels, goal, good, fric):
+        lines.append(f"  {label:<{w_label}} {g:<{w_goal}} {gd:<{w_good}} {f}")
+    if len(rows) > 8:
+        lines.append(f"  … {len(rows) - 8} more tool(s)")
     return "\n".join(lines)
 
 
