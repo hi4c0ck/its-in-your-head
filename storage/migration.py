@@ -56,8 +56,13 @@ from __future__ import annotations
 import logging
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION  # alias
+# v9 (§8, privacy hardening v0.1.28): one-time legacy scrub that NULLs the
+# raw-text event columns (events.user_message / events.error_message) on any
+# pre-v9 database, so the no-persist-raw-text invariant holds for OLD records
+# too. Safe timestamps, status codes, numeric counters + approved derived
+# vectors are preserved.
 
 _logger = logging.getLogger(__name__)
 
@@ -399,6 +404,24 @@ def _add_missing_columns(conn: sqlite3.Connection, existing: list) -> None:
                 f"ALTER TABLE events ADD COLUMN {name} {col_type}")
 
 
+def _scrub_legacy_raw_fields(conn: sqlite3.Connection) -> None:
+    """§8 one-time legacy privacy scrub (v9). NULL the raw-text event columns
+    on pre-v9 databases: old rows may still carry a raw user_message / an
+    arbitrary error_message from before the v0.1.3 P0 no-persist rule. Only
+    the two raw-text columns are touched; safe timestamps, status codes,
+    numeric counters, + approved derived vectors are preserved. Idempotent:
+    a no-op when the columns are already NULL."""
+    cols = _table_columns(conn, "events")
+    if "user_message" in cols:
+        conn.execute(
+            "UPDATE events SET user_message = NULL "
+            "WHERE user_message IS NOT NULL")
+    if "error_message" in cols:
+        conn.execute(
+            "UPDATE events SET error_message = NULL "
+            "WHERE error_message IS NOT NULL")
+
+
 def _create_indexes(conn: sqlite3.Connection) -> None:
     for stmt in _INDEX_STATEMENTS:
         conn.execute(stmt)
@@ -527,6 +550,9 @@ def migrate(conn: sqlite3.Connection,
         _create_pulse_tables(conn)
         _create_pattern_affinity_history(conn)
         _create_pattern_bank(conn)
+        # §8 (v9): one-time legacy privacy scrub of the raw-text event
+        # columns (idempotent; no-op when already NULL).
+        _scrub_legacy_raw_fields(conn)
         conn.execute(_META_TABLE_DDL)
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",

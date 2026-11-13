@@ -254,9 +254,85 @@ def test_reset_empty_db_ok(tmp_path):
     r = c.post("/reset")
     assert r.status_code == 200
     assert r.json() == {"wiped": {"events": 0, "portrait_history": 0,
-                                   "pulse_tools": 0, "pulse_prototypes": 0,
-                                   "pulse_goal": 0, "pulse_capsules": 0},
+                                   "pattern_affinity_history": 0,
+                                   "pattern_bank": 0, "pulse_tools": 0,
+                                   "pulse_prototypes": 0, "pulse_goal": 0,
+                                   "pulse_capsules": 0, "meta_keys": 0},
                         "reset": True}
+
+
+def test_reset_wipes_newer_analytical_state(tmp_path):
+    """§7.1: the expanded inventory covers pattern_bank + pattern_affinity_
+    history + the upset meta keys + pulse vectors; config + schema survive."""
+    c = _client(tmp_path, seed=True)
+    conn = sqlite3.connect(tmp_path / "data.db")
+    api._migration.schema_bootstrap(conn)  # ensure pattern_bank + affinity
+    conn.execute("INSERT INTO pattern_bank (pattern_name, prompt_anchor, "
+                 "agent_anchor, evidence, updated_at) "
+                 "VALUES ('exec-pattern', X'00', X'00', 3, 1.0)")
+    conn.execute("INSERT INTO pattern_affinity_history (id, ts, top_pattern, "
+                 "evidence) VALUES (1, 1.0, 'exec', 3)")
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('upset_fstate','0.4')")
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('upset_mood','tired')")
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('plugin_settings','{}')")
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version','9')")
+    conn.execute("INSERT INTO pulse_goal (id, ts, vector, backend) "
+                 "VALUES (1, 0.0, X'FF', 'tier-1-onnx')")
+    conn.commit()
+    conn.close()
+    r = c.post("/reset")
+    assert r.json()["reset"] is True
+    conn = sqlite3.connect(tmp_path / "data.db")
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM pattern_bank").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM pattern_affinity_history").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM pulse_goal").fetchone()[0] == 0
+        # §7.1: the upset + reference meta keys are wiped ...
+        assert conn.execute(
+            "SELECT COUNT(*) FROM meta WHERE key IN "
+            "('reference_state','upset_fstate','upset_mood',"
+            "'upset_mood_history')").fetchone()[0] == 0
+        # ... but user config + schema metadata survive an ordinary reset.
+        keys = dict(
+            conn.execute("SELECT key, value FROM meta").fetchall())
+        assert keys.get("plugin_settings") == "{}"
+        assert keys.get("schema_version") == "9"
+    finally:
+        conn.close()
+
+
+def test_reset_reports_failure_when_db_unavailable(tmp_path, monkeypatch):
+    """§7.3: a DB error during the wipe is never reported as success."""
+    c = _client(tmp_path, seed=True)
+
+    def _boom():
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(api, "_connect", _boom)
+    r = c.post("/reset")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["reset"] is False
+    assert "wiped" not in body or all(v == 0 for v in body["wiped"].values())
+
+
+def test_no_route_echoes_raw_event_text(tmp_path):
+    """§9.5: even raw-text left in the DB (a pre-sanitization record) is
+    not echoed by any read route — the raw-content boundary holds
+    end-to-end across every GET surface."""
+    c = _client(tmp_path, seed=True)
+    sentinel = "SENTINEL_RAW_TEXT_9F3A"
+    conn = sqlite3.connect(tmp_path / "data.db")
+    conn.execute("UPDATE events SET user_message=?, error_message=? "
+                 "WHERE id=1", (sentinel, sentinel))
+    conn.commit()
+    conn.close()
+    for path in ("/metrics", "/recent", "/context", "/settings",
+                 "/drift", "/portrait", "/pulse", "/engine-status"):
+        r = c.get(path)
+        assert r.status_code == 200
+        assert sentinel not in r.text, f"{path} leaked raw event text"
 
 
 # --- pinned routes still live ---------------------------------------------

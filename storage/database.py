@@ -45,6 +45,16 @@ def connect() -> sqlite3.Connection:
         conn = sqlite3.connect(str(_db_path_override))
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        # §8: physically overwrite deleted pages so an ordinary DELETE does
+        # not leave the raw bytes recoverable from the free list.
+        conn.execute("PRAGMA secure_delete=ON")
         return conn
     from plugins.plugin_storage import plugin_db
-    return plugin_db(PLUGIN_ID)
+    conn = plugin_db(PLUGIN_ID)
+    # §8: honor secure_delete on the host-managed connection too (best
+    # effort — the host may open the file read-only).
+    try:
+        conn.execute("PRAGMA secure_delete=ON")
+    except Exception:
+        pass
+    return conn

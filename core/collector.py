@@ -55,6 +55,13 @@ def set_ctx(ctx) -> None:
         _settings_snapshot = settings.load(ctx)
     except Exception:
         logger.exception("its-in-your-head: settings snapshot failed")
+    # §6: push the live retention value to the worker so its pruning path
+    # actually consumes the configured observation.retain_days (best effort —
+    # a failure here only means the worker keeps the default window).
+    try:
+        metrics.set_retain_days(_setting("observation.retain_days"))
+    except Exception:
+        logger.exception("its-in-your-head: retention-window push failed")
 
 
 def _setting(key):

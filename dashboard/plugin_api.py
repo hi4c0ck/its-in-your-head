@@ -1542,45 +1542,110 @@ def _context_shape() -> dict:
     return {"rows": rows}
 
 
+# §7.1 centralized reset inventory: every persistent analytical store must be
+# declared here so a future feature cannot add a wipe-omitted data sink.
+#   - tables: analytical records (the whole row set is wiped).
+#   - meta_keys: derived analytical state in the `meta` KV store.
+# NOT in either set (deliberately preserved): the `schema_version` meta key,
+# user config/settings (host-owned, not in this DB), and installed model
+# artifacts (a separate full-uninstall action, not an analytical reset).
+_ANALYTICAL_TABLES = (
+    "events", "portrait_history", "pattern_affinity_history",
+    "pattern_bank", "pulse_tools", "pulse_prototypes", "pulse_goal",
+    "pulse_capsules",
+)
+_ANALYTICAL_META_KEYS = (
+    "reference_state", "upset_fstate", "upset_mood", "upset_mood_history",
+)
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,)).fetchone()
+    return row is not None
+
+
 def _reset_dataset() -> dict:
-    """Wipe the plugin-data analytical dataset (events + portrait history
-    + the PULSE domain). Never touches config. Idempotent; returns
-    counts. The v4 schema bootstrap (first line) guarantees the pulse
-    tables exist before the deletes."""
-    counts = {"events": 0, "portrait_history": 0,
-              "pulse_tools": 0, "pulse_prototypes": 0,
-              "pulse_goal": 0, "pulse_capsules": 0}
+    """§7 complete, reliable, coordinated analytical wipe.
+
+    - §7.2 barrier: the metrics worker is stopped, the transient raw-text
+      backlog (pending queue + SessionState reasoning buffers/markers) is
+      discarded, the wipe runs as ONE committed transaction, then the worker
+      resumes a clean generation. No pre-wipe record can be committed after
+      the delete.
+    - §7.1 inventory: every analytical table + the derived meta keys, in a
+      centralized list. schema_version + user config + model artifacts are
+      preserved.
+    - §7.3 honest reporting: success is returned ONLY after the delete
+      transaction commits; any failure returns reset=False with a bounded
+      reason and the per-store deleted counts (never a false success).
+    """
+    counts = {t: 0 for t in _ANALYTICAL_TABLES}
+    counts["meta_keys"] = 0
     try:
-        conn = _connect()
-    except Exception:
-        return {"wiped": counts, "reset": True}
-    try:
-        _migration.schema_bootstrap(conn, _DDL)
-        cur = conn.execute("DELETE FROM events")
-        counts["events"] = cur.rowcount if cur.rowcount is not None else 0
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name='portrait_history'").fetchone()
-        if row is not None:
-            cur = conn.execute("DELETE FROM portrait_history")
-            counts["portrait_history"] = (
-                cur.rowcount if cur.rowcount is not None else 0)
-        # PULSE domain (v4): the in-memory engine state is wiped by the
-        # route's reset_engine() call; these tables would otherwise
-        # resurrect the wiped view on the next isolated /pulse read.
-        for table in ("pulse_tools", "pulse_prototypes", "pulse_goal",
-                      "pulse_capsules"):
-            cur = conn.execute(f"DELETE FROM {table}")
-            counts[table] = cur.rowcount if cur.rowcount is not None else 0
-        conn.commit()
+        import metrics as _metrics
+        _metrics.stop_worker(timeout=3.0)  # best-effort; barrier below still holds
     except Exception:
         pass
-    finally:
+    try:
         try:
-            conn.close()
+            import metrics as _metrics
+            _metrics.reset_transient_state()
         except Exception:
             pass
-    return {"wiped": counts, "reset": True}
+        conn = _connect()
+        try:
+            _migration.schema_bootstrap(conn, _DDL)
+            # One atomic transaction: Python sqlite3 auto-opens it on the
+            # first DML and it lands on the single commit below, so no
+            # partial wipe can be observed.
+            for table in _ANALYTICAL_TABLES:
+                if _table_exists(conn, table):
+                    cur = conn.execute(f"DELETE FROM {table}")
+                    counts[table] = cur.rowcount if cur.rowcount is not None else 0
+            ph = ",".join("?" for _ in _ANALYTICAL_META_KEYS)
+            cur = conn.execute(
+                f"DELETE FROM meta WHERE key IN ({ph})", _ANALYTICAL_META_KEYS)
+            counts["meta_keys"] = cur.rowcount if cur.rowcount is not None else 0
+            conn.commit()
+            # §8: controlled WAL checkpoint after the wipe — reclaim the
+            # just-deleted pages so obsolete WAL/SHM state is not left behind
+            # (a full VACUUM is a separate, heavier maintenance operation, not
+            # an automatic part of the reset).
+            try:
+                conn.execute("PRAGMA wal_checkpoint(RESTART)")
+            except Exception:
+                pass
+            reset_ok = True
+        except Exception:
+            # §7.3: an unsuccessful deletion is NEVER reported as success.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            reset_ok = False
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        reset_ok = False
+    finally:
+        # §7.2: resume collection with a clean generation (fresh worker).
+        try:
+            import metrics as _metrics
+            _metrics.start_worker()
+        except Exception:
+            pass
+    return {"wiped": counts, "reset": bool(reset_ok)}
+
+
+def _reset_dataset_compat() -> dict:  # keep the legacy name available
+    """Legacy wrapper (pre-§7.3 shape). The route now uses _reset_dataset."""
+    out = _reset_dataset()
+    return {"wiped": out["wiped"], "reset": out["reset"]}
 
 
 @router.get("/pulse")

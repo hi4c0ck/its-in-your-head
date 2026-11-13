@@ -66,6 +66,26 @@ QUEUE_GET_TIMEOUT = 0.5  # worker idle poll (s)
 MAX_QUEUE_EVENTS = 4096  # hard cap on the in-memory event backlog
 MAX_PROMPT_CHARS = 16384  # incoming prompt analysis-text cap (bounded)
 
+# §6: time-based retention window (days) for the events table, driven by the
+# C4 `observation.retain_days` setting. The row-count cap (MAX_EVENTS) remains
+# a hard upper bound on top of the age policy. Defaults to the C4 default;
+# set_retain_days() pushes the live configured value into the worker.
+RETAIN_DAYS_DEFAULT = 90
+_retain_days = RETAIN_DAYS_DEFAULT
+
+
+def set_retain_days(days) -> None:
+    """§6: point the events-pruning age window at the live retention value.
+    Clamped to a positive integer (0 disables the age leg; the row cap still
+    applies). Called from the collector at register() time + on settings
+    change so the pruning path actually consumes the configured value."""
+    global _retain_days
+    try:
+        d = int(days)
+    except (TypeError, ValueError):
+        d = RETAIN_DAYS_DEFAULT
+    _retain_days = d if d >= 0 else 0
+
 # SCHEMA — alias of the single canonical DDL (storage.migration.EVENTS_DDL).
 # Kept as a module-level name for existing callers/tests; do not copy the DDL.
 SCHEMA = _migration.EVENTS_DDL
@@ -259,15 +279,23 @@ def _persist_batch(batch: list) -> None:
 
 
 def _prune() -> None:
+    """§6: two complementary limits on the events table — (a) time-based
+    retention from the live observation.retain_days window (older rows drop),
+    and (b) the hard row-count cap (MAX_EVENTS) as a final upper bound. A
+    retention of 0 disables the age leg; the row cap always applies."""
     try:
         conn = _connect()
         try:
             _migration.schema_bootstrap(conn, SCHEMA)
+            if _retain_days > 0:
+                cutoff = time.time() - _retain_days * 86400.0
+                conn.execute(
+                    "DELETE FROM events WHERE ts IS NOT NULL AND ts < ?",
+                    (cutoff,))
             conn.execute(
                 "DELETE FROM events WHERE id <= "
                 "(SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?)",
-                (MAX_EVENTS,),
-            )
+                (MAX_EVENTS,))
             conn.commit()
         finally:
             conn.close()
@@ -383,6 +411,24 @@ def _worker_main() -> None:
                         _in_flight_events, len(batch))
                     _in_flight_events = 0
                 _state_cv.notify_all()
+
+
+def reset_transient_state() -> int:
+    """§7.2/§7.4: discard the transient raw-text backlog — the pending event
+    queue + the collector's SessionState reasoning buffers + completion
+    markers — so no pre-wipe record can be committed after a /reset. Returns
+    the number of queued events discarded. The caller stops the worker
+    first (so an in-flight batch can't resurrect the backlog); fresh events
+    collected after the wipe start a clean generation."""
+    with _state_cv:
+        n = len(_items)
+        _items.clear()
+    try:
+        from core import collector as _collector
+        _collector.STATE.clear_session(None)
+    except Exception:
+        pass
+    return n
 
 
 def flush(timeout: float = 3.0) -> FlushResult:

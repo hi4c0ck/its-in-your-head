@@ -276,7 +276,7 @@ def test_schema_v6_pattern_bank_ddl(tmp_path):
         try:
             assert migration.schema_bootstrap(conn) is True
             assert migration.get_schema_version(conn) == migration.CURRENT_SCHEMA_VERSION
-            assert migration.CURRENT_SCHEMA_VERSION == 8
+            assert migration.CURRENT_SCHEMA_VERSION == 9
             cols = conn.execute(
                 "PRAGMA table_info(pattern_bank)").fetchall()
             names = [r[1] for r in cols]

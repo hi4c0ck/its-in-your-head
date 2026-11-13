@@ -104,8 +104,12 @@ def test_migration_v2_to_v3_idempotent_and_preserves_events(_tmp_db):
         cols = [r[1] for r in conn.execute("PRAGMA table_info(portrait_history)")]
         assert cols == ["id", "ts", *migration.PORTRAIT_HISTORY_DIMS]
         assert conn.execute("SELECT COUNT(*) FROM portrait_history").fetchone()[0] == 0
+        # §8: the legacy row survives migration (not dropped) but its raw
+        # user_message text is scrubbed to NULL on the v9 privacy step.
         assert conn.execute(
-            "SELECT user_message FROM events").fetchone()[0] == "legacy hello"
+            "SELECT type FROM events").fetchone()[0] == "turn"
+        assert conn.execute(
+            "SELECT user_message FROM events").fetchone()[0] is None
         # Purposely persist one row, then run migrate again: no-op, row kept.
         conn.execute(
             "INSERT INTO portrait_history (ts, directness) VALUES (2.0, 0.5)")

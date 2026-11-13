@@ -104,9 +104,10 @@ def test_legacy_migrates_via_worker_persist_path(tmp_path):
         rows = conn.execute(
             "SELECT type, tool_name, user_message FROM events ORDER BY id"
         ).fetchall()
-        # Legacy rows preserved, tool_name NULL; new row persisted.
+        # Legacy rows preserved (type + numeric counters); tool_name NULL.
+        # §8: legacy raw-text fields are scrubbed to NULL on migration.
         assert [r[0] for r in rows] == ["turn", "api", "error", "tool_end"]
-        assert rows[0][1] is None and rows[0][2] == "legacy hello"
+        assert rows[0][1] is None and rows[0][2] is None
         assert rows[3][1] == "read_file"
     finally:
         conn.close()
@@ -239,7 +240,7 @@ def test_schema_v5_pattern_affinity_history_ddl(tmp_path):
     try:
         assert migration.schema_bootstrap(conn) is True
         assert migration.get_schema_version(conn) == migration.CURRENT_SCHEMA_VERSION
-        assert migration.CURRENT_SCHEMA_VERSION == 8
+        assert migration.CURRENT_SCHEMA_VERSION == 9
         assert migration.PATTERN_AFFINITY_HISTORY_MAX == 512
         assert migration.PATTERN_AFFINITY_HISTORY_MAX == \
             migration.PORTRAIT_HISTORY_MAX
@@ -344,4 +345,82 @@ def test_migration_preserves_native_pulse_vector_dims(tmp_path):
             "a stored Tier-1 vector is NOT downconverted by the migration"
     finally:
         conn.close()
+        database.set_override(None)
+
+
+def _make_v8_with_raw(path):
+    """A v8-shaped DB with legacy raw-text event fields still present."""
+    import time
+    conn = sqlite3.connect(str(path))
+    migration.schema_bootstrap(conn)  # full current shape
+    conn.execute(
+        "INSERT INTO events (ts, type, tool_name, status_code, "
+        "user_message, error_message) VALUES "
+        "(?, 'user_message', 'exec', 200, 'raw PROMPT', 'raw PROVIDER ERROR')",
+        (time.time(),))
+    conn.execute("UPDATE meta SET value='8' WHERE key='schema_version'")
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_v9_scrubs_legacy_raw_fields(tmp_path):
+    """§8: migrating a v8 DB NULLs the raw-text event columns; safe fields
+    (tool_name, status_code, ts) are preserved; version advances to 9; the
+    scrub is idempotent on a second bootstrap."""
+    import metrics
+    importlib.reload(metrics)
+    db_path = _make_v8_with_raw(tmp_path / "v8.db")
+    metrics.set_db_path(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        assert migration.schema_bootstrap(conn) is True  # v8 -> v9 (scrub)
+        rows = {r[0]: r for r in conn.execute(
+            "SELECT id, user_message, error_message, tool_name, status_code, ts "
+            "FROM events")}
+        r = rows[1]
+        assert r[1] is None and r[2] is None, "raw text must be scrubbed"
+        assert r[3] == "exec" and r[4] == 200, "safe fields are preserved"
+        assert migration.get_schema_version(conn) == 9
+        assert migration.schema_bootstrap(conn) is False  # already v9: no-op
+    finally:
+        conn.close()
+        database.set_override(None)
+
+
+def test_events_prune_age_based_on_retain_days(tmp_path):
+    """§6: _prune drops events older than the live retain_days window but
+    keeps recent ones; a retention of 0 disables the age leg."""
+    import time
+    import metrics
+    importlib.reload(metrics)
+    metrics.set_db_path(tmp_path / "retention.db")
+    conn = metrics._connect()
+    try:
+        migration.schema_bootstrap(conn)  # create the full events shape
+        now = time.time()
+        conn.execute(
+            "INSERT INTO events (ts, type, tool_name) VALUES (?,?,?)",
+            (now - 200 * 86400, "user_message", "exec"))
+        conn.execute(
+            "INSERT INTO events (ts, type, tool_name) VALUES (?,?,?)",
+            (now - 10, "user_message", "exec"))
+        conn.commit()
+        metrics.set_retain_days(90)
+        metrics._prune()
+        ids = [r[0] for r in conn.execute("SELECT ts FROM events")]
+        assert len(ids) == 1 and ids[0] > now - 86400, \
+            "the 200d-old row is pruned, the recent row survives"
+        # retention 0 disables the age leg: re-seed the old row + prune.
+        conn.execute(
+            "INSERT INTO events (ts, type, tool_name) VALUES (?,?,?)",
+            (now - 200 * 86400, "user_message", "exec"))
+        conn.commit()
+        metrics.set_retain_days(0)
+        metrics._prune()
+        ids = [r[0] for r in conn.execute("SELECT ts FROM events")]
+        assert len(ids) == 2, "retention 0 turns the age leg off"
+    finally:
+        conn.close()
+        metrics.set_retain_days(metrics.RETAIN_DAYS_DEFAULT)
         database.set_override(None)
