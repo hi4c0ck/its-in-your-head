@@ -37,9 +37,13 @@ _STILL_ACTIVE = 259
 
 
 def _alive(pid: int) -> bool:
-    """True when ``pid`` is a live process. Cross-platform, liveness-safe
-    (OpenProcess alone is not: an exited-but-unreaped object is still
-    openable -> check the exit code)."""
+    """True when ``pid`` is a *live* process. Liveness-safe on both platforms:
+    - Windows: OpenProcess alone is not enough (an exited-but-unreaped object
+      is still openable) -> check the exit code against STILL_ACTIVE.
+    - POSIX: ``os.kill(pid, 0)`` reports a SIGKILL'd-but-not-yet-reaped
+      process (a zombie) as alive; a hard-killed owner is exactly that until
+      its parent reaps it. Read the ``/proc/<pid>/stat`` state and treat a
+      zombie (``Z``) as dead, so a killed owner triggers the kill promptly."""
     if pid is None or pid <= 0:
         return False
     try:
@@ -61,12 +65,25 @@ def _alive(pid: int) -> bool:
                 return code.value == _STILL_ACTIVE
             finally:
                 k.CloseHandle(h)
+        # POSIX: kill(0) says "does it exist" (zombie = yes, so check /proc).
         os.kill(pid, 0)
-        return True
     except ProcessLookupError:
         return False
+    except PermissionError:
+        return True  # exists but not ours (EPERM) -> conservatively alive
     except Exception:
         return False
+    # Distinguish a zombie from a live process via the sched state.
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            # stat = "pid (comm) state ..."; comm may contain spaces/parens,
+            # so anchor on the last ')' before the state field.
+            state = fh.read().rsplit(")", 1)[1].split()[0]
+        return state != "Z"
+    except OSError:
+        return False  # the /proc entry is gone -> dead
+    except Exception:
+        return True  # cannot tell -> do NOT kill (conservative, safe)
 
 
 def _kill(pid: int) -> bool:
