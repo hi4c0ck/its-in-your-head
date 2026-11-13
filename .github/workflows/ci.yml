@@ -29,7 +29,7 @@ jobs:
         run: python tools/check_contracts.py
 
       - name: Test suite (repo-local basetemp, pruned on pass)
-        run: python -m pytest -q
+        run: python -m pytest -q -rs
 
       - name: Temp-budget gate (39 GB %TEMP% incident guard)
         run: python tools/temp_budget_check.py .pytest-basetemp --max-mb 100
