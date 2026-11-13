@@ -117,11 +117,13 @@ class Engine:
         # portrait-history access (drift view / first user turn after
         # restart) — never at Engine construction/register time.
         self._history_loaded = False
-        self.goal_text: str | None = None
-        # Hydrated goal vector + metadata (derived vector only, never raw
-        # text). Set from _on_user_turn or from hydration; pulse_view
-        # prefers it over re-encoding goal_text so the restored view
-        # matches the DB-fallback view.
+        # §5: the raw goal prompt is NOT retained on the long-lived Engine.
+        # Only the DERIVED goal vector + its metadata live here; pulse_view
+        # uses _goal_vector exclusively (if it is unavailable, the GOAL
+        # evidence is represented as absent — never re-encoded from a
+        # retained prompt). _goal_vector is set from _on_user_turn (fresh)
+        # or from DB hydration (restored), so the restored view matches the
+        # DB-fallback view.
         self._goal_vector = None
         self._goal_ts = None
         self._goal_backend = None
@@ -505,11 +507,15 @@ class Engine:
         key = str(turn_id) if turn_id is not None else "__last__"
         self._prompt_vectors[key] = list(vector)
         self._prompt_vectors["__last__"] = list(vector)
-        while len(self._prompt_vectors) > 34:  # 32 turns + __last__ slot
-            oldest = next(iter(self._prompt_vectors))
-            if oldest == "__last__":
-                break
-            self._prompt_vectors.pop(oldest, None)
+        # §5: the per-turn cache is bounded (32 turns + the __last__ slot).
+        # Evict the oldest TURN keys (FIFO); the __last__ slot is a lookup
+        # fallback, not a turn, and is never evicted. (dicts don't reorder
+        # an existing key on update, so __last__ stays pinned near the front
+        # — evicting "the first key" therefore must skip it explicitly.)
+        cap = 34  # 32 turns + the __last__ slot
+        turn_keys = [k for k in self._prompt_vectors if k != "__last__"]
+        while len(self._prompt_vectors) > cap and turn_keys:
+            self._prompt_vectors.pop(turn_keys.pop(0))
 
     def _lookup_prompt_vector(self, turn_id):
         key = str(turn_id) if turn_id is not None else "__last__"
@@ -957,7 +963,8 @@ class Engine:
             logger.exception(
                 "its-in-your-head: engine good-reset feed failed")
         try:
-            self.goal_text = text
+            # §5: the raw prompt is NOT retained on the Engine — only the
+            # derived goal vector is kept + persisted (C6 / v0.1.3 P0).
             # PULSE bridge: persist the DERIVED goal vector (the embedding
             # of this prompt). The raw text stays in memory only (C6 /
             # v0.1.3): the goal row stores the vector, never the prompt.
@@ -1393,7 +1400,6 @@ class Engine:
             registry=self.registry, prototypes=self.protos,
             session_state=self._session_state(),
             goal_vector=self._goal_vector,
-            goal_text=self.goal_text,
             backend=self._get_backend(),
             capsules_by_tool=capsules,
             thresholds=thr or None,
@@ -1593,7 +1599,6 @@ class Engine:
             self._goal_vector = None
             self._goal_ts = None
             self._goal_backend = None
-            self.goal_text = None
             self._interpreted_evidence_count = 0
             self._interpreted_last_ts = None
             self._interpreted_last_confidence = None

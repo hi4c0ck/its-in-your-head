@@ -111,11 +111,29 @@ def test_reset_clears_process_view(_fresh_engine):
     eng.on_events([_user_turn(), _tool_end()])
     eng.reset()
     assert eng.drift_view()["available"] is False
-    assert eng.goal_text is None
+    # §5: the raw goal prompt is NOT a long-lived Engine field.
+    assert not hasattr(eng, "goal_text")
     p = eng.portrait_view()
     # empty-shape contract after reset: no evidence, None values
     assert p["available"] is False
     assert all(v is None for v in p["dimensions"].values())
+
+
+def test_no_long_lived_raw_prompt_and_bounded_prompt_vectors(_fresh_engine):
+    """§5: the Engine keeps derived vectors only — no long-lived raw-prompt
+    field — and the per-turn prompt-vector cache stays bounded (32 turns +
+    the __last__ slot, the existing owner-locked bound)."""
+    eng = _eng()
+    assert not hasattr(eng, "goal_text"), "raw goal prompt must not be retained"
+    for i in range(40):
+        eng._cache_prompt_vector(f"turn-{i}", [0.1, 0.2, 0.3, 0.4])
+    # The cache is capped at 32 turns + the __last__ slot.
+    assert len(eng._prompt_vectors) <= 34
+    assert "__last__" in eng._prompt_vectors
+    # Newest turn retained; evicted oldest turn is gone from the cache
+    # (lookups for it fall back to the __last__ slot, by design).
+    assert "turn-39" in eng._prompt_vectors
+    assert "turn-0" not in eng._prompt_vectors
 
 
 def test_on_tool_start_never_encodes(_fresh_engine):
