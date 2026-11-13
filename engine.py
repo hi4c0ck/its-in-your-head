@@ -30,6 +30,7 @@ try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from .pulse import matrix as _pulse_matrix
     from .pulse import persistence as _pulse_persist
     from .pulse import velocity as _pulse_velocity
+    from .pulse import upset as _pulse_upset
     from .perception import encoder as _encoder
     from .perception import anchors as _anchors
     from .perception import portrait as _portrait_mod
@@ -40,6 +41,7 @@ except ImportError:
     from pulse import matrix as _pulse_matrix
     from pulse import persistence as _pulse_persist
     from pulse import velocity as _pulse_velocity
+    from pulse import upset as _pulse_upset
     from perception import encoder as _encoder
     from perception import anchors as _anchors
     from perception import portrait as _portrait_mod
@@ -140,6 +142,12 @@ class Engine:
         self._interpreted_last_ts = None
         self._interpreted_last_confidence = None
         self._anchor_vectors = None
+        # D1-D6 user-upset friction accumulator: the per-session
+        # in-memory F' window + the global slow mood M. M is persisted
+        # to the meta KV store on session close and hydrated lazily on
+        # the pulse read path (never at construction — the lazy-DB
+        # rule).
+        self.upset = _pulse_upset.UpsetAccumulator()
         self._anchor_backend = None
         # Rolling reference (dynamic reassembly): lazily created + seeded from
         # the bank on the first backend-available turn, then reassembled by
@@ -343,6 +351,11 @@ class Engine:
                 self._on_user_turn(ev)
             elif etype == "reasoning_seg":
                 self._on_reasoning_seg(ev)
+            elif etype == "session_end":
+                # D3: the session's last turn is finalized into F'/M
+                # and the slow-mood hand-off row is persisted (meta KV
+                # store). Fault-isolated inside.
+                self._on_session_end(ev)
         # Hot-path feedback labels (collector) mark the in-memory banks
         # dirty without any I/O; this worker pass persists them — the
         # isolated dashboard half sees the labels on its next /pulse read.
@@ -806,6 +819,23 @@ class Engine:
         Any fault degrades to no-op: the worker and the observed track
         are never affected.
         """
+        # D1-D6: the independent UPSET feed — the LLM's own reasoning is
+        # the signal (language-agnostic by construction). It runs
+        # BEFORE and INDEPENDENT of the portrait fold: a portrait fault
+        # never starves F'/M, and a missing backend degrades the upset
+        # score to "no evidence" without touching the portrait path.
+        try:
+            space = self._pulse_vector_space()
+            stepped = self.upset.on_reasoning_seg(
+                ev, self._get_backend(),
+                str(space.get("id") or self._backend_name))
+            if stepped:
+                # D1 finalized a turn — mirror F' so the pane tracks the
+                # accumulator's reasoning-narrated friction (once per LLM
+                # response, not per stream chunk).
+                self._upset_persist_state(ev)
+        except Exception:
+            logger.exception("its-in-your-head: engine upset feed failed")
         try:
             text = ev.get("reasoning_text")
             if not isinstance(text, str) or not text:
@@ -890,6 +920,42 @@ class Engine:
         text = ev.get("user_message") or ""
         if not isinstance(text, str) or not text:
             return
+        # D5: a short GOOD reaction (the feedback table's one retained
+        # job — the existing MAX_WORDS-gated detector, not a new one)
+        # hard-resets this session's F' to 0 ("no friction NOW"). M is
+        # untouched (D6). Only the boolean decision crosses into the
+        # accumulator — the raw message is never stored or logged.
+        try:
+            try:
+                from .pulse.feedback import detect_feedback
+            except ImportError:
+                from pulse.feedback import detect_feedback
+            good_reset = detect_feedback(text) == "good"
+            released = self.upset.on_user_turn(ev, good_reset=good_reset)
+            if released:
+                # D5 release: a good reaction just cleared F' — mirror it
+                # so the pane's friction settles too (M is retained).
+                self._upset_persist_state(ev)
+            # Immediacy feed (owner rule 2026-11-12): the user's OWN
+            # message is the fastest upset signal — score it NOW (the
+            # active encoder is multilingual: language-agnostic) and
+            # step the window, instead of waiting for the next turn's
+            # reasoning narration to finalize. Skipped on D5 good
+            # resets (the window was just cleared); the raw text stays
+            # in memory only (C6: never stored or logged).
+            if not good_reset:
+                space = self._pulse_vector_space()
+                stepped = self.upset.on_user_message(
+                    ev, text, self._get_backend(),
+                    str(space.get("id") or self._backend_name))
+                if stepped:
+                    # Immediacy: the pane must see the friction the moment
+                    # the user's harsh message lands — persist NOW, not
+                    # only at the next turn boundary.
+                    self._upset_persist_state(ev)
+        except Exception:
+            logger.exception(
+                "its-in-your-head: engine good-reset feed failed")
         try:
             self.goal_text = text
             # PULSE bridge: persist the DERIVED goal vector (the embedding
@@ -968,6 +1034,90 @@ class Engine:
                     "its-in-your-head: portrait_history persist failed")
         except Exception:
             logger.exception("its-in-your-head: engine user_turn feed failed")
+
+    def _on_session_end(self, ev: dict) -> None:
+        """D3 close + D6 hand-off: finalize the session's last buffered
+        turn (scored into F'/M) and persist M to the meta KV store —
+        the cross-session hand-off row. Fault-isolated: a storage fault
+        degrades to the in-memory-only close (the D3 restart
+        semantics), never an exception into the worker loop."""
+        try:
+            try:
+                _db, _mig = self._storage()
+                conn = _db.connect()
+            except Exception:
+                conn = None
+            try:
+                if conn is not None:
+                    # One-time (per process) restore of M + the session
+                    # history BEFORE the hand-off row is appended, so a
+                    # post-restart first close reads from the right
+                    # prior (the flag inside keeps later closes cheap).
+                    self.upset.hydrate_mood(conn)
+                    self.upset.close_session(ev.get("session_id"), conn)
+            finally:
+                if conn is not None:
+                    conn.close()
+        except Exception:
+            logger.exception(
+                "its-in-your-head: engine session-end close failed")
+
+    def _upset_payload(self) -> dict:
+        """The D1-D6 upset view for the pulse payload (fault-isolated:
+        a fault degrades to the neutral no-evidence shape — the lane
+        simply shows no user entry, never an error)."""
+        try:
+            return self.upset.payload()
+        except Exception:
+            logger.exception("its-in-your-head: upset payload failed")
+            return {"value": 0.0, "tier": 0, "upset_turns": 0,
+                    "mood": 0.5, "prognosis": None}
+
+    def _hydrate_upset_mood(self) -> None:
+        """One-time (per process) restore of M + the session-level
+        history from the meta KV store (the D6 cross-session hand-off)
+        on the pulse read path. Fault-isolated: any storage fault
+        keeps the neutral prior — the read view degrades, never
+        errors."""
+        try:
+            if self.upset.mood_hydrated:
+                return
+            _db, _mig = self._storage()
+            conn = _db.connect()
+        except Exception:
+            return
+        try:
+            self.upset.hydrate_mood(conn)
+        except Exception:
+            logger.exception(
+                "its-in-your-head: upset mood hydrate failed")
+        finally:
+            conn.close()
+
+    def _upset_persist_state(self, ev: dict | None = None) -> None:
+        """D3 cross-process handoff: mirror the F' window + M into the
+        profile DB (the ``upset_fstate`` meta key) so the ISOLATED
+        dashboard — which serves the pane's /pulse with no live engine —
+        can surface the friction lane + glitch from the persisted mirror
+        instead of an in-memory F' it never receives.
+
+        Writes ONLY derived numbers (the scored window, the upset-turn
+        count, a timestamp) — never raw text (C6). Fault-isolated: any
+        storage fault is a no-op; the in-memory F' stays the source of
+        truth for the agent half."""
+        ev = ev or {}
+        try:
+            _db, _mig = self._storage()
+            conn = _db.connect()
+        except Exception:
+            return
+        try:
+            self.upset.persist_state(
+                conn, ts=ev.get("ts"), session_id=ev.get("session_id"))
+        except Exception:
+            logger.exception("its-in-your-head: upset fstate mirror failed")
+        finally:
+            conn.close()
 
     # -- live expression + morphology (transient / lazy) ------------------- #
     def _set_live_expression(self, patterns, paired: bool, ts) -> None:
@@ -1199,26 +1349,23 @@ class Engine:
 
     # -- PULSE live view (S4) --------------------------------------------- #
     def _pulse_vector_space(self) -> dict:
-        """v0.1.10 (review fix 3): the ACTIVE embedding-space identity
-        for the matrix's compatibility gate — {"id": encoder name,
-        "model_version": encoder model tag (or None), "dim": vector
-        length (from the live goal vector when present, else None —
-        the gate then applies the provenance rules without a
-        dimension gate)}."""
-        space = {"id": self._backend_name, "model_version": None,
-                 "dim": None}
-        try:
-            backend = self._get_backend()
-            space["model_version"] = getattr(backend, "model_version",
-                                             None)
-        except Exception:
-            backend = None
+        """The ACTIVE PULSE vector space — the identity of the active encoder
+        (the model that produced the stored goal/capsule vectors). Its ``dim``
+        is just the active encoder's dim, carried for the display tag; it is
+        NOT a gate. PULSE scoring is cross-dim (perception.canonical
+        .cross_dim_cosine via pulse.prototypes.cosine), so a foreign-dim
+        vector is reached by projecting the higher-res side down at read time
+        — nothing is stored lossily and toggling the source encoder never
+        orphans the data. Falls back to the goal's dim when the encoder
+        reports no dim."""
+        space = {"id": self._backend_name, "model_version": None, "dim": None}
         if self._goal_vector:
             space["dim"] = len(self._goal_vector)
         return space
 
     def pulse_view(self) -> dict:
         self.ensure_pulse_hydrated()
+        self._hydrate_upset_mood()
         thr = {k: v for k, v in self._thresholds.items() if v is not None}
         capsules = None
         with self._lock:
@@ -1256,7 +1403,12 @@ class Engine:
             # gated out).
             vector_space=space,
             goal_backend=self._goal_backend,
-            event_rates=event_rates)
+            event_rates=event_rates,
+            # D1-D6: the user-upset accumulator view (F'/tier/M/
+            # prognosis) — build_lanes turns it into the friction-lane
+            # user pseudo-entry (byte-identical lanes when it is the
+            # neutral no-evidence shape).
+            upset=self._upset_payload())
         rows = _pulse_matrix.build_matrix(**common)
         # v0.1.10 (review fix 2): the authoritative lane calculation
         # comes from the SAME inputs (one scoring path — the
@@ -1268,7 +1420,10 @@ class Engine:
                 "available": bool(rows),
                 "schema_version": 2,
                 "lane_order": ["live", "goal", "good", "friction"],
-                "lanes": lanes}
+                "lanes": lanes,
+                # D1-D6: the top-level upset block (the pane's glitch
+                # trigger + the M/prognosis read).
+                "upset": common["upset"]}
 
     def _perception_view(self, dims, full, values, agent) -> dict:
         """Additive ``perception`` key (C1 adjudication).
@@ -1442,6 +1597,11 @@ class Engine:
             self._interpreted_evidence_count = 0
             self._interpreted_last_ts = None
             self._interpreted_last_confidence = None
+            # D1-D6: the user-upset accumulator is wiped with the rest
+            # of the perception state — the in-memory F' windows drop;
+            # M re-hydrates from the meta KV store on the next pulse
+            # read (its session history is DB-owned, not reset-owned).
+            self.upset = _pulse_upset.UpsetAccumulator()
             self._prompt_vectors.clear()
             self._pattern_turns = 0
             self._pattern_top_counts.clear()

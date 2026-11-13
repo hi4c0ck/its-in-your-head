@@ -317,3 +317,31 @@ def test_pattern_affinity_prune_to_cap(tmp_path):
             conn2.close()
     finally:
         conn.close()
+
+
+def test_migration_preserves_native_pulse_vector_dims(tmp_path):
+    """Non-destructive storage: bootstrap never downconverts a stored PULSE
+    vector. A 384-d Tier-1 vector survives ``schema_bootstrap`` at its native
+    384 dim (resolution preserved); cross-dim reachability is a read-side
+    concern (perception.canonical.cross_dim_cosine), not a stored fold."""
+    import struct as _s
+    database.set_override(tmp_path / "nondestructive.db")
+    conn = database.connect()
+    try:
+        assert migration.schema_bootstrap(conn) is True
+        blob384 = _s.pack("<384f", *([0.5] * 384))
+        conn.execute(
+            "INSERT OR REPLACE INTO pulse_goal"
+            " (id, ts, vector, backend) VALUES (1, 0.0, ?, 'tier-1-onnx')",
+            (blob384,))
+        conn.commit()
+
+        def dim(table):
+            b = conn.execute(
+                f"SELECT vector FROM {table} LIMIT 1").fetchone()[0]
+            return len(b) // 4
+        assert dim("pulse_goal") == 384, \
+            "a stored Tier-1 vector is NOT downconverted by the migration"
+    finally:
+        conn.close()
+        database.set_override(None)

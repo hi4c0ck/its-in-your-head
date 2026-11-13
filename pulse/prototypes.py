@@ -18,6 +18,15 @@ import math
 import threading
 import time
 
+try:  # hermes namespaced import (gateway) vs top-level import (tests)
+    from ..perception.canonical import cross_dim_cosine as _cross_dim_cosine
+except ImportError:  # pragma: no cover
+    try:
+        from perception.canonical import (  # type: ignore[no-redef]
+            cross_dim_cosine as _cross_dim_cosine)
+    except ImportError:
+        _cross_dim_cosine = None
+
 # S4 task defaults (C4 keys; plugin.yaml is parent-owned — see flags).
 DEFAULT_PROTOTYPE_CAP = 8
 DEFAULT_MIN_LABELED = 3
@@ -39,8 +48,18 @@ def classify_feedback(text) -> str | None:
 
 
 def cosine(a, b) -> float:
-    if a is None or b is None or len(a) != len(b):
+    """Cosine of two PULSE vectors. Same-dim: exact cosine. Cross-dim (a
+    256-d sketch vs a 384-d Tier-1 vector): the higher-res side is projected
+    down to the lower dim at read time (``perception.canonical
+    .cross_dim_cosine``), so a stored 384-d vector stays reachable from a
+    256-d goal -- nothing is stored lossily and an encoder toggle never
+    orphans the data. Empty / None: 0.0 (no signal, never an error)."""
+    if a is None or b is None:
         return 0.0
+    if len(a) != len(b):
+        if _cross_dim_cosine is not None:
+            return _cross_dim_cosine(a, b)
+        return 0.0  # cross-dim module unavailable: safe no-signal fallback
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(x * x for x in b))
     if na == 0 or nb == 0:

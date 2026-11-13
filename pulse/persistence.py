@@ -38,6 +38,12 @@ logger = logging.getLogger(__name__)
 _BANKS = ("good", "friction", "objective_friction")
 
 
+# Vectors are stored at their NATIVE encoder dimension (256-d sketch or
+# 384-d Tier-1): nothing is downconverted on write, so no resolution is
+# ever lost. Cross-dim reachability is handled read-side
+# (perception.canonical.cross_dim_cosine via pulse.prototypes.cosine).
+
+
 def pack_vector(vector) -> bytes | None:
     """float vector -> little-endian float32 BLOB (the ``events.sketch``
     convention). None/empty -> None."""

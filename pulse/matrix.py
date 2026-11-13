@@ -36,6 +36,11 @@ from .prototypes import cosine, strongest_similarity
 from .momentum import surge_values, empty_momentum
 from .velocity import PULSE_VELOCITY_WINDOW_S
 
+# PULSE scoring is cross-dim: a 256-d (sketch/fallback) and a 384-d (Tier-1)
+# vector meet at the lower dim inside ``pulse.prototypes.cosine`` (via
+# perception.canonical.cross_dim_cosine), so every stored vector stays
+# reachable from either encoder and no write is ever stored lossily.
+
 # C4 thresholds (pulse.thresholds.*); S1 settings defaults.
 DEFAULT_THRESHOLDS = {"goal": 0.8, "good": 0.6, "friction": 0.4}
 
@@ -179,51 +184,29 @@ def _space_dim(space) -> int | None:
     return dim if dim > 0 else None
 
 
-def _space_ids(space) -> tuple | None:
-    """The (id, model_version) identity of the active space, or None
-    when the engine did not report one (legacy callers)."""
-    if not isinstance(space, dict):
-        return None
-    ident = (space.get("id"), space.get("model_version"))
-    if ident[0] is None and ident[1] is None:
-        return None
-    return ident
-
-
 def _vec_scores(vec, space) -> bool:
-    """May ``vec`` be scored in the active space (dimension gate)."""
-    if vec is None:
-        return False
-    dim = _space_dim(space)
-    return dim is None or len(vec) == dim
+    """May ``vec`` be scored? PULSE scoring is cross-dim (the active goal and
+    a stored vector meet at the lower dim inside ``pulse.prototypes.cosine``),
+    so ANY non-None vector is reachable regardless of which encoder produced
+    it — the dimension is no longer a gate. Only an absent vector is skipped.
+    ``space`` is kept in the signature for callers but is not a gate."""
+    return vec is not None
 
 
 def _vec_supports(vec, meta, space) -> bool:
-    """May ``vec`` count toward readiness support? Known provenance
-    equal to the active space; unknown provenance never counts. With no
-    active-space identity (legacy path) the dimension gate is the only
-    gate, so legacy counts are preserved."""
-    if not _vec_scores(vec, space):
-        return False
-    active = _space_ids(space)
-    if active is None:
-        return True  # legacy: unknown provenance still supported
-    if meta is None:
-        return False  # unknown evidence — never auto-compatible
-    return meta[0] == active[0] and meta[1] == active[1]
+    """May ``vec`` count toward readiness support? Because scoring is
+    cross-dim, every stored vector (any encoder, any dim) is reachable, so all
+    of it counts as evidence — no data is ever orphaned by an encoder toggle.
+    Source provenance (``meta``) is informational, not a gate; ``space`` is
+    kept for callers but unused."""
+    return vec is not None
 
 
 def _goal_gate(goal_vector, goal_backend, space):
-    """A goal vector whose KNOWN encoder space differs from the active
-    space is not comparable: gate it out (returns None). Unknown goal
-    provenance (pre-v8 row) stays in play (legacy behavior)."""
-    if goal_vector is None:
-        return None
-    active = _space_ids(space)
-    if active is None or not active[0]:
-        return goal_vector
-    if goal_backend is not None and goal_backend != active[0]:
-        return None
+    """The goal is always usable: cross-dim scoring reaches every stored
+    prototype/capsule from a goal of ANY dimension, so there is no gate.
+    ``goal_backend`` / ``space`` are provenance, not a gate. An absent goal
+    (None) stays None."""
     return goal_vector
 
 
@@ -262,7 +245,8 @@ def build_matrix(registry, prototypes, session_state=None,
                  goal_vector=None, goal_text: str | None = None,
                  backend=None, capsules_by_tool: dict | None = None,
                  thresholds: dict | None = None, vector_space=None,
-                 goal_backend=None, event_rates: dict | None = None) -> list[dict]:
+                 goal_backend=None, event_rates: dict | None = None,
+                 upset: dict | None = None) -> list[dict]:
     """Build one row per registry tool (dynamic — no hardcoded list).
 
     v0.1.10: ``vector_space`` ({"id", "model_version", "dim"}) +
@@ -275,6 +259,11 @@ def build_matrix(registry, prototypes, session_state=None,
     dict can feed both builders with one shape; the legacy row
     projection is deliberately left untouched (byte-compatible) — the
     velocity-driven LIVE ranking lives in :func:`build_lanes` only.
+
+    ``upset`` (D1-D6, additive): the user-upset accumulator's view
+    (F'/tier/M/prognosis) is accepted for the shared ``common`` shape;
+    the legacy row projection ignores it — the friction-lane ``user``
+    pseudo-entry lives in :func:`build_lanes` only.
     """
     thr = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     if goal_vector is None and goal_text is not None and backend is not None:
@@ -513,7 +502,8 @@ def build_lanes(registry, prototypes, session_state=None,
                 backend=None, capsules_by_tool: dict | None = None,
                 thresholds: dict | None = None, vector_space=None,
                 goal_backend=None, event_rates: dict | None = None,
-                now: float | None = None) -> dict:
+                now: float | None = None,
+                upset: dict | None = None) -> dict:
     """The four independent lane arrays (v2 contract). Pure projection
     over the same inputs as build_matrix — no tables, no I/O beyond
     what build_matrix already does. Returns ALL eligible tools per
@@ -527,7 +517,17 @@ def build_lanes(registry, prototypes, session_state=None,
     rolling window) and the LIVE lane ranks by that velocity first —
     the "fast-decay consistency" signal, free from the events table.
     ``None`` (the default, and the legacy path) leaves the capped-
-    capsule momentum sort untouched (byte-identical)."""
+    capsule momentum sort untouched (byte-identical).
+
+    D1-D6 (additive): when ``upset`` is not None, the friction lane
+    gains a ``user`` PSEUDO-entry (tool_name "user", tool_id -1): the
+    LLM's own reasoning narrating user upset, read language-agnostically
+    (D1). No registry tool stands behind it — no banks, no capsules —
+    its value is the accumulator's F' and it appears only from the
+    lane tier up (F' >= 0.30, the D4 tier carried in ``upset``). The
+    pane's glitch reads the top-level ``upset`` block, never this
+    entry. ``None`` (the default, and the legacy path) leaves the lane
+    byte-identical."""
     thr = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     if goal_vector is None and goal_text is not None and backend is not None:
         from .activity_encoder import encode_goal_text
@@ -702,6 +702,35 @@ def build_lanes(registry, prototypes, session_state=None,
         for entry in live:
             entry["velocity"] = dict(event_rates.get(entry["tool_name"],
                                                      default_vel))
+    # D1-D6: the USER's own friction (the LLM's reasoning narrating that
+    # the user is upset — language-agnostic by construction). A pseudo
+    # entry: no registry tool, no banks, no capsules — the value is the
+    # accumulator's F' and the entry exists only from the D4 lane tier
+    # up. The pane's glitch reads the top-level ``upset`` block, never
+    # this entry.
+    if upset is not None and int(upset.get("tier") or 0) >= 1:
+        up_value = round(
+            min(1.0, max(0.0, float(upset.get("value") or 0.0))), 4)
+        up_turns = int(upset.get("upset_turns") or 0)
+        friction.append({
+            "tool_id": -1, "tool_name": "user", "rank": 0,
+            "value": up_value, "threshold": thr["friction"],
+            "level": _level(up_value, thr["friction"]),
+            "state": _state(True, up_turns, 1),
+            "dominant_source": "user",
+            "similarity": up_value,
+            "user_accumulation": up_value,
+            "objective_hint": None,
+            "objective_hint_cap": PULSE_OBJ_HINT_CAP,
+            "user": {"value": up_value,
+                     "level": _level(up_value, thr["friction"]),
+                     "state": _state(True, up_turns, 1),
+                     "support": _support(up_turns, 1)},
+            "objective": {"value": None, "level": "neutral",
+                          "state": "empty",
+                          "support": _support(0, 1)},
+            "upset": True,
+        })
     return {
         "live": _assign_ranks(live, _live_sort_key),
         "goal": _assign_ranks(goal, _sem_sort_key),

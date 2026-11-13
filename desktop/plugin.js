@@ -2227,6 +2227,31 @@ const IYH_FRICTION_TRIGGER = { at: 0 }
 function iiyhFrictionPulse() {
   IYH_FRICTION_TRIGGER.at = (typeof performance !== 'undefined') ? performance.now() : Date.now()
 }
+// v0.1.27: D1-D6 SUSTAINED user-upset glitch state — the /pulse top-level
+// `upset` block (F' = the 0.73 decay-window of the LLM's reasoning-narrated
+// upset score, language-agnostic by construction; the D4 tiers: 0 off, 1 the
+// friction-lane entry, 2 the glitch, at F' >= 0.30 / 0.65). While tier >= 2
+// the brick-mosaic portrait glitches SUSTAINEDLY (the ripple keeps moving),
+// intensity proportional to F' (D4) — no landing window, no timer. Updated
+// per /pulse read by iiyhIngestUpset(); the neutral block (older backend or
+// the DB fallback) keeps it off: an honest absence, never an invented one.
+// `mood` (the slow M, D6) rides along for a future mirror read — the pane
+// renders it not yet.
+const IYH_UPSET_GLITCH_TIER = 0.65   // D4 (mirrors pulse/upset.py)
+// v0.1.28 (owner (b)): the glitch BALL is now visible from the tier-1 floor
+// (0.30), not just tier 2. A one-off angry message decays to tier 1
+// (0.30..0.65) -> it still shows a gentler ball; tier 2 (0.65+) is the same
+// ball, brighter. Revert to 0.65 to restore the tier-2-only behaviour.
+const IYH_UPSET_BALL_TIER = 0.30
+const IYH_UPSET_STATE = { value: 0, tier: 0, mood: null }
+function iiyhIngestUpset(upset) {
+  if (!upset || typeof upset !== 'object') return
+  const v = Number(upset.value)
+  IYH_UPSET_STATE.value = Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0
+  const t = Number(upset.tier)
+  IYH_UPSET_STATE.tier = (Number.isFinite(t) && t >= 2) ? 2 : ((Number.isFinite(t) && t >= 1) ? 1 : 0)
+  if (upset.mood != null && Number.isFinite(Number(upset.mood))) IYH_UPSET_STATE.mood = Number(upset.mood)
+}
 // Per-frame CANVAS renderer. `cov` is the 214x240 coverage grid (default the baked
 // IYH_FACE_COV_BYTES; a template-rasterized grid when a drawing template is selected).
 function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
@@ -2263,14 +2288,38 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   const gNow = (typeof performance !== 'undefined') ? performance.now() : Date.now()
   const gWin = gLen * (1000 / IYH_BRICK_FPS)   // the friction window, ms (glitchLen frames)
   const gAge = gNow - IYH_FRICTION_TRIGGER.at
-  const gActive = IYH_FRICTION_TRIGGER.at > 0 && gAge >= 0 && gAge <= gWin
-  const gIdx = Math.floor(IYH_FRICTION_TRIGGER.at / 250)   // per-pulse band seed (stable across the window)
-  let gBand = 0, gH = 0, gShift = 0, gColor = null
+  const pulseActive = IYH_FRICTION_TRIGGER.at > 0 && gAge >= 0 && gAge <= gWin
+  // v0.1.27: D4 SUSTAINED upset glitch — while the user-upset F' (the /pulse
+  // `upset` block, LLM-reasoning narrated) stays at/above the glitch tier,
+  // the ripple PERSISTS (a rolling band seed keeps it moving) at an
+  // intensity proportional to F'. No landing window, no timer.
+  const upVal = IYH_UPSET_STATE.value
+  // v0.1.28: the glitch ball is visible from the tier-1 floor (IYH_UPSET_BALL_TIER),
+  // not tier 2 only; intensity scales 0..1 over floor..1 (0.30 = gentle, 1.0 = full).
+  const upInt = upVal > IYH_UPSET_BALL_TIER
+    ? Math.min(1, (upVal - IYH_UPSET_BALL_TIER) / (1 - IYH_UPSET_BALL_TIER))
+    : 0
+  const upSustained = IYH_UPSET_STATE.tier >= 1 && upVal >= IYH_UPSET_BALL_TIER
+  const gActive = pulseActive || upSustained
+  const gIdx = (upSustained && !pulseActive)
+    ? Math.floor(gNow / 250)   // rolling band seed: the ripple moves while it lasts
+    : Math.floor(IYH_FRICTION_TRIGGER.at / 250)   // per-pulse band seed (stable across the window)
+  let gBand = 0, gH = 0, gShift = 0, gColor = null, gGain = 1.0
   if (gActive) {
-    gBand = 30 + Math.floor(iihyJHash(gIdx * 31 + 1, gIdx * 7 + 2, IYH_J.ditherSeed + 100) * 15)   // the face's LIT middle (eye/nose), so the rip always shows
-    gH = 5 + Math.floor(iihyJHash(gIdx * 17 + 3, gIdx * 3 + 4, IYH_J.ditherSeed + 99) * 7)
-    gShift = (Math.floor(iihyJHash(gIdx * 13 + 5, gIdx * 11 + 6, IYH_J.ditherSeed + 98) * 13) - 6) * bwS
-    gColor = '#ff2d95'   // the RGB-split glitch color: a strong MAGENTA (unmistakable against the base cyan)
+    if (upSustained && !pulseActive) {
+      // The D4 sustained band: thinner than a pulse burst, intensity
+      // scaling with F' (F' = 0.65 -> gentle, F' = 1.0 -> full).
+      gBand = 30 + Math.floor(iihyJHash(gIdx * 31 + 1, gIdx * 7 + 2, IYH_J.ditherSeed + 100) * 15)
+      gH = 4 + Math.floor(iihyJHash(gIdx * 17 + 3, gIdx * 3 + 4, IYH_J.ditherSeed + 99) * 5)
+      gShift = (Math.floor(iihyJHash(gIdx * 13 + 5, gIdx * 11 + 6, IYH_J.ditherSeed + 98) * 9) - 4) * bwS
+      gGain = 0.55 + 0.45 * upInt
+      gColor = '#ff2d95'
+    } else {
+      gBand = 30 + Math.floor(iihyJHash(gIdx * 31 + 1, gIdx * 7 + 2, IYH_J.ditherSeed + 100) * 15)   // the face's LIT middle (eye/nose), so the rip always shows
+      gH = 5 + Math.floor(iihyJHash(gIdx * 17 + 3, gIdx * 3 + 4, IYH_J.ditherSeed + 99) * 7)
+      gShift = (Math.floor(iihyJHash(gIdx * 13 + 5, gIdx * 11 + 6, IYH_J.ditherSeed + 98) * 13) - 6) * bwS
+      gColor = '#ff2d95'   // the RGB-split glitch color: a strong MAGENTA (unmistakable against the base cyan)
+    }
   }
   const accentColor = iiyhJResolveAccent()                     // pane accent (cached); alpha via globalAlpha; the glitch band overrides it
   // v20: the WAVE-FORMULA offset mask (iihyJWave) + the LINE-FOLD damping. The wave ripples the
@@ -2352,7 +2401,7 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     let gx = offX + pc * bwS + drift + gapX / 2, ga = a
     if (inBand) {
       gx += gShift + Math.sin(frame * 0.9 + prr * 1.3) * bwS * 0.3   // the sideways rip + a little jitter
-      ga = Math.min(1, Math.max(a, 0.85) * (0.6 + 0.4 * iihyJHash(pc * 7 + frame, gIdx, IYH_J.ditherSeed + 90)))  // the band BRIGHT magenta (the RGB-split pop)
+      ga = Math.min(1, Math.max(a, 0.85) * (0.6 + 0.4 * iihyJHash(pc * 7 + frame, gIdx, IYH_J.ditherSeed + 90)) * gGain)  // the band BRIGHT magenta (the RGB-split pop); gGain < 1 only on the D4 SUSTAINED band (intensity proportional to F')
     }
     ctx.fillStyle = inBand ? gColor : accentColor   // the magenta stays IN the band; everything else is the accent
     ctx.globalAlpha = ga
@@ -2581,7 +2630,10 @@ function IyhPortraitStudio({ data, preferences }) {
 
 
 const POLL_MS = 5000
-const PULSE_POLL_MS = 5000
+// v0.1.28: tightened from 5000 -> 2000 so a fast tier-1 spike is less likely to
+// sit between polls. F' itself holds between turns (no wall-clock decay), so this
+// is a responsiveness nudge, not the core fix.
+const PULSE_POLL_MS = 2000
 
 // v0.1.10 (spec §4.1): fixed-window PULSE refresh reducer. The MAXIMUM
 // normal aggregation window for incoming tick notifications — NOT a
@@ -5739,6 +5791,7 @@ function ExpandedWorkspace({ source, rest, portraitPreferences, onCollapse }) {
     queryKey: [source, 'iyh-metrics'],
     queryFn: () => rest('/metrics'),
     refetchInterval: POLL_MS,
+    refetchIntervalInBackground: true,
     retry: false,
   })
   const pulseQ = useQuery({
@@ -5747,21 +5800,33 @@ function ExpandedWorkspace({ source, rest, portraitPreferences, onCollapse }) {
     // rides the PULSE request (the endpoint stays /pulse). settle()
     // closes the reducer's in-flight window on any outcome.
     queryFn: () => rest('/pulse' + pulseActivityQuerySuffix()).then(
-      function (d) { pulseTickReducer.settle(); return d },
+      function (d) {
+        pulseTickReducer.settle();
+        // v0.1.27: D1-D6 — the top-level `upset` block (the LLM's
+        // reasoning-narrated user-friction F' + tier + slow mood M) ->
+        // the shared state the brick-mosaic portrait reads for its
+        // SUSTAINED glitch. A missing block (older backend / DB
+        // fallback) keeps it neutral: honest absence, never invented.
+        iiyhIngestUpset(d && d.upset);
+        return d;
+      },
       function (e) { pulseTickReducer.settle(); throw e }),
     refetchInterval: PULSE_POLL_MS,
+    refetchIntervalInBackground: true,
     retry: false,
   })
   const portraitQ = useQuery({
     queryKey: [source, 'iyh-portrait'],
     queryFn: () => rest('/portrait').catch(() => null),
     refetchInterval: PORTRAIT_POLL_MS,
+    refetchIntervalInBackground: true,
     retry: false,
   })
   const driftQ = useQuery({
     queryKey: [source, 'iyh-drift'],
     queryFn: () => rest('/drift').catch(() => null),
     refetchInterval: POLL_MS,
+    refetchIntervalInBackground: true,
     retry: false,
   })
   const metrics = metricsQ.data
@@ -6020,6 +6085,7 @@ function Strip({ source, rest, portraitPreferences }) {
     queryKey: [source, 'iyh-metrics'],
     queryFn: () => rest('/metrics'),
     refetchInterval: POLL_MS,
+    refetchIntervalInBackground: true,
     retry: false,
   })
   const pulseQ = useQuery({
@@ -6028,15 +6094,26 @@ function Strip({ source, rest, portraitPreferences }) {
     // rides the PULSE request (the endpoint stays /pulse). settle()
     // closes the reducer's in-flight window on any outcome.
     queryFn: () => rest('/pulse' + pulseActivityQuerySuffix()).then(
-      function (d) { pulseTickReducer.settle(); return d },
+      function (d) {
+        pulseTickReducer.settle();
+        // v0.1.27: D1-D6 — the top-level `upset` block (the LLM's
+        // reasoning-narrated user-friction F' + tier + slow mood M) ->
+        // the shared state the brick-mosaic portrait reads for its
+        // SUSTAINED glitch. A missing block (older backend / DB
+        // fallback) keeps it neutral: honest absence, never invented.
+        iiyhIngestUpset(d && d.upset);
+        return d;
+      },
       function (e) { pulseTickReducer.settle(); throw e }),
     refetchInterval: PULSE_POLL_MS,
+    refetchIntervalInBackground: true,
     retry: false,
   })
   const recentQ = useQuery({
     queryKey: [source, 'iyh-recent'],
     queryFn: () => rest('/recent?limit=' + IO_LINES),
     refetchInterval: POLL_MS,
+    refetchIntervalInBackground: true,
     retry: false,
   })
   // Planned routes: poll 404-tolerant; a miss renders an empty state, never
@@ -6045,18 +6122,21 @@ function Strip({ source, rest, portraitPreferences }) {
     queryKey: [source, 'iyh-portrait'],
     queryFn: () => rest('/portrait').catch(() => null),
     refetchInterval: PORTRAIT_POLL_MS,
+    refetchIntervalInBackground: true,
     retry: false,
   })
   const driftQ = useQuery({
     queryKey: [source, 'iyh-drift'],
     queryFn: () => rest('/drift').catch(() => null),
     refetchInterval: POLL_MS,
+    refetchIntervalInBackground: true,
     retry: false,
   })
   const settingsQ = useQuery({
     queryKey: [source, 'iyh-settings'],
     queryFn: () => rest('/settings').catch(() => null),
     refetchInterval: POLL_MS,
+    refetchIntervalInBackground: true,
     retry: false,
   })
 
@@ -6083,6 +6163,7 @@ function Strip({ source, rest, portraitPreferences }) {
     queryKey: [source, 'iyh-engine-status'],
     queryFn: () => rest('/engine-status').catch(() => null),
     refetchInterval: POLL_MS,
+    refetchIntervalInBackground: true,
     retry: false,
   })
   const encRaw = settingValue(settingsQ.data, 'perception.encoder')

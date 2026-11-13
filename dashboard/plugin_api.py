@@ -92,15 +92,18 @@ def _load_plugin_storage():
 try:  # namespaced gateway import (agent half loads the plugin as a package)
     from ..storage import database as _database
     from ..storage import migration as _migration
+    from ..storage import userstore as _userstore
 except ImportError:
     try:  # plugin root on sys.path (tests: dashboard.plugin_api alongside
         # bare `storage` — single shared instance with the worker)
         from storage import database as _database
         from storage import migration as _migration
+        from storage import userstore as _userstore
     except ImportError:
         _storage = _load_plugin_storage()
         _database = _storage.database
         _migration = _storage.migration
+        _userstore = _storage.userstore
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
@@ -468,12 +471,17 @@ def _settings_defaults():
 
 
 _ctx = None  # plugin ctx, set by register() via set_ctx (gateway wiring)
-_ephemeral_settings: dict = {}  # accepted-but-not-persisted values
+_ephemeral_settings: dict = {}  # in-session/test overlay (agent-command
+# fallback when ctx is unavailable). NOT the pane's source of truth — the
+# durable profile-DB user-data store is. This dict is only a transient cache.
 
 
 def set_ctx(ctx) -> None:
     """GATEWAY WIRING (test-only until __init__ seam lands): remember the
-    plugin ctx so /settings can read/write config via its config API."""
+    plugin ctx so /settings can MIRROR writes to the legacy ctx config API.
+    The ctx store is NO LONGER the source of truth (owner decision
+    2026-11-12): the durable profile-DB user-data store is authoritative;
+    the ctx write is a best-effort mirror for legacy consumers only."""
     global _ctx
     _ctx = ctx
 
@@ -482,8 +490,66 @@ def _get_ctx():
     return _ctx
 
 
+def _user_settings_from_db() -> dict:
+    """The durable user-data document (SOURCE OF TRUTH for user settings),
+    read from the plugin profile DB. Fault-tolerant: {} on any failure (DB
+    missing, locked, not yet bootstrapped) — never raises, never flushes
+    user data. Both plugin halves reach the same document, so settings
+    survive every restart and stay consistent across the split."""
+    try:
+        conn = _connect()
+    except Exception:
+        return {}
+    try:
+        _migration.schema_bootstrap(conn)
+        return _userstore.load(conn)
+    except Exception:
+        return {}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _user_settings_write(values: dict) -> bool:
+    """Durable user-settings write. The SOURCE OF TRUTH is the profile-DB
+    user-data store (survives every restart, shared by both plugin halves);
+    the ctx config API gets a best-effort NON-authoritative mirror so legacy
+    agent-side consumers keep seeing the value. Returns True when the durable
+    write landed. Both the pane (POST /settings) and agent commands route
+    through here — so user settings can never flush on a restart."""
+    persisted = False
+    if isinstance(values, dict) and values:
+        try:
+            conn = _connect()
+            _migration.schema_bootstrap(conn)
+            persisted = _userstore.save(conn, values)
+            conn.close()
+        except Exception:
+            persisted = False
+    ctx = _get_ctx()
+    setter = getattr(ctx, "set_config", None)
+    if callable(setter) and isinstance(values, dict):
+        try:
+            for key, value in values.items():
+                setter(key, value)
+        except Exception:
+            pass  # mirror is best-effort; the durable store is authoritative
+    return persisted
+
+
 def _settings_current() -> dict:
-    """Current C4 values: ctx config wins, then ephemeral, then DEFAULTS."""
+    """Current C4 values, DB-FREE — the agent-side / hot-path read.
+
+    Precedence: C4 DEFAULTS ← in-session ``_ephemeral_settings`` overlay ←
+    the ctx config API (when available). This is what the per-event
+    collector (``_adaptation_settings``), /pulse, and the readiness math
+    consume, so it must NEVER open the DB: a per-event / per-poll DB open is
+    a WAL lock hazard and a test-flake source. The durable pane settings
+    surface is the separate ``_pane_settings()`` below (owner: leave C4
+    consumption as-is — it's still unresolved).
+    """
     defaults = _settings_defaults()
     out = dict(defaults)
     out.update({k: v for k, v in _ephemeral_settings.items() if k in defaults})
@@ -495,6 +561,23 @@ def _settings_current() -> dict:
                 out[key] = get(key, default)
             except Exception:
                 pass
+    return out
+
+
+def _pane_settings() -> dict:
+    """The pane's DURABLE settings read — the SOURCE OF TRUTH is the
+    profile-DB user-data store (the user's persisted overrides, which
+    survive every restart). Used ONLY by the pane's config routes (GET/POST
+    /settings, /engine-status) — a user-action path, never the per-event
+    collector. Precedence: the DB-free base (DEFAULTS + in-session overlay +
+    ctx), then the durable DB document overlaid on top (it wins when present
+    — it is the persisted source of truth; ctx is a dropped legacy mirror).
+    """
+    out = dict(_settings_current())
+    doc = _user_settings_from_db()
+    if doc:
+        defaults = _settings_defaults()
+        out.update({k: v for k, v in doc.items() if k in defaults})
     return out
 
 
@@ -914,23 +997,16 @@ def _pulse_shape() -> dict:
             for vec in vecs:
                 store.add(tool, vec, blabel, provenance=provenance)
         store.mark_clean(str(tool))
-    # Active embedding-space identity for the compatibility gate: the
-    # settings encoder is the active space; the persisted goal row's
-    # backend is checked against it (a goal from another space is
-    # gated out by the matrix, never scored into the pool). The
-    # isolated child creates the backend locally when it can (the
-    # tier-0 sketch is pure python) to report its model_version.
-    active_encoder = cur.get("perception.encoder")
-    model_version = None
-    try:
-        from perception import encoder as _active_encoder
-        _active_backend = _active_encoder.create_backend(
-            None, str(active_encoder) if active_encoder else None)
-        model_version = getattr(_active_backend, "model_version", None)
-    except Exception:
-        pass
-    vector_space = {"id": str(active_encoder) if active_encoder else None,
-                    "model_version": model_version,
+    # The PULSE vector space is the ACTIVE encoder's space (its dim is
+    # carried for the display tag only — it is NOT a gate). PULSE scoring
+    # is cross-dim (perception.canonical.cross_dim_cosine, reached through
+    # pulse.prototypes.cosine): a stored vector from a different encoder
+    # (e.g. 384-d Tier-1 vs the 256-d fallback) is reached by projecting
+    # the higher-res side down at read time, so the expanded view stays
+    # populated across an encoder switch and no stored data is ever
+    # downconverted. Provenance (which encoder produced a vector) is kept
+    # in the goal_backend tag, informational only.
+    vector_space = {"id": None, "model_version": None,
                     "dim": len(goal_vector) if goal_vector else None}
     goal_backend = goal_row[2] if goal_row is not None else None
     # C.1: per-tool event-rate velocity (persisted tool_start throughput
@@ -947,6 +1023,24 @@ def _pulse_shape() -> dict:
         vconn.close()
     except Exception:
         event_rates = {}
+    # D3 cross-process handoff: the isolated dashboard has NO live engine,
+    # so it reconstructs the user-upset block from the persisted F' mirror
+    # (the agent half writes it on every stepped turn + the session close).
+    # read_state is TTL-gated — a stale mirror settles to a neutral F' while
+    # the slow mood M + the prognosis still surface. Any read fault or
+    # absent mirror degrades to the documented neutral shape (never a 500,
+    # never invented values). The mirror carries only derived numbers.
+    upset_block = None
+    try:
+        uconn = _connect()
+        try:
+            _migration.schema_bootstrap(uconn)
+            from pulse import upset as _pulse_upset
+            upset_block = _pulse_upset.UpsetAccumulator.read_state(uconn)
+        finally:
+            uconn.close()
+    except Exception:
+        upset_block = None
     common = dict(
         registry=_DbRegistry(registry_rows), prototypes=store,
         session_state=None,
@@ -955,6 +1049,14 @@ def _pulse_shape() -> dict:
         thresholds=thresholds,
         vector_space=vector_space, goal_backend=goal_backend,
         event_rates=event_rates)
+    if isinstance(upset_block, dict):
+        # Feed the real mirror into the lane builder so the friction lane
+        # gains its ``user`` pseudo-entry (tier-gated) — not just the
+        # top-level block the pane's glitch reads.
+        common["upset"] = upset_block
+        shape["upset"] = upset_block
+    else:
+        shape["upset"] = dict(_NEUTRAL_UPSET)
     rows = _pulse_matrix.build_matrix(**common)
     lanes = _pulse_matrix.build_lanes(**common)
     shape["lanes"] = lanes
@@ -1011,6 +1113,15 @@ _NEUTRAL_MORPHOLOGY: dict = {
     # all zero / seed False here -> the neutral pencil face)
     "faceWidth": 0.0, "headWidth": 0.0, "jaw": 0.0, "brow": 0.0,
     "eyeAspect": 0.0, "hairMass": 0.0, "shoulder": 0.0,
+}
+
+# D1-D6: the documented neutral user-upset shape. An OLDER engine
+# response (pre-accumulator) or the profile-DB fallback carries it:
+# the pane's glitch trigger never fires and the session-level mood M
+# reads as an honest absence (None), never an invented value.
+_NEUTRAL_UPSET: dict = {
+    "value": 0.0, "tier": 0, "upset_turns": 0,
+    "mood": None, "prognosis": None,
 }
 
 
@@ -1517,6 +1628,14 @@ async def pulse(after_event_id: int | None = Query(default=None),
         result = _pulse_shape()
     result["activity_events"] = _pulse_activity_events(after_event_id,
                                                        tool_name=tool_name)
+    # D1-D6 (additive): the user-upset block. New engine code carries it
+    # (pulse_view -> the top-level key); an OLDER engine response or a
+    # partial dict gets the documented neutral shape — the pane's glitch
+    # trigger simply never fires, never a KeyError, never invented
+    # values (same pattern as the /portrait perception key above).
+    upset = result.get("upset")
+    if not isinstance(upset, dict) or "tier" not in upset:
+        result["upset"] = dict(_NEUTRAL_UPSET)
     return result
 
 
@@ -1586,10 +1705,11 @@ async def context():
 
 @router.get("/settings")
 async def settings():
-    """C4 keys + current values (ctx config, else DEFAULTS). The flat
+    """C4 keys + current values. The DURABLE pane read: the profile-DB
+    user-data store is the source of truth (survives restarts); the flat
     dotted-key map lives under "settings"/"keys"; the nested top-level
     expansion is what the desktop settingValue() walk resolves."""
-    flat = _settings_current()
+    flat = _pane_settings()
     nested: dict = {}
     for key, value in flat.items():
         cur = nested
@@ -1602,8 +1722,12 @@ async def settings():
 
 @router.post("/settings")
 async def update_settings(request: Request):
-    """Validate against the C4 key set; unknown keys -> 400. Persists via
-    ctx.set_config when available, else accepted-but-ephemeral (flagged)."""
+    """Validate against the C4 key set; unknown keys -> 400. The SOURCE OF
+    TRUTH is the durable profile-DB user-data store (a single write that
+    survives every restart, shared by both plugin halves). The ctx config
+    API is a best-effort NON-authoritative mirror for legacy consumers — a
+    failed mirror never loses the durable write. There is no ephemeral path:
+    user settings can no longer flush on a restart."""
     try:
         payload = await request.json()
     except Exception:
@@ -1619,22 +1743,16 @@ async def update_settings(request: Request):
             status_code=400,
             content={"error": "unknown settings keys", "unknown": unknown})
     accepted = {k: incoming[k] for k in incoming if k in defaults}
-    ctx = _get_ctx()
-    setter = getattr(ctx, "set_config", None)
-    persisted = False
-    if callable(setter):
-        try:
-            for key, value in accepted.items():
-                setter(key, value)
-            persisted = True
-        except Exception:
-            persisted = False
-    if not persisted:
-        _ephemeral_settings.update(accepted)
+    # SOURCE OF TRUTH: the durable profile-DB user-data store (a single
+    # write that survives every restart). The ctx config mirror is handled
+    # inside the helper (non-authoritative, best-effort).
+    persisted = _user_settings_write(accepted)
     return {
-        "settings": _settings_current(),
+        "settings": _pane_settings(),
         "accepted": accepted,
         "persisted": persisted,
+        # Back-compat flag: True only when the durable write did NOT land
+        # (then the value is in-session only and will flush on restart).
         "ephemeral": not persisted,
     }
 
@@ -1648,7 +1766,7 @@ async def engine_status():
     no worker spawn). Never a 500: any import/probe fault degrades to
     ``onnx_model: 'unavailable'`` with a one-line detail, so a missing optional
     path can't take the whole dashboard down."""
-    cur = _settings_current()
+    cur = _pane_settings()
     out = {
         "encoder": str(cur.get("perception.encoder", "tier-0")),
         "onnx_model": "unknown",

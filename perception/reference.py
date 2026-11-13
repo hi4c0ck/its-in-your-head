@@ -182,12 +182,16 @@ class RollingReference:
         cosine of ``vector`` to ANY of the rolling reference's per-dim window
         vectors. 0.0 = it sits inside at least one dim's recent territory;
         near 1.0 = it is out of scope of everything recently observed.
-        Deterministic (no clock)."""
-        from .resemblance import cosine
+        Cross-dim: a window outlives an encoder switch (256 vs 384), so a
+        different-dim reference is reached by meeting at the lower dim
+        (perception.canonical.cross_dim_cosine) rather than skipped or
+        raising. Deterministic (no clock)."""
+        from .canonical import cross_dim_cosine
         best = 0.0
+        v = list(vector) if vector else []
         for dim in self.dims:
             for ref_vec in self.windows[dim].vectors():
-                c = cosine(vector, ref_vec)
+                c = cross_dim_cosine(v, ref_vec)
                 if c > best:
                     best = c
         return round(1.0 - _clip01(best), 4)

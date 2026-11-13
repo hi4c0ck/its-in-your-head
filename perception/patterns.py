@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from .anchors import ANCHORS, DIMENSIONS, resolve_data_dir
-from .resemblance import cosine
+from .canonical import cross_dim_cosine
 
 logger = logging.getLogger(__name__)
 
@@ -575,12 +575,25 @@ def score_turn(prompt_vector, reaction_vector, bank: dict) -> dict:
     (filled by the caller from accumulated evidence).
     """
     entries = []
+    p_vec = list(prompt_vector)
+    r_vec = (list(reaction_vector) if reaction_vector is not None else None)
     for name, anchors in bank.items():
-        prompt_affinity = cosine(list(prompt_vector), list(anchors["prompt_anchor"]))
-        if reaction_vector is None:
+        p_anchor = list(anchors["prompt_anchor"])
+        a_anchor = list(anchors["agent_anchor"])
+        # Cross-dim scoring: an anchor from a DIFFERENT encoder space outlives
+        # an encoder switch (e.g. 256-d sketch vs 384-d Tier-1 in the
+        # persisted bank). Instead of skipping a different-dim anchor (which
+        # orphaned the data) or letting cosine raise a dimension-mismatch,
+        # meet at the lower dim (perception.canonical.cross_dim_cosine) so
+        # every stored anchor stays reachable from either encoder. An empty
+        # side yields a None affinity (not scored), never a crash.
+        prompt_affinity = (cross_dim_cosine(p_vec, p_anchor)
+                          if p_vec and p_anchor else None)
+        if r_vec is None:
             agent_affinity = None
         else:
-            agent_affinity = cosine(list(reaction_vector), list(anchors["agent_anchor"]))
+            agent_affinity = (cross_dim_cosine(r_vec, a_anchor)
+                              if r_vec and a_anchor else None)
         entries.append({
             "name": name,
             "prompt_affinity": prompt_affinity,

@@ -192,12 +192,15 @@ def test_settings_accepts_c4_keys_and_persists_via_ctx(tmp_path):
     assert c.get("/settings").json()["settings"]["adaptation.enabled"] is True
 
 
-def test_settings_ephemeral_without_ctx(tmp_path):
+def test_settings_durable_without_ctx(tmp_path):
+    # No ctx: the write is STILL durable — the profile-DB user-data store is
+    # the source of truth; ctx is only a dropped legacy mirror. So the value
+    # persists (survives restart) even with no ctx available.
     c = _client(tmp_path, ctx=None)
     r = c.post("/settings", json={"pulse.prototype_cap": 32})
     body = r.json()
-    assert body["persisted"] is False
-    assert body["ephemeral"] is True
+    assert body["persisted"] is True
+    assert body["ephemeral"] is False
     assert c.get("/settings").json()["settings"]["pulse.prototype_cap"] == 32
 
 
@@ -205,6 +208,23 @@ def test_settings_reads_ctx_config_values(tmp_path):
     ctx = FakeCtx(config={"observer": None, "observation.retain_days": 7})
     c = _client(tmp_path, ctx=ctx)
     assert c.get("/settings").json()["settings"]["observation.retain_days"] == 7
+
+
+def test_settings_persist_across_restart(tmp_path):
+    # The actual 'never flush on restart' guarantee. A fresh _client reloads
+    # the module (fresh in-memory state = a process restart), but the on-disk
+    # profile DB (the durable source of truth) is unchanged — so a setting
+    # written before the 'restart' must still be readable after it.
+    c1 = _client(tmp_path, ctx=None)
+    r = c1.post("/settings", json={"pulse.prototype_cap": 32,
+                                   "perception.encoder": "tier-1"})
+    assert r.json()["persisted"] is True
+    # 'Restart': a brand-new client (module reloaded, in-memory state wiped),
+    # same on-disk DB.
+    c2 = _client(tmp_path, ctx=None)
+    got = c2.get("/settings").json()["settings"]
+    assert got["pulse.prototype_cap"] == 32
+    assert got["perception.encoder"] == "tier-1"
 
 
 # --- /reset -----------------------------------------------------------------

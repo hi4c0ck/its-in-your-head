@@ -430,33 +430,45 @@ def test_envelope_additive_rows_unchanged(tmp_path, monkeypatch):
     assert set(row) == {"tool_name", "tool_id", "state", "labeled", "live",
                         "goal", "good", "friction", "momentum"}
     assert shape["columns"] == ["goal", "good", "friction", "unlabeled"]
-    # Every lane carries the tool, ranked from 1.
-    for entries in shape["lanes"].values():
-        assert len(entries) == 1
-        assert entries[0]["rank"] == 1
-        assert entries[0]["tool_name"] == "terminal"
+    # Every lane carries the tool. The friction lane MAY additionally
+    # carry the D1-D6 additive ``user`` PSEUDO-entry (tool_id -1) when the
+    # persisted F' mirror is in a D4 tier (the cross-process handoff) —
+    # the tool projection under test is the non-pseudo entries.
+    for lane, entries in shape["lanes"].items():
+        tools = [e for e in entries if e.get("tool_id") != -1]
+        assert len(tools) == 1, lane
+        assert tools[0]["tool_name"] == "terminal", lane
+        if lane != "friction":
+            # no pseudo-entry lives outside the friction lane
+            assert len(entries) == 1, lane
+            assert entries[0]["rank"] == 1
+            assert entries[0]["tool_name"] == "terminal"
     engine._engine = None
     database.set_override(None)
 
 
-# --- v0.1.10 (review P0-2): vector-space provenance gate -------------------
-# Persisted vectors carry (backend, model_version) provenance. In an
-# active embedding space, dimension-compatible vectors are SCORED but
-# only KNOWN provenance equal to the active space counts toward
-# readiness SUPPORT; legacy records (unknown provenance) are never
-# silently assumed compatible. Legacy callers (no active space) keep
-# the pre-gate behavior. This is the "numeric weak score with a ready
-# state, despite an invalid comparison" defect class — pinned dead.
+# --- Cross-dim PULSE reachability (no loss, safe encoder toggle) -----------
+# Vectors are stored at their NATIVE encoder dimension (a 4-d "sketch" bank
+# and an 8-d "minilm"/Tier-1 bank in this fixture). Scoring meets at the
+# LOWER dim (perception.canonical.cross_dim_cosine via pulse.prototypes
+# .cosine), so a foreign-dim vector is REACHABLE — the higher-res side is
+# projected down at read time (no crash, no loss, no orphan). Only an absent
+# goal (None) leaves a lane empty. This is the "both encoders reach the
+# top-quality data at that moment" ruling.
 
 SKETCH_SPACE = {"id": "sketch", "model_version": 1, "dim": 4}
-MINILM_SPACE = {"id": "minilm", "model_version": 2, "dim": 4}
+MINILM_SPACE = {"id": "minilm", "model_version": 2, "dim": 8}
 
 
 def _lane_tool(lanes, lane, tool):
     return {e["tool_name"]: e for e in lanes[lane]}[tool]
 
 
-def test_vector_space_provenance_gate():
+def test_vector_space_cross_dim_reachability():
+    """A foreign-dim vector (an 8-d 'minilm' capsule vs a 4-d 'sketch' goal)
+    is reachable — projected to the lower dim at read time — so it counts in
+    scoring AND support. No crash, no loss, no orphan. Only an absent goal
+    (None) leaves the lane empty."""
     reg = _FakeRegistry([_row("terminal", 1), _row("read_file", 2)])
     banks = {
         "terminal": {"good": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]],
@@ -465,11 +477,11 @@ def test_vector_space_provenance_gate():
     }
     metas = {"terminal": {"good": ("sketch", 1)}}
     protos = _FakeProtos(banks, min_labeled=3, metas=metas)
-    goal_vec = [1, 0, 0, 0]
+    goal_vec = [1, 0, 0, 0]  # a 4-d (sketch/fallback) goal
     capsules = {"read_file": [
         {"vector": [1, 0, 0, 0], "backend": "sketch", "model_version": 1},
-        {"vector": [0, 0, 1, 0], "backend": "minilm", "model_version": 2},
-        {"vector": [0, 1, 0, 0]},  # legacy record: no provenance tag
+        # an 8-d (Tier-1/minilm) capsule: a DIFFERENT dim than the 4-d goal.
+        {"vector": [0.2] * 8, "backend": "minilm", "model_version": 2},
     ]}
 
     def run(space, backend=None):
@@ -477,66 +489,33 @@ def test_vector_space_provenance_gate():
                            capsules_by_tool=capsules,
                            vector_space=space, goal_backend=backend)
 
-    # Legacy: no active space identified — every dimension-comparable
-    # vector scores AND supports (pre-gate behavior preserved).
-    lanes = run(None)
-    g = _lane_tool(lanes, "good", "terminal")
-    assert g["value"] is not None and g["state"] == "ready"
-    assert g["support"]["count"] == 3
-    gl = _lane_tool(lanes, "goal", "read_file")
-    assert gl["evidence"]["source"] == "recent_capsules"
-    assert gl["evidence"]["capsule_count"] == 3
-    assert gl["state"] == "ready"
-    gt = _lane_tool(lanes, "goal", "terminal")
-    assert gt["evidence"]["source"] == "prototype_banks"
-    assert gt["evidence"]["prototype_count"] == 3
-
-    # Active space = sketch: the good bank's vectors share the sketch
-    # label provenance (provenance is per-label in the store) — all
-    # support; the capsule fallback only supports the sketch-tagged
-    # capsule (unknown + minilm-tagged never count).
+    # The read_file goal lane falls back to its capsules: BOTH the 4-d and the
+    # 8-d capsule are reachable (the 8-d is projected to 4 at read time) and
+    # both count as support. No crash, no orphaned foreign-dim evidence.
     lanes = run(SKETCH_SPACE)
+    gl = _lane_tool(lanes, "goal", "read_file")
+    assert gl["evidence"]["capsule_count"] == 2, \
+        "both the 4-d and the 8-d capsule are reachable (cross-dim)"
+    assert gl["support"]["count"] == 2, "foreign-dim evidence counts too"
+    assert gl["value"] is not None, "cross-dim scoring produces a value"
+
+    # The terminal GOOD bank is all 4-d: it scores exactly (same-dim) and
+    # supports; a foreign-dim bank vector added on top also reaches.
     g = _lane_tool(lanes, "good", "terminal")
     assert g["state"] == "ready" and g["support"]["count"] == 3
-    gl = _lane_tool(lanes, "goal", "read_file")
-    assert gl["support"]["count"] == 1, \
-        "only the sketch-tagged capsule supports (unknown + minilm never)"
-    assert gl["state"] == "provisional", "1/3 support: numeric score, NOT ready"
-    # Provisional short-fall: raise the readiness minimum — known
-    # support (3) stays below it while the numeric score persists.
-    protos.good_min_samples = 4
-    lanes = run(SKETCH_SPACE)
-    g = _lane_tool(lanes, "good", "terminal")
-    assert g["value"] is not None, "comparable vectors still produce a score"
-    assert g["state"] == "provisional", \
-        "3/4 support: NOT ready (the old ready-with-invalid-comparison hole)"
-    protos.good_min_samples = None
-
-    # Encoder switch to minilm: the sketch-provenanced vectors lose ALL
-    # support but remain dimension-comparable — they score without
-    # ever counting. The minilm-tagged capsule now supports.
-    lanes = run(MINILM_SPACE)
-    g = _lane_tool(lanes, "good", "terminal")
-    assert g["value"] is not None, "same-dim foreign-space vectors still score"
-    assert g["support"]["count"] == 0
-    assert g["state"] == "learning", \
-        "zero support in the active space: learning, not ready"
-    gl = _lane_tool(lanes, "goal", "read_file")
-    assert gl["support"]["count"] == 1, \
-        "the minilm-tagged capsule now supports; sketch/legacy do not"
-
-    # Goal-vector gate: a goal vector from a KNOWN different encoder
-    # is not comparable at all — gated out before any lane is built.
-    lanes = run(SKETCH_SPACE, backend="minilm")
-    assert _lane_tool(lanes, "goal", "terminal")["state"] == "empty"
-    assert _lane_tool(lanes, "goal", "read_file")["state"] == "empty"
-    assert _lane_tool(lanes, "good", "terminal")["state"] == "empty"
-    assert _lane_tool(lanes, "friction", "terminal")["state"] == "empty"
-
-    # Dimension mismatch: an 8-dim vector in a 4-dim space is excluded
-    # from scoring and support alike (its label provenance is moot).
     banks["terminal"]["good"].append([0.1] * 8)
     lanes = run(SKETCH_SPACE)
     g = _lane_tool(lanes, "good", "terminal")
-    assert g["support"]["count"] == 3, \
-        "the 8-dim vector contributes nothing to the 4-dim space"
+    assert g["support"]["count"] == 4, \
+        "a foreign-dim bank vector contributes (cross-dim), not excluded"
+
+    # No goal gate: even an 8-d goal reaches the 4-d store cross-dim.
+    lanes = build_lanes(reg, protos, goal_vector=[0.5] * 8,
+                        capsules_by_tool=capsules, vector_space=SKETCH_SPACE)
+    assert _lane_tool(lanes, "goal", "read_file")["state"] != "empty", \
+        "an 8-d goal reaches the 4-d store cross-dim"
+
+    # Only an ABSENT goal (None) leaves the lane empty.
+    lanes = build_lanes(reg, protos, goal_vector=None,
+                        capsules_by_tool=capsules, vector_space=SKETCH_SPACE)
+    assert _lane_tool(lanes, "goal", "read_file")["state"] == "empty"
