@@ -50,6 +50,307 @@ PLUGIN_ID = "its-in-your-head"
 DEFAULT_TIMEOUT_S = 60.0
 _MODEL_ID_FOR_DIR = "onnx-community/paraphrase-multilingual-MiniLM-L12-v2-ONNX"
 
+# ---------------------------------------------------------------------------
+# Process-tree leak guard (Windows).
+#
+# The ONNX worker is a Popen child that is reaped ONLY by an explicit
+# shutdown(). With no atexit hook and no teardown, a hard-killed owner
+# (the gateway, the plugin-host child, a taskkill) ORPHANS worker.py — each
+# restart stacks another one. Two layered fixes:
+#   1. atexit  -> on a CLEAN exit, shut the shared client down (reap).
+#   2. a Windows job object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE that every
+#      spawned worker is assigned to: when the owner process dies ANY way
+#      (including a hard kill), the OS closes the job handle, the job is
+#      destroyed, and every assigned worker is killed with it.
+# Both are best-effort: a failure only drops the safety net, never the worker.
+# ---------------------------------------------------------------------------
+_kill_job_handle = 0        # the open job handle, kept for the process lifetime
+_kernel32 = None
+_JOB_LIMIT_ACTIVE_PROCESS = 0x1
+_JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+_JOBOBJECT_EXTENDED_LIMIT_INFORMATION = 9
+
+
+def _job_structs():
+    import ctypes
+    _c = ctypes
+
+    class _Basic(_c.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", _c.c_longlong),
+            ("PerProcessKernelTimeLimit", _c.c_longlong),
+            ("LimitFlags", _c.c_uint32),
+            ("MaximumWorkingSetSize", _c.c_size_t),
+            ("MinimumWorkingSetSize", _c.c_size_t),
+            ("PageCount", _c.c_uint32),
+            ("MinimumProcessCount", _c.c_uint32),
+            ("MaximumProcessCount", _c.c_uint32),
+            ("CompletionCode", _c.c_uint32),
+        ]
+
+    class _Extended(_c.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _Basic),
+            ("IoInfo", _c.c_void_p),
+            ("ProcessMemoryLimit", _c.c_size_t),
+            ("JobMemoryLimit", _c.c_size_t),
+            ("PeakProcessMemoryUsed", _c.c_size_t),
+            ("PeakJobMemoryUsed", _c.c_size_t),
+        ]
+
+    return _c, _Extended
+
+
+def _windows_kill_job() -> int:
+    """Create (once) + return the process's KILL_ON_JOB_CLOSE job handle.
+
+    Returns 0 when unavailable (non-Windows / failure) — callers fall back to
+    atexit-only cleanup in that case. The handle is kept open for the whole
+    process lifetime so KILL_ON_JOB_CLOSE fires when the process exits.
+    """
+    global _kill_job_handle, _kernel32
+    if _kill_job_handle:
+        return _kill_job_handle
+    if os.name != "nt":
+        return 0
+    if _kernel32 is None:
+        import ctypes
+        k = ctypes.windll.kernel32
+        k.CreateJobObjectW.restype = ctypes.c_void_p
+        k.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        k.SetInformationJobObject.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+        k.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        k.OpenProcess.restype = ctypes.c_void_p
+        k.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        k.CloseHandle.argtypes = [ctypes.c_void_p]
+        _kernel32 = k
+    _c, _ext = _job_structs()
+    job = _kernel32.CreateJobObjectW(None, None)
+    if not job:
+        return 0
+    ext = _ext()
+    ext.BasicLimitInformation.LimitFlags = (
+        _JOB_LIMIT_ACTIVE_PROCESS | _JOB_LIMIT_KILL_ON_JOB_CLOSE)
+    # NOTE: on Windows this call often returns 0 with ERROR_MORE_DATA even
+    # though the limit is applied (a documented quirk). We fire it + proceed;
+    # only a failed CreateJobObjectW is fatal here.
+    if not _kernel32.SetInformationJobObject(
+            job, _JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            _c.byref(ext), _c.sizeof(ext)):
+        logger.debug(
+            "its-in-your-head: job-object limit set returned non-zero "
+            "(best-effort, limit typically applied)")
+    _kill_job_handle = job
+    return job
+
+
+def _attach_to_kill_job(proc) -> None:
+    """Assign a Popen to the kill-on-close job so it dies with its owner.
+
+    No-op off-Windows or when the job is unavailable. Best-effort: a failure
+    logs + leaves the worker running (losing only the hard-kill safety net).
+
+    ``AssignProcessToJobObject`` needs a handle carrying PROCESS_SET_QUOTA,
+    which the Popen's own process handle does not carry — so we re-open by pid.
+    """
+    if os.name != "nt" or proc is None:
+        return
+    job = _windows_kill_job()
+    if not job:
+        return
+    pid = getattr(proc, "pid", None)
+    if not pid:
+        return
+    if _kernel32 is None:
+        return
+    import ctypes
+    PROCESS_SET_QUOTA = 0x0020
+    handle = _kernel32.OpenProcess(PROCESS_SET_QUOTA, False, pid)
+    if not handle:
+        return
+    try:
+        ok = _kernel32.AssignProcessToJobObject(job, handle)
+    finally:
+        _kernel32.CloseHandle(handle)
+    if not ok:
+        logger.debug(
+            "its-in-your-head: AssignProcessToJobObject returned %s "
+            "(hard-kill safety net unavailable)", ok)
+
+
+# ---------------------------------------------------------------------------
+# Stale-registry reaper (layer 2, environment-independent).
+#
+# The Job Object above is the hard-kill guard, but it needs the process tree
+# to NOT already be job-governed — which it usually is under a gateway / MSYS
+# host, where AssignProcessToJobObject returns ACCESS_DENIED. This reaper
+# works everywhere: each owner records its worker pid under a file named by
+# the owner pid; on the next spawn we terminate any worker whose owner is
+# gone. A killed-by-PID is only taken after a command-line check proves the
+# live pid is still our worker (guards against a recycled pid), so we never
+# take down an unrelated process.
+# ---------------------------------------------------------------------------
+_WORKER_CMDLINE_MARKERS = ("worker.py", "its-in-your-head-onnx")
+_ONNX_VENV_MARKER = "its-in-your-head-onnx"  # dedicated venv -> image-path signal
+
+
+def _registry_dir(model_dir) -> Path | None:
+    if not model_dir:
+        return None
+    d = Path(model_dir) / "onnx-workers"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    except Exception:
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    if not pid:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+            k = ctypes.windll.kernel32
+            k.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+            k.OpenProcess.restype = ctypes.c_void_p
+            k.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+            k.GetExitCodeProcess.restype = ctypes.c_int
+            k.CloseHandle.argtypes = [ctypes.c_void_p]
+            STILL_ACTIVE = 259
+            # OpenProcess alone is NOT a liveness test: a terminated-but-
+            # unreaped process object is still openable. Use the exit code.
+            h = k.OpenProcess(0x0400, False, pid)  # PROCESS_QUERY_INFORMATION
+            if not h:
+                return False
+            try:
+                code = ctypes.c_uint32()
+                if not k.GetExitCodeProcess(h, ctypes.byref(code)):
+                    return False
+                return code.value == STILL_ACTIVE
+            finally:
+                k.CloseHandle(h)
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except Exception:
+        return False
+
+
+def _proc_is_our_worker(pid: int) -> bool:
+    """True when `pid` still runs our ONNX worker. Fast + in-process (no
+    shell): the onnx venv is dedicated to the worker, so matching the
+    process IMAGE against it is a strong "this pid is our worker" signal.
+    It also covers the death-then-PID-reuse window (a recycled pid now runs a
+    different interpreter -> no match). False (safe: the reaper skips the
+    kill) when the image cannot be read or does not match."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            k = ctypes.windll.kernel32
+            k.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+            k.OpenProcess.restype = ctypes.c_void_p
+            h = k.OpenProcess(0x0400, False, pid)  # PROCESS_QUERY_INFORMATION
+            if not h:
+                return False
+            try:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = ctypes.c_uint32(buf._length_)
+                k.QueryFullProcessImageNameW.argtypes = [
+                    ctypes.c_void_p, ctypes.c_uint32,
+                    ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_uint32)]
+                ok = k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+            finally:
+                k.CloseHandle(h)
+            if not ok:
+                return False
+            return _ONNX_VENV_MARKER in buf.value.lower()
+        out = Path(f"/proc/{pid}/cmdline").read_text().replace("\x00", " ")
+        return all(m in out.lower() for m in _WORKER_CMDLINE_MARKERS)
+    except Exception:
+        return False
+
+
+def _terminate_pid(pid: int) -> bool:
+    try:
+        if os.name == "nt":
+            import ctypes
+            k = ctypes.windll.kernel32
+            k.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+            k.OpenProcess.restype = ctypes.c_void_p
+            k.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            k.TerminateProcess.restype = ctypes.c_int
+            k.CloseHandle.argtypes = [ctypes.c_void_p]
+            h = k.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+            if not h:
+                return False
+            ok = bool(k.TerminateProcess(h, 1))
+            k.CloseHandle(h)
+            return ok
+        import signal
+        os.kill(pid, signal.SIGKILL)
+        return True
+    except Exception:
+        return False
+
+
+def _reap_stale_workers(model_dir) -> None:
+    reg = _registry_dir(model_dir)
+    if reg is None:
+        return
+    self_pid = os.getpid()
+    for f in sorted(reg.iterdir()):
+        if not f.name.endswith(".json"):
+            continue
+        try:
+            data = json.loads(f.read_text())
+            owner = int(f.stem)
+            wpid = int(data.get("worker_pid", 0))
+        except Exception:
+            try:
+                f.unlink()  # corrupt/unreadable entry: safe to drop
+            except Exception:
+                pass
+            continue
+        if _pid_alive(owner) or owner == self_pid:
+            # Live owner: keep its entry + do not touch its worker.
+            continue
+        # Owner gone -> the recorded worker is a stale orphan (if still up).
+        if wpid and wpid != self_pid and _pid_alive(wpid) \
+                and _proc_is_our_worker(wpid):
+            _terminate_pid(wpid)
+            logger.info(
+                "its-in-your-head: reaped stale ONNX worker pid %d "
+                "(owner %d gone)", wpid, owner)
+        try:
+            f.unlink()  # drop the dead owner's entry
+        except Exception:
+            pass
+
+
+def _record_worker(model_dir, worker_pid: int) -> None:
+    reg = _registry_dir(model_dir)
+    if reg is None:
+        return
+    f = reg / "{}.json".format(os.getpid())
+    try:
+        f.write_text(json.dumps({"worker_pid": int(worker_pid), "ts": time.time()}))
+    except Exception:
+        pass
+
+
+def _forget_worker(model_dir) -> None:
+    reg = _registry_dir(model_dir)
+    if reg is None:
+        return
+    f = reg / "{}.json".format(os.getpid())
+    try:
+        f.unlink()
+    except Exception:
+        pass
+
 
 def _safe_model_dirname(model_id: str) -> str:
     return model_id.replace("/", "--")
@@ -257,6 +558,13 @@ class OnnxWorkerClient:
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1,
                 env=_worker_env())
+            # Best-effort: bind this worker to the process's KILL_ON_JOB_CLOSE
+            # job so it is reaped even if the owner is hard-killed (taskkill).
+            _attach_to_kill_job(self._proc)
+            # Reap orphans from dead owners, then record this worker so the
+            # next owner reaps it if we die without a clean shutdown.
+            _reap_stale_workers(self.model_dir)
+            _record_worker(self.model_dir, self._proc.pid)
         except Exception as exc:
             raise Tier1Failure("spawn-failed", f"{type(exc).__name__}: {exc}") from exc
         # ping handshake on start
@@ -424,6 +732,7 @@ class OnnxWorkerClient:
             except Exception:
                 self._kill()
             self._proc = None
+            _forget_worker(self.model_dir)
 
 
 _shared: OnnxWorkerClient | None = None
@@ -449,3 +758,13 @@ def reset_shared_client() -> None:
             except Exception:
                 pass
         _shared = None
+
+
+# ---------------------------------------------------------------------------
+# Clean-exit leak guard: on a NORMAL interpreter/process exit, reap the shared
+# ONNX worker. The hard-kill path (taskkill / crash, where atexit never runs)
+# is covered by the KILL_ON_JOB_CLOSE job object assigned in _spawn().
+# ---------------------------------------------------------------------------
+import atexit  # noqa: E402
+
+atexit.register(reset_shared_client)

@@ -1,6 +1,7 @@
 """S8 ONNX Tier-1 worker (LANE B): hermetic fake-worker protocol + fallback + /mirror engine."""
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -578,3 +579,101 @@ def test_verify_ignores_unknown_files_on_disk(tmp_path):
     (dest / "onnx" / "model.onnx").unlink()
     assert any("missing" in e and "model.onnx" in e
                for e in encoder.verify_tier1_model(dest, manifest_path=mp2, variant="fp32"))
+
+
+# --- leak-guard regression tests (atexit + job object + stale-registry reaper) ---
+
+def test_pid_alive_reflects_real_state():
+    import subprocess
+    import time
+    from perception.worker_client import _pid_alive, _terminate_pid
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert _pid_alive(p.pid) is True
+    finally:
+        _terminate_pid(p.pid)
+        p.wait()
+    time.sleep(0.2)
+    assert _pid_alive(p.pid) is False
+    assert _pid_alive(0) is False
+
+
+def test_guard_rejects_unrelated_process():
+    import subprocess
+    from perception.worker_client import _proc_is_our_worker
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        # Our own (non-onnx-venv) interpreter must NEVER be treated as a
+        # reapeable worker: the reaper's safety guard rejects it.
+        assert _proc_is_our_worker(p.pid) is False
+    finally:
+        p.terminate()
+        p.wait()
+
+
+def test_reaper_kills_dead_owner_worker(tmp_path, monkeypatch):
+    import json as _json
+    from perception import worker_client as wc
+    reg = wc._registry_dir(tmp_path)
+    assert reg is not None
+    dead_owner, orphan = 900_001, 900_002
+    (reg / f"{dead_owner}.json").write_text(
+        _json.dumps({"worker_pid": orphan, "ts": 0.0}))
+    terminated = []
+    monkeypatch.setattr(wc, "_pid_alive",
+                        lambda pid: pid in (orphan,))
+    monkeypatch.setattr(wc, "_proc_is_our_worker", lambda pid: pid == orphan)
+    monkeypatch.setattr(wc, "_terminate_pid",
+                        lambda pid: terminated.append(pid) or True)
+    wc._reap_stale_workers(tmp_path)
+    assert terminated == [orphan]
+    assert not list(reg.glob("*.json"))
+
+
+def test_reaper_preserves_live_owner_entry(tmp_path, monkeypatch):
+    import json as _json
+    from perception import worker_client as wc
+    reg = wc._registry_dir(tmp_path)
+    assert reg is not None
+    live_owner, worker = 910_001, 910_002
+    (reg / f"{live_owner}.json").write_text(
+        _json.dumps({"worker_pid": worker, "ts": 0.0}))
+    terminated = []
+    monkeypatch.setattr(wc, "_pid_alive",
+                        lambda pid: pid in (live_owner, worker, os.getpid()))
+    monkeypatch.setattr(wc, "_proc_is_our_worker", lambda pid: True)
+    monkeypatch.setattr(wc, "_terminate_pid",
+                        lambda pid: terminated.append(pid) or True)
+    wc._reap_stale_workers(tmp_path)
+    assert terminated == []
+    assert (reg / f"{live_owner}.json").exists()  # live owner's entry survives
+
+
+def test_spawn_records_and_reaps_integration(tmp_path):
+    """_spawn() reaps a dead owner's orphan + records the new worker under
+    the current pid; shutdown() forgets the current pid's entry."""
+    import json as _json
+    import subprocess as _sp
+    from perception import worker_client as wc
+    reg = wc._registry_dir(tmp_path)
+    assert reg is not None
+    # Plant a dead owner's orphan entry whose "worker" is a live, matchable proc.
+    orphan = _sp.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    dead_owner = 950_001
+    (reg / f"{dead_owner}.json").write_text(
+        _json.dumps({"worker_pid": orphan.pid, "ts": 0.0}))
+    killed = []
+    _orig_is = wc._proc_is_our_worker
+    _orig_term = wc._terminate_pid
+    wc._proc_is_our_worker = lambda pid: pid == orphan.pid
+    wc._terminate_pid = lambda pid: (killed.append(pid), True)[1]
+    try:
+        wc._reap_stale_workers(tmp_path)
+        wc._record_worker(tmp_path, orphan.pid)  # current pid owns a new worker
+    finally:
+        wc._proc_is_our_worker = _orig_is
+        wc._terminate_pid = _orig_term
+        orphan.terminate()
+        orphan.wait()
+    assert orphan.pid in killed  # the orphan was terminated by the reaper
+    assert (reg / f"{os.getpid()}.json").exists()  # self recorded
