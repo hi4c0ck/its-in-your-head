@@ -122,7 +122,13 @@ def test_worker_persists_events(tmp_path):
             "SELECT status_code, retryable, error_type, error_message "
             "FROM events WHERE type='error'"
         ).fetchone()
-        assert err == (503, 1, "http", "boom")
+        # §4.2: arbitrary provider/exception messages are NEVER persisted.
+        # The bounded error_type + the numeric status/retry counters survive;
+        # error_message is written NULL regardless of the raw input.
+        assert err == (503, 1, "http", None)
+        # §4.4: the raw sentinel error/reason text must not leak into SQLite.
+        row_text = " ".join(str(v) for v in err)
+        assert "boom" not in row_text and "upstream" not in row_text
 
 
 def test_lazy_db_never_opened_at_import(tmp_path):

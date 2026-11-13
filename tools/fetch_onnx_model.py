@@ -157,17 +157,29 @@ def run_smoke(model_dir: Path, manifest_path: Path) -> dict:
     if not Path(python).is_file():
         raise RuntimeError(f"PM env interpreter not found: {python}")
     import subprocess
+    # §3.2: the maintainer smoke must use the SAME env-isolation policy as the
+    # runtime worker client — one allowlist, no full Hermes env inheritance.
+    # (worker_client import is safe: its pm import is guarded, no I/O.)
+    from perception import worker_client
 
     req = {"op": "embed",
            "texts": ["hello world", "bonjour le monde"], "request_id": "smoke"}
     proc = subprocess.run(
         [str(python), str(project / "worker.py"), str(model_dir), str(manifest_path)],
-        input=json.dumps(req) + "\n", capture_output=True, text=True, timeout=600)
+        input=json.dumps(req) + "\n", capture_output=True, text=True,
+        timeout=600, env=worker_client._worker_env())
+    # §3.3: bounded, categorized failure — never dump unbounded child stderr
+    # (it can echo env/model paths) into the raised reason.
     if proc.returncode != 0:
-        raise RuntimeError(f"smoke worker exit {proc.returncode}: {proc.stderr.strip()}")
+        tail = " ".join(proc.stderr.strip().split()[-12:])[:200]
+        raise RuntimeError(
+            f"smoke worker exit {proc.returncode} (handshake failed): "
+            f"{tail or '<no stderr>'}")
     resp = json.loads(proc.stdout.strip().splitlines()[0])
     if "error" in resp:
-        raise RuntimeError(f"smoke worker error: {resp['error']}")
+        raise RuntimeError(
+            f"smoke worker protocol error (handshake failed): "
+            f"{str(resp['error'])[:200]}")
     vectors = resp["vectors"]
     if len(vectors) != 2 or any(len(v) != 384 for v in vectors):
         raise ValueError(f"smoke vectors shape wrong: {[len(v) for v in vectors]}")

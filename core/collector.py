@@ -66,7 +66,7 @@ def _corr(kwargs) -> dict:
 
 
 def _flush_reasoning(turn_id, session_id=None):
-    got = STATE.reasoning_flush(turn_id)
+    got = STATE.reasoning_flush(session_id, turn_id)
     if got is None:
         return
     text, chunks = got
@@ -189,11 +189,12 @@ def _on_post_api_request(**kwargs):
 
 
 def _on_api_request_error(**kwargs):
-    """Error ticks."""
+    """Error ticks. §4.1: only a bounded error-class + the numeric
+    status/retry fields are carried; arbitrary provider/exception text
+    (the raw `reason` + `error` body) is NOT retained in the event or
+    persisted — the DB stores the category + a NULL message only."""
     try:
         error = kwargs.get("error")
-        if not isinstance(error, dict):
-            error = {}
         metrics.enqueue({
             "type": "error",
             "ts": time.time(),
@@ -204,8 +205,7 @@ def _on_api_request_error(**kwargs):
             "status_code": kwargs.get("status_code"),
             "retry_count": kwargs.get("retry_count"),
             "retryable": kwargs.get("retryable"),
-            "reason": kwargs.get("reason"),
-            "error": error,
+            "error_type": events.error_type(error),
         })
     except Exception:
         logger.exception("its-in-your-head: error capture failed")
@@ -278,7 +278,7 @@ def _on_stream_delta(delta=None, kind=None, **kwargs):
         kind = kind or kwargs.get("kind")
         turn_id = corr["turn_id"]
         if kind == "text":
-            if turn_id and STATE.reasoning_pending(turn_id):
+            if turn_id and STATE.reasoning_pending(corr["session_id"], turn_id):
                 _flush_reasoning(turn_id, corr["session_id"])
             return
         if kind != "reasoning" or turn_id is None:
@@ -286,7 +286,8 @@ def _on_stream_delta(delta=None, kind=None, **kwargs):
         if not _setting("observation.reasoning"):
             return
         STATE.inc("stream_deltas")
-        if STATE.reasoning_feed(turn_id, delta if delta is not None
+        if STATE.reasoning_feed(corr["session_id"], turn_id,
+                                delta if delta is not None
                                 else kwargs.get("delta")):
             pass  # still buffering the first segment
     except Exception:
@@ -299,7 +300,7 @@ def _on_stream_end(final_text=None, finished=None, error=None, **kwargs):
     try:
         corr = _corr(kwargs)
         turn_id = corr["turn_id"]
-        if turn_id and STATE.reasoning_pending(turn_id):
+        if turn_id and STATE.reasoning_pending(corr["session_id"], turn_id):
             _flush_reasoning(turn_id, corr["session_id"])
         text = final_text if final_text is not None else kwargs.get("final_text")
         metrics.enqueue(events.stream_end(
@@ -322,11 +323,17 @@ def _on_session_start(**kwargs):
 
 
 def _on_session_end(**kwargs):
-    """Flush the queue so pending events land before teardown."""
+    """Flush the queue so pending events land before teardown, then clear
+    this session's transient reasoning buffers + markers (§2.2): a session
+    transition must not leave the preceding session's raw text reachable.
+    A missing session_id clears everything (the host ended a session
+    without identifying it)."""
     try:
-        STATE.session_ended(kwargs.get("session_id"))
+        session_id = kwargs.get("session_id")
+        STATE.session_ended(session_id)
+        STATE.clear_session(session_id)
         metrics.enqueue(events.session_end(
-            session_id=kwargs.get("session_id") or STATE.session_id))
+            session_id=session_id or STATE.session_id))
         metrics.flush(timeout=3.0)
     except Exception:
         logger.exception("its-in-your-head: session end flush failed")

@@ -60,6 +60,11 @@ MAX_EVENTS = 50_000      # retention cap for the events table (owner default)
 PRUNE_EVERY = 50         # prune check every N worker batches
 BATCH_MAX = 64           # max events flushed per commit
 QUEUE_GET_TIMEOUT = 0.5  # worker idle poll (s)
+# v0.1.28 P0 (§2.4): the raw-text event queue is BOUNDED. A stopped or slow
+# worker can no longer accumulate an unbounded backlog of raw prompts/reasoning
+# in memory. The overflow + text-truncation counters are safe (no raw text).
+MAX_QUEUE_EVENTS = 4096  # hard cap on the in-memory event backlog
+MAX_PROMPT_CHARS = 16384  # incoming prompt analysis-text cap (bounded)
 
 # SCHEMA — alias of the single canonical DDL (storage.migration.EVENTS_DDL).
 # Kept as a module-level name for existing callers/tests; do not copy the DDL.
@@ -99,6 +104,12 @@ _batches = 0
 # holding (or about to acquire) this condition, so there is no deadlock.
 _in_flight_events = 0
 _failed_events = 0
+# v0.1.28 P0 (§2.4): per-event-type overflow accounting — safe counters only,
+# no raw text is ever retained here. `dropped` = events discarded because the
+# bounded queue was full; `rejected` = events whose raw prompt was truncated
+# at the analysis-text cap before entering the queue.
+_dropped = {}   # event-type -> count discarded on queue overflow
+_rejected = {}  # event-type -> count truncated at the analysis-text cap
 _state_cv = threading.Condition()
 
 
@@ -106,13 +117,15 @@ class FlushResult(NamedTuple):
     """Result of flush(): honest accounting, never a bare claim of drained.
 
     drained: True only when every event enqueued up to return was COMMITTED
-        (queue empty, nothing in flight, no persist failure in the window).
-        A failed batch is dropped via the error path (not retried), so
-        drained is False even with pending == 0 — check `failed`.
+        (queue empty, nothing in flight, and no persist failure, queue
+        overflow, or text-truncation in the window). A failed/dropped batch
+        makes drained False even with pending == 0 — check the counters.
     pending: events not yet committed at return (queued + in_flight).
     in_flight: dequeued-but-uncommitted events (mid-persist batches).
     queued: events still waiting on the queue.
     failed: events dropped by a failed persist during this flush window.
+    dropped: events discarded because the bounded queue was full (§2.4).
+    rejected: events whose raw prompt was truncated at the text cap (§2.4).
 
     Truthiness preserves the old `bool` polarity: bool(result) == drained.
     """
@@ -122,16 +135,37 @@ class FlushResult(NamedTuple):
     in_flight: int
     queued: int
     failed: int
+    dropped: int = 0
+    rejected: int = 0
 
     def __bool__(self) -> bool:
         return self.drained
 
 
 def enqueue(event: dict) -> None:
-    """Called from hooks — microseconds only: build a dict, append it to the
-    shared deque. No I/O, no embedding; the only lock is the shared
-    condition (a deque append + notify)."""
+    """Called from hooks — microseconds only, and NEVER blocking (§2.4). The
+    raw-text queue is bounded: an over-cap prompt is truncated to the
+    analysis-text cap before entering, and when the backlog is full the event
+    is dropped (counted by type; the raw text is never logged or retained).
+    A dropped observation means less analytical evidence — never a fallback
+    to storing raw input elsewhere. No I/O, no embedding; the only lock is
+    the shared condition (a deque append + notify)."""
+    global _dropped, _rejected
+    etype = event.get("type") if isinstance(event, dict) else "unknown"
+    truncated = False
+    if isinstance(event, dict):
+        msg = event.get("user_message")
+        if isinstance(msg, str) and len(msg) > MAX_PROMPT_CHARS:
+            event["user_message"] = msg[:MAX_PROMPT_CHARS]
+            event["user_chars"] = MAX_PROMPT_CHARS
+            truncated = True
     with _state_cv:
+        if truncated:
+            _rejected[etype] = _rejected.get(etype, 0) + 1
+        if len(_items) >= MAX_QUEUE_EVENTS:
+            _dropped[etype] = _dropped.get(etype, 0) + 1
+            _state_cv.notify_all()
+            return
         _items.append(event)
         _state_cv.notify_all()
 
@@ -161,6 +195,11 @@ def _row_from_event(ev: dict) -> dict:
     if not isinstance(error, dict):
         error = {}
     retryable = ev.get("retryable")
+    # §4.1: bounded error-class category — from the event's "error" dict
+    # (legacy) or its top-level error_type (events.stream_end). Capped at
+    # 64 chars; never the arbitrary raw message.
+    _et = error.get("type") or ev.get("error_type")
+    _error_type = (str(_et)[:64] if _et is not None else None)
     return {
         "ts": ev.get("ts") or time.time(),
         "type": ev.get("type"),
@@ -177,8 +216,13 @@ def _row_from_event(ev: dict) -> dict:
         "status_code": _as_int(ev.get("status_code")),
         "retry_count": _as_int(ev.get("retry_count")),
         "retryable": _as_int(retryable) if retryable is not None else None,
-        "error_type": error.get("type"),
-        "error_message": error.get("message"),
+        "error_type": _error_type,
+        # §4.1/§4.2: arbitrary provider/exception messages are NEVER
+        # persisted. error_type + the numeric status/retry counters are the
+        # approved classification; the raw untrusted message stays out of the
+        # DB (the column remains in the schema, written NULL). A future event
+        # producer cannot bypass the policy by supplying a dict here.
+        "error_message": None,
         "user_chars": _as_int(ev.get("user_chars")),
         # v0.1.3 P0: raw prompts are NEVER serialized (the column stays in
         # the schema, written NULL; the worker purges the raw field).
@@ -300,18 +344,6 @@ def _worker_main() -> None:
                     logger.exception(
                         "its-in-your-head: engine feed failed (state dropped)")
             _flush_tick(len(batch))
-            # Privacy scrub (v0.1.3 P0), AFTER the engine feed: raw
-            # prompt/reasoning text lives in memory only — embed FIRST
-            # (reasoning via the engine-side configured backend during
-            # the feed above), purge LAST so the raw fields can never
-            # outlive this batch. Derived features (user_chars,
-            # reasoning_chars, turn sketch) are kept; reasoning rows
-            # carry no sketch BLOB (D4). No migration scrub: no real
-            # users pre-v0.1.3 (owner ruling).
-            for ev in batch:
-                if isinstance(ev, dict):
-                    ev.pop("user_message", None)
-                    ev.pop("reasoning_text", None)
         except Exception:
             # Failed-batch policy: report via the error path below and DROP
             # the batch — flush() does not retry. The dropped count is
@@ -322,6 +354,16 @@ def _worker_main() -> None:
                 _failed_events += len(batch)
                 _state_cv.notify_all()
         finally:
+            # §2.3 unconditional scrub: raw prompt + reasoning text are purged
+            # on EVERY path — success, failed persist, engine failure, or a
+            # dropped batch. The derived features (user_chars, reasoning_chars,
+            # the turn sketch) were already persisted + fed above; the raw
+            # fields never outlive this batch. The known raw-content keys are
+            # scrubbed defensively so a future raw field cannot ride along.
+            for ev in batch:
+                if isinstance(ev, dict):
+                    ev.pop("user_message", None)
+                    ev.pop("reasoning_text", None)
             # Post-persist commit accounting (runs on success AND failure):
             # the batch is no longer in flight. Never calls flush() here.
             with _state_cv:
@@ -368,14 +410,19 @@ def flush(timeout: float = 3.0) -> FlushResult:
     deadline = time.monotonic() + timeout
     with _state_cv:
         failed_at_entry = _failed_events
+        dropped_at_entry = sum(_dropped.values())
+        rejected_at_entry = sum(_rejected.values())
         while True:
             queued = len(_items)
             in_flight = _in_flight_events
             failed = _failed_events - failed_at_entry
+            dropped = sum(_dropped.values()) - dropped_at_entry
+            rejected = sum(_rejected.values()) - rejected_at_entry
             if queued == 0 and in_flight == 0:
                 return FlushResult(
-                    drained=(failed == 0), pending=0, in_flight=0,
-                    queued=0, failed=failed)
+                    drained=(failed == 0 and dropped == 0 and rejected == 0),
+                    pending=0, in_flight=0, queued=0, failed=failed,
+                    dropped=dropped, rejected=rejected)
             if _shutdown.is_set() and in_flight == 0:
                 # Worker stopping releases the barrier — but ONLY when no
                 # work is in flight: a live worker that has dequeued a batch
@@ -389,12 +436,14 @@ def flush(timeout: float = 3.0) -> FlushResult:
                 # with a live worker or a crashed one.
                 return FlushResult(
                     drained=False, pending=queued + in_flight,
-                    in_flight=in_flight, queued=queued, failed=failed)
+                    in_flight=in_flight, queued=queued, failed=failed,
+                    dropped=dropped, rejected=rejected)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return FlushResult(
                     drained=False, pending=queued + in_flight,
-                    in_flight=in_flight, queued=queued, failed=failed)
+                    in_flight=in_flight, queued=queued, failed=failed,
+                    dropped=dropped, rejected=rejected)
             # Short wait slice (enqueue/worker notify on state changes, but
             # re-poll on every wakeup to stay correct regardless).
             _state_cv.wait(timeout=min(remaining, 0.02))

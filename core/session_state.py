@@ -4,10 +4,20 @@ per-turn reasoning-segment bookkeeping.
 Pure in-memory, lock-guarded, microseconds on the hot path. The LIVE
 counters are the synchronous half of pre_tool_call (C5): the hook
 increments them immediately; the persisted row follows via the queue.
+
+Privacy hardening (v0.1.28, plan §2): the reasoning buffer is a transient
+raw-text sink. It is keyed by (session_id, turn_id), bounded in BOTH the
+number of active buffers and the number of completion markers, flushed
+atomically (the text is retrieved and the entry removed at the same
+instant), and cleared on session termination so one session's raw text
+can never be read by a later turn. A completed-turn marker is metadata,
+not a retained text buffer.
 """
 import threading
 
-REASONING_BUFFER_CAP = 8192  # chars; bounded per locked rule
+REASONING_BUFFER_CAP = 8192      # chars; bounded per buffer (locked rule)
+REASONING_MAX_ACTIVE = 64        # max concurrent unfinished raw buffers
+REASONING_MAX_COMPLETED = 128    # bounded FIFO completion-marker collection
 
 
 class SessionState:
@@ -29,7 +39,15 @@ class SessionState:
                 "sessions_started": 0,
                 "sessions_ended": 0,
             }
-            self._reasoning = {}  # turn_id -> {chunks, buffer, done}
+            # (session_id, turn_id) -> {chunks, buffer, done}; the parallel
+            # insertion-order lists give deterministic FIFO eviction.
+            self._reasoning = {}
+            self._reasoning_order = []
+            # (session_id, turn_id) -> True: a bounded completion marker so a
+            # late delta for an already-flushed turn cannot recreate its
+            # buffer. Metadata only — no text is retained here.
+            self._completed = {}
+            self._completed_order = []
 
     # --- correlation -------------------------------------------------
     def correlate(self, kwargs) -> dict:
@@ -79,20 +97,48 @@ class SessionState:
                 self.session_id = session_id
             self.live["sessions_ended"] += 1
 
-    # --- reasoning-segment bookkeeping ---------------------------------
-    def reasoning_begin(self, turn_id):
-        with self._lock:
-            self._reasoning.setdefault(
-                turn_id, {"chunks": 0, "buffer": "", "done": False})
+    # --- reasoning-segment bookkeeping (bounded, session-scoped) ----------
+    @staticmethod
+    def _key(session_id, turn_id):
+        return (session_id, turn_id)
 
-    def reasoning_feed(self, turn_id, delta) -> bool:
+    def _evict_reasoning(self):
+        """FIFO-evict the oldest active buffer so _reasoning never exceeds
+        REASONING_MAX_ACTIVE (deterministic; the caller holds the lock)."""
+        while len(self._reasoning_order) > REASONING_MAX_ACTIVE:
+            old = self._reasoning_order.pop(0)
+            self._reasoning.pop(old, None)
+
+    def _evict_completed(self):
+        """FIFO-evict the oldest completion marker (the caller holds the lock)."""
+        while len(self._completed_order) > REASONING_MAX_COMPLETED:
+            old = self._completed_order.pop(0)
+            self._completed.pop(old, None)
+
+    def reasoning_begin(self, session_id, turn_id):
+        with self._lock:
+            key = self._key(session_id, turn_id)
+            if key not in self._reasoning:
+                self._reasoning[key] = {"chunks": 0, "buffer": "", "done": False}
+                self._reasoning_order.append(key)
+                self._evict_reasoning()
+
+    def reasoning_feed(self, session_id, turn_id, delta) -> bool:
         """Append a reasoning delta. Returns True while still capturing
-        (first segment of this turn, buffer not yet flushed)."""
+        (first segment of this turn, buffer not yet flushed). A late delta
+        for an already-flushed turn is a no-op (its completion marker wins)."""
         if not isinstance(delta, str):
             delta = str(delta) if delta is not None else ""
         with self._lock:
-            st = self._reasoning.setdefault(
-                turn_id, {"chunks": 0, "buffer": "", "done": False})
+            key = self._key(session_id, turn_id)
+            if key in self._completed:
+                return False
+            st = self._reasoning.get(key)
+            if st is None:
+                st = self._reasoning[key] = {
+                    "chunks": 0, "buffer": "", "done": False}
+                self._reasoning_order.append(key)
+                self._evict_reasoning()
             if st["done"]:
                 return False
             st["chunks"] += 1
@@ -101,20 +147,47 @@ class SessionState:
                 st["buffer"] += delta[:room]
             return True
 
-    def reasoning_flush(self, turn_id):
-        """Pop the buffered first segment (once). Returns
-        (text, chunk_count) or None if nothing to flush."""
+    def reasoning_flush(self, session_id, turn_id):
+        """Atomically pop the buffered first segment (once). Returns
+        (text, chunk_count) or None if nothing to flush. The entry is removed
+        AND a bounded completion marker is set in the same instant, so a late
+        delta cannot recreate the raw text."""
         with self._lock:
-            st = self._reasoning.get(turn_id)
-            if not st or st["done"] or not st["buffer"]:
-                if st:
-                    st["done"] = True
+            key = self._key(session_id, turn_id)
+            st = self._reasoning.pop(key, None)
+            if key in self._reasoning_order:
+                self._reasoning_order.remove(key)
+            if st is None:
                 return None
-            st["done"] = True
             self.live["reasoning_segments"] += 1
+            if key not in self._completed:
+                self._completed[key] = True
+                self._completed_order.append(key)
+                self._evict_completed()
             return st["buffer"], st["chunks"]
 
-    def reasoning_pending(self, turn_id) -> bool:
+    def reasoning_pending(self, session_id, turn_id) -> bool:
         with self._lock:
-            st = self._reasoning.get(turn_id)
+            st = self._reasoning.get(self._key(session_id, turn_id))
             return bool(st and not st["done"] and st["buffer"])
+
+    def clear_session(self, session_id=None):
+        """Remove unfinished reasoning buffers + completion markers for the
+        session so a session transition cannot leave the preceding session's
+        raw text reachable. session_id=None clears everything (the host ended
+        a session without supplying its id)."""
+        with self._lock:
+            if session_id is None:
+                self._reasoning.clear()
+                self._completed.clear()
+                self._reasoning_order.clear()
+                self._completed_order.clear()
+                return
+            self._reasoning = {
+                k: v for k, v in self._reasoning.items() if k[0] != session_id}
+            self._completed = {
+                k: v for k, v in self._completed.items() if k[0] != session_id}
+            self._reasoning_order = [k for k in self._reasoning_order
+                                      if k[0] != session_id]
+            self._completed_order = [k for k in self._completed_order
+                                      if k[0] != session_id]

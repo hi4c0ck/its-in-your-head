@@ -49,6 +49,25 @@ def _base(etype, **kw):
     return ev
 
 
+def _error_type(error) -> "str | None":
+    """§4.1 allowlisted error-class/category. Only a capped categorical string
+    is carried — arbitrary provider message bodies, request fragments, headers
+    or URLs are NEVER retained (the raw text does not enter the event)."""
+    if isinstance(error, dict):
+        raw = error.get("type") or error.get("code") or error.get("error")
+    else:
+        raw = error
+    if raw is None:
+        return None
+    s = str(raw)
+    return s[:64] if len(s) > 64 else s
+
+
+# Public alias: the collector + stream_end use this as the §4.1 allowlisted
+# error-class extractor.
+error_type = _error_type
+
+
 def tool_start(*, tool_name, task_id=None, session_id=None, turn_id=None,
                tool_call_id=None, args_chars=None, **kw):
     return _base("tool_start", tool_name=tool_name, task_id=task_id,
@@ -80,9 +99,11 @@ def reasoning_seg(*, turn_id, session_id=None, reasoning_text="",
 
 def stream_end(*, finished=None, error=None, final_chars=None,
                session_id=None, turn_id=None, **kw):
-    err = error if isinstance(error, dict) else {}
+    # §4.1/§4.2: carry only a bounded error-class category. The arbitrary
+    # provider/exception message is NOT retained in the event (never the
+    # dict, never its body) — it reaches the DB as NULL via metrics.
     return _base("stream_end", finished=finished,
-                 error_type=err.get("type"), error_message=err.get("message"),
+                 error_type=_error_type(error),
                  final_chars=final_chars, session_id=session_id,
                  turn_id=turn_id)
 
