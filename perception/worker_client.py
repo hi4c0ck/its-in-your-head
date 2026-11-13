@@ -67,20 +67,24 @@ _MODEL_ID_FOR_DIR = "onnx-community/paraphrase-multilingual-MiniLM-L12-v2-ONNX"
 #   2. STALE-REGISTRY REAPER (backstop, "reaper-only"): environment-
 #      independent; on the next spawn it terminates any worker whose owner
 #      is gone, after a pid-safety check (never a recycled pid).
-#   3. KILL_ON_JOB_CLOSE JOB OBJECT (best-effort, may be inert): _windows_
-#      kill_job bails when the limit cannot actually be applied on this
-#      system (Set/QueryJobObject leave the flags unset); when it works it
-#      is an OS-level belt alongside the watchdog.
+#   3. KILL_ON_JOB_CLOSE JOB OBJECT (independent Windows belt): _windows_
+#      kill_job sets KILL_ON_JOB_CLOSE on a 144-byte JOBOBJECT_EXTENDED_
+#      LIMIT_INFORMATION; when the last job handle closes, the kernel kills
+#      every member -- independently of the watchdog. _windows_kill_job
+#      reads the limit back and bails (falling back to watchdog + reaper)
+#      when it is not actually applied on this system.
 #   4. atexit: on a CLEAN exit, shut the shared client down (reap worker +
 #      watchdog).
-# Note: guard_status() names the MECHANISM tier; it does NOT assert hard-kill
-# is verified — a verified hard-kill additionally requires the real owner-
-# termination test to have passed on Windows.
+# Note: guard_status() names the MECHANISM tier actually engaged; it does
+# NOT assert hard-kill is verified -- a verified hard-kill additionally
+# requires the real owner-termination + close-kills-member tests to have
+# passed on Windows.
 # ---------------------------------------------------------------------------
 WATCHDOG_PY = Path(__file__).resolve().with_name("worker_watchdog.py")
 _kill_job_handle = 0        # the open job handle, kept for the process lifetime
 _kernel32 = None
 _watchdog_ok: bool | None = None  # None = not yet attempted; True/False = last spawn
+_active_watchdogs: set = set()  # live detached watchdog Popen handles
 _PROC_SET_QUOTA = 0x0100    # PROCESS_SET_QUOTA
 _PROC_TERMINATE = 0x0001    # PROCESS_TERMINATE
 _PROC_QUERY_INFORMATION = 0x0400
@@ -88,24 +92,21 @@ _JOB_LIMIT_ACTIVE_PROCESS = 0x00000008
 _JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOBOBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _ERROR_MORE_DATA = 24
-# JOB_OBJECT_LIMIT_ACTIVE_PROCESS requires a non-zero ActiveProcessLimit or
-# association of a process to the job fails. Bound the worker count in the
-# job; the reaper already caps accumulation, this is a secondary hard cap.
-_JOB_MAX_WORKERS = 32
+_ERROR_BAD_LENGTH = 136
 
 
 def _job_structs():
     import ctypes
     _c = ctypes
 
-    # Native JOBOBJECT_BASIC_LIMIT_INFORMATION (winnt.h). 64 bytes on x64:
-    # two LONGLONG + DWORD + pad + 2x SIZE_T + DWORD + pad + ULONG_PTR +
-    # 2x DWORD. NOTE: the trailing fields are ActiveProcessLimit / Affinity /
-    # PriorityClass / SchedulingClass -- NOT PageCount/ProcessCount.
+    # Native JOBOBJECT_BASIC_LIMIT_INFORMATION (winnt.h / ReactOS NDK).
+    # 64 bytes on x64: two LONGLONG time limits + DWORD LimitFlags + pad +
+    # 2x SIZE_T working-set + DWORD ActiveProcessLimit + pad + ULONG_PTR
+    # Affinity + 2x DWORD (PriorityClass, SchedulingClass).
     class _Basic(_c.Structure):
         _fields_ = [
             ("PerProcessUserTimeLimit", _c.c_longlong),
-            ("PerProcessKernelTimeLimit", _c.c_longlong),
+            ("PerJobUserTimeLimit", _c.c_longlong),
             ("LimitFlags", _c.c_uint32),
             ("MinimumWorkingSetSize", _c.c_size_t),
             ("MaximumWorkingSetSize", _c.c_size_t),
@@ -115,24 +116,23 @@ def _job_structs():
             ("SchedulingClass", _c.c_uint32),
         ]
 
-    # Native IO_COUNTERS (winnt.h): 6x LARGE_INTEGER + 2x ULONG. 56 bytes on
-    # x64. This is what JOBOBJECT_EXTENDED_LIMIT_INFORMATION.IoInfo is -- not
-    # the larger JOBOBJECT_IO_INFO.
+    # Native IO_COUNTERS (winnt.h / Microsoft Learn): 6x ULONGLONG = 48 bytes
+    # on x64 -- NO quota fields (those belong to the larger KERNEL_IO_
+    # COUNTERS). This is exactly what JOBOBJECT_EXTENDED_LIMIT_INFORMATION.
+    # IoInfo is embedded.
     class _IO_COUNTERS(_c.Structure):
         _fields_ = [
-            ("ReadOperationCount", _c.c_longlong),
-            ("WriteOperationCount", _c.c_longlong),
-            ("OtherOperationCount", _c.c_longlong),
-            ("ReadTransferCount", _c.c_longlong),
-            ("WriteTransferCount", _c.c_longlong),
-            ("OtherTransferCount", _c.c_longlong),
-            ("ReadQuota", _c.c_uint32),
-            ("OtherQuota", _c.c_uint32),
+            ("ReadOperationCount", _c.c_ulonglong),
+            ("WriteOperationCount", _c.c_ulonglong),
+            ("OtherOperationCount", _c.c_ulonglong),
+            ("ReadTransferCount", _c.c_ulonglong),
+            ("WriteTransferCount", _c.c_ulonglong),
+            ("OtherTransferCount", _c.c_ulonglong),
         ]
 
-    # Native JOBOBJECT_EXTENDED_LIMIT_INFORMATION (winnt.h):
-    # BasicLimitInformation + IO_COUNTERS + 4x SIZE_T = 152 bytes on x64.
-    # The IoInfo field is an embedded IO_COUNTERS struct, not a pointer.
+    # Native JOBOBJECT_EXTENDED_LIMIT_INFORMATION: Basic (64) + IO_COUNTERS
+    # (48) + 4x SIZE_T (32) = 144 bytes on x64. IoInfo is an embedded
+    # IO_COUNTERS struct, not a pointer.
     class _Extended(_c.Structure):
         _fields_ = [
             ("BasicLimitInformation", _Basic),
@@ -186,14 +186,10 @@ def _windows_kill_job() -> int:
     if not job:
         return 0
     ext = _ext()
-    ext.BasicLimitInformation.LimitFlags = (
-        _JOB_LIMIT_ACTIVE_PROCESS | _JOB_LIMIT_KILL_ON_JOB_CLOSE)
-    # ACTIVE_PROCESS requires a non-zero ActiveProcessLimit, otherwise the
-    # kernel refuses to associate any process with the job.
-    ext.BasicLimitInformation.ActiveProcessLimit = _JOB_MAX_WORKERS
-    # A 0 (or unspecified) memory limit is invalid; SIZE_T(-1) = unlimited.
-    ext.ProcessMemoryLimit = _c.c_size_t(-1)
-    ext.JobMemoryLimit = _c.c_size_t(-1)
+    ext.BasicLimitInformation.LimitFlags = _JOB_LIMIT_KILL_ON_JOB_CLOSE
+    # KILL_ON_JOB_CLOSE only: no memory / active-process caps, so the size +
+    # count fields stay 0 (unlimited) and process association is unrestricted.
+    # A clean close of the handle then kills every member of the job.
     _kernel32.SetInformationJobObject(
         job, _JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         _c.byref(ext), _c.sizeof(ext))
@@ -435,22 +431,36 @@ def _reaper_available() -> bool:
     return True
 
 
-def guard_status() -> str:
-    """The hard-kill protection tier in effect right now.
+def _live_watchdog_count() -> int:
+    """Number of detached watchdogs still running; prune the dead handles so
+    the set stays bounded."""
+    n = 0
+    for wd in list(_active_watchdogs):
+        if wd.poll() is None:
+            n += 1
+        else:
+            _active_watchdogs.discard(wd)
+    return n
 
-    - ``"watchdog"``    : a detached watchdog is engaged (primary immediate
-                          cleanup, fires AT owner death) + the reaper backstop.
-    - ``"reaper-only"`` : the watchdog is unavailable (unsupported, or its
-                          last spawn failed) -> the reaper backstop carries.
+
+def guard_status() -> str:
+    """The hard-kill protection tier ENGAGED right now (an ACTIVE guard, not
+    merely platform support).
+
+    - ``"watchdog"``    : one or more detached watchdogs are alive + guarding
+                          a worker (primary immediate cleanup, fires AT owner
+                          death) + the reaper backstop.
+    - ``"reaper-only"`` : no watchdog is currently active (none spawned yet,
+                          all reaped/stopped, unsupported, or the spawn failed)
+                          -> the reaper backstop carries.
     - ``"unavailable"`` : neither the watchdog nor the reaper is available.
 
-    This names the MECHANISM tier; it deliberately does NOT assert hard-kill
-    is *verified*. A verified hard-kill additionally requires the real owner-
-    termination test (``test_watchdog_terminates_on_owner_death``) to have
-    passed on Windows.
+    This names the MECHANISM actually engaged; it deliberately does NOT assert
+    hard-kill is *verified*. A verified hard-kill additionally requires the
+    real owner-termination test (``test_watchdog_terminates_on_owner_death``)
+    to have passed on Windows.
     """
-    global _watchdog_ok
-    if _watchdog_supported() and _watchdog_ok is not False:
+    if _live_watchdog_count():
         return "watchdog"
     if _reaper_available():
         return "reaper-only"
@@ -490,6 +500,7 @@ def _spawn_watchdog(proc: subprocess.Popen | None,
             [sys.executable, str(WATCHDOG_PY), str(owner_pid), str(proc.pid)],
             **kwargs)
         _watchdog_ok = True
+        _active_watchdogs.add(wd)
         return wd
     except Exception as exc:
         logger.debug("its-in-your-head: watchdog spawn failed: %s", exc)
@@ -744,7 +755,7 @@ class OnnxWorkerClient:
     def _stop_watchdog(self) -> None:
         """Terminate + reap the watchdog for this worker. On a clean shutdown
         the worker dies first, so the watchdog self-exits; this just reaps
-        the handle so we never hold a stale Popen."""
+        the handle + drops it from the live set so we never hold a stale one."""
         wd, self._watchdog = self._watchdog, None
         if wd is None:
             return
@@ -754,6 +765,7 @@ class OnnxWorkerClient:
                 wd.wait(timeout=2)
             except Exception:
                 pass
+        _active_watchdogs.discard(wd)
 
     def _readline(self, timeout: float) -> str:
         assert self._proc is not None and self._proc.stdout is not None

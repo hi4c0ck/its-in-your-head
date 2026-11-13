@@ -613,30 +613,35 @@ def test_guard_rejects_unrelated_process():
 
 def test_job_struct_layout():
     """Regression for the native Job Object struct layout. The ctypes structs
-    must match the winnt.h definitions: JOBOBJECT_BASIC_LIMIT_INFORMATION,
-    IO_COUNTERS and JOBOBJECT_EXTENDED_LIMIT_INFORMATION."""
+    must match the winnt.h / MS-Learn definitions: 64-byte
+    JOBOBJECT_BASIC_LIMIT_INFORMATION, 48-byte IO_COUNTERS (6x ULONGLONG,
+    no quota fields), and 144-byte JOBOBJECT_EXTENDED_LIMIT_INFORMATION."""
     import ctypes
     import perception.worker_client as wc
     _c, _ext = wc._job_structs()
     _basic = _ext._fields_[0][1]
     _io = _ext._fields_[1][1]
     # Documented Win32 limit-flag constants + process access rights.
-    assert wc._JOB_LIMIT_ACTIVE_PROCESS == 0x8
     assert wc._JOB_LIMIT_KILL_ON_JOB_CLOSE == 0x2000
     assert wc._PROC_SET_QUOTA == 0x100
     assert wc._PROC_TERMINATE == 0x1
-    # ACTIVE_PROCESS requires a non-zero ActiveProcessLimit; it must be set.
-    assert wc._JOB_MAX_WORKERS > 0
+    assert wc._ERROR_BAD_LENGTH == 136
     # The basic struct must carry the real trailing fields, not PageCount &co.
     _bnames = [f[0] for f in _basic._fields_]
+    assert "PerJobUserTimeLimit" in _bnames
     assert "ActiveProcessLimit" in _bnames
     assert "Affinity" in _bnames
     assert "PriorityClass" in _bnames and "SchedulingClass" in _bnames
     assert "PageCount" not in _bnames and "CompletionCode" not in _bnames
+    # IO_COUNTERS is 6 x ULONGLONG -- no quota fields (those are
+    # KERNEL_IO_COUNTERS, a different struct).
+    _ionames = [f[0] for f in _io._fields_]
+    assert len(_ionames) == 6, _ionames
+    assert "ReadQuota" not in _ionames and "OtherQuota" not in _ionames
     if ctypes.sizeof(ctypes.c_size_t) == 8:  # x64 layout (all CI + user env)
         assert ctypes.sizeof(_basic) == 64, ctypes.sizeof(_basic)
-        assert ctypes.sizeof(_io) == 56, ctypes.sizeof(_io)
-        assert ctypes.sizeof(_ext) == 152, ctypes.sizeof(_ext)
+        assert ctypes.sizeof(_io) == 48, ctypes.sizeof(_io)
+        assert ctypes.sizeof(_ext) == 144, ctypes.sizeof(_ext)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object API only")
@@ -661,12 +666,16 @@ def test_windows_job_object_native():
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object API only")
 def test_job_object_kills_members_on_close():
-    """End-to-end KILL_ON_JOB_CLOSE: create a job, set the limit, assign a
-    child, close the job handle, and verify the child actually terminates.
-    This is the definitive proof of the hard-kill safety net. If this
-    environment cannot apply the limit (SetInformationJobObject returns 0 /
-    flags read back unset), the test skips honestly and the stale-registry
-    reaper is the backstop."""
+    """End-to-end KILL_ON_JOB_CLOSE: create a job, set KILL_ON_CLOSE on the
+    native 144-byte JOBOBJECT_EXTENDED_LIMIT_INFORMATION, assign a child,
+    close the job handle, and verify the child actually terminates.
+
+    Per MSDN, SetInformationJobObject returns 0 = failure. A failure whose
+    GetLastError is ERROR_BAD_LENGTH means the struct size is wrong -- an
+    ABI bug, so it FAILS the test (never a silent 'environment restriction'
+    skip). A genuine, non-ABI refusal to apply the limit (the belt is
+    unavailable on this host) skips honestly; the detached watchdog + the
+    stale-registry reaper carry the hard-kill there."""
     import ctypes
     import subprocess
     import time as _time
@@ -691,30 +700,38 @@ def test_job_object_kills_members_on_close():
     job = k.CreateJobObjectW(None, None)
     assert job, "CreateJobObjectW failed"
     ext = _ext()
-    ext.BasicLimitInformation.LimitFlags = (
-        wc._JOB_LIMIT_ACTIVE_PROCESS | wc._JOB_LIMIT_KILL_ON_JOB_CLOSE)
-    ext.BasicLimitInformation.ActiveProcessLimit = wc._JOB_MAX_WORKERS
-    ext.ProcessMemoryLimit = _c.c_size_t(-1)
-    ext.JobMemoryLimit = _c.c_size_t(-1)
-    k.SetInformationJobObject(
+    ext.BasicLimitInformation.LimitFlags = wc._JOB_LIMIT_KILL_ON_JOB_CLOSE
+    ok = k.SetInformationJobObject(
         job, wc._JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         _c.byref(ext), _c.sizeof(ext))
-    # Confirm the limit actually landed before claiming the hard-kill.
+    if not ok:
+        err = k.GetLastError()
+        if err == wc._ERROR_BAD_LENGTH:
+            k.CloseHandle(job)
+            pytest.fail(
+                f"SetInformationJobObject -> ERROR_BAD_LENGTH ({err}): the "
+                f"{ctypes.sizeof(_ext)}-byte JOBOBJECT_EXTENDED_LIMIT_"
+                f"INFORMATION is not the native layout (should be 144) -- an "
+                f"ABI bug, not an environment restriction")
+        k.CloseHandle(job)
+        pytest.skip(
+            f"KILL_ON_JOB_CLOSE not applied in this environment "
+            f"(SetInformationJobObject err={err}); the watchdog + reaper "
+            f"carry the hard-kill")
+    # Confirm the limit actually landed: read the flags back (class 9).
     rb = _ext()
     k.QueryInformationJobObject(
         job, wc._JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         _c.byref(rb), _c.sizeof(rb))
-    if not (rb.BasicLimitInformation.LimitFlags
-            & wc._JOB_LIMIT_KILL_ON_JOB_CLOSE):
-        import pytest
-        pytest.skip(
-            "KILL_ON_JOB_CLOSE limit not applied in this environment "
-            f"(SetInformationJobObject err={k.GetLastError()}); "
-            "stale-registry reaper is the backstop")
+    assert rb.BasicLimitInformation.LimitFlags \
+        & wc._JOB_LIMIT_KILL_ON_JOB_CLOSE, \
+        "KILL_ON_CLOSE did not read back"
 
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"])
     try:
-        hdl = k.OpenProcess(wc._PROC_TERMINATE | wc._PROC_SET_QUOTA, 0, child.pid)
+        hdl = k.OpenProcess(wc._PROC_TERMINATE | wc._PROC_SET_QUOTA, 0,
+                            child.pid)
         assert hdl, "OpenProcess of child failed"
         assert k.AssignProcessToJobObject(job, hdl), "assign to job failed"
         _time.sleep(0.4)
@@ -799,26 +816,44 @@ def test_spawn_records_and_reaps_integration(tmp_path):
 
 
 def test_reaper_kills_real_process(tmp_path, monkeypatch):
-    """The reaper's kill is a REAL OS termination: here ``_terminate_pid`` is
-    NOT stubbed (contrast ``test_reaper_kills_dead_owner_worker``), so we
-    prove the reaper actually terminates a live process. Only the 'is our
-    worker' safety guard is stubbed (a plain sleeper is not the onnx-venv
-    worker); the kill path runs for real."""
+    """The reaper's kill is a REAL OS termination: ``_terminate_pid`` is NOT
+    stubbed, so we prove the reaper actually terminates a live process +
+    reaps its registry entry.
+
+    On POSIX the test process is made to GENUINELY pass the identity check
+    (its /proc cmdline carries the worker markers), so the full
+    identity-check + kill + reap path runs with NO stubs. On Windows the
+    identity check matches the process IMAGE (the onnx-venv interpreter),
+    which a plain python cannot fake -- so the identity guard is stubbed
+    there and the kill + reap remain real."""
     import json as _json
     import subprocess as _sp
     import time as _time
     from perception import worker_client as wc
     reg = wc._registry_dir(tmp_path)
     assert reg is not None
-    real = _sp.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    if os.name == "nt":
+        real = _sp.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        # The Windows identity check is image-based; a plain sleeper can't
+        # impersonate the onnx-venv worker, so stub ONLY that guard.
+        monkeypatch.setattr(
+            wc, "_proc_is_our_worker", lambda pid: pid == real.pid)
+    else:
+        # POSIX: the /proc cmdline carries the markers, so
+        # _proc_is_our_worker is satisfied FOR REAL (no identity stub) and
+        # the guard's full check -> kill -> reap path is exercised.
+        real = _sp.Popen([
+            sys.executable, "-c", "import time; time.sleep(60)",
+            "worker.py", "its-in-your-head-onnx"])
     try:
         dead_owner = 930_001
         (reg / f"{dead_owner}.json").write_text(
             _json.dumps({"worker_pid": real.pid, "ts": 0.0}))
-        monkeypatch.setattr(wc, "_proc_is_our_worker", lambda pid: pid == real.pid)
         wc._reap_stale_workers(tmp_path)
         _time.sleep(0.5)
         assert real.poll() is not None, "real worker survived the reaper's kill"
+        assert not (reg / f"{dead_owner}.json").exists(), \
+            "reaper did not reap the dead owner's entry"
     finally:
         if real.poll() is None:
             real.kill()
@@ -889,15 +924,30 @@ def test_watchdog_terminates_on_owner_death(tmp_path, monkeypatch):
 
 
 def test_guard_status(monkeypatch):
-    """guard_status() reports the mechanism tier honestly: watchdog /
-    reaper-only / unavailable."""
+    """guard_status() reports the ACTIVE guard tier honestly: a live detached
+    watchdog -> "watchdog"; no watchdog active -> "reaper-only"; neither
+    mechanism available -> "unavailable". It describes the engaged mechanism,
+    not mere platform support (so before a watchdog is ever spawned it is
+    "reaper-only", not "watchdog")."""
     import perception.worker_client as wc
-    monkeypatch.setattr(wc, "_watchdog_ok", None)
-    assert wc.guard_status() == "watchdog"  # supported + not yet failed
-    monkeypatch.setattr(wc, "_watchdog_ok", False)
-    assert wc.guard_status() == "reaper-only"  # watchdog spawn failed
-    monkeypatch.setattr(wc, "_watchdog_ok", None)
-    monkeypatch.setattr(wc, "_watchdog_supported", lambda: False)
-    assert wc.guard_status() == "reaper-only"  # unsupported -> reaper carries
+
+    class _Live:
+        def poll(self):
+            return None
+
+    class _Dead:
+        def poll(self):
+            return 0
+
+    # Isolate from other tests' state.
+    monkeypatch.setattr(wc, "_active_watchdogs", set())
+
+    assert wc.guard_status() == "reaper-only"  # no watchdog active yet
+    wc._active_watchdogs.add(_Live())
+    assert wc.guard_status() == "watchdog"     # a live watchdog is guarding
+    wc._active_watchdogs.clear()
+    wc._active_watchdogs.add(_Dead())
+    assert wc.guard_status() == "reaper-only"  # reaped watchdog -> backstop
+    wc._active_watchdogs.clear()
     monkeypatch.setattr(wc, "_reaper_available", lambda: False)
-    assert wc.guard_status() == "unavailable"  # neither
+    assert wc.guard_status() == "unavailable"   # neither mechanism available
