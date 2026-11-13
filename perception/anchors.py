@@ -22,6 +22,19 @@ from . import encoder
 ANCHOR_BANK_VERSION = "1.1.0"
 CACHE_FILE = "anchor_vectors.json"
 
+# TEST-ONLY data-root override (the test harness pins this so the suite + its
+# separate-process fixtures resolve a deterministic data root without the
+# Hermes storage resolver). Production never calls set_data_dir_override().
+_data_dir_override: "str | Path | None" = None
+
+
+def set_data_dir_override(path) -> None:
+    """Test-only: pin the perception data root for this process. Mirrors
+    storage.database.set_override / metrics.set_db_path. Pass None to clear.
+    Explicit args to resolve_data_dir() always win over this override."""
+    global _data_dir_override
+    _data_dir_override = path
+
 DIMENSIONS = (
     "directness",
     "context_richness",
@@ -203,16 +216,19 @@ def validate_bank(bank: AnchorBank) -> None:
 def resolve_data_dir(explicit: str | Path | None = None) -> Path:
     """Plugin data dir. Never the plugin install dir (wiped by update).
 
-    Same resolution as storage/database.py and
-    perception/worker_client.py: the active profile's plugin-data dir
-    via plugins.plugin_storage (hermes_constants fallback when the
-    plugins package is not importable) — never a silent home-dir
-    catalog. No env override: tests pass explicit; user
-    configuration is a declared plugin setting, not a free-form
-    env var.
-    """
+    Resolution order: an explicit arg, then a TEST-ONLY override (the test
+    harness pins this so the suite + its separate-process fixtures resolve a
+    deterministic data root without the Hermes storage resolver — production
+    never calls the override), then the active profile's plugin-data dir via
+    plugins.plugin_storage (hermes_constants fallback when the plugins
+    package is not importable) — never a silent home-dir catalog. No
+    free-form env var: user configuration is a declared plugin setting, not
+    an env var; the test override is a deliberate in-process hook, not a
+    production config path."""
     if explicit is not None:
         return Path(explicit)
+    if _data_dir_override is not None:
+        return Path(_data_dir_override)
     try:  # pragma: no cover - lazy import; no I/O at module load
         from plugins.plugin_storage import plugin_data_dir
 

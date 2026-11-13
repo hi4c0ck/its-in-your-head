@@ -16,6 +16,16 @@ def main() -> None:
     from storage import database
     database.set_override(sys.argv[1])
 
+    # P1.5: honor the test-harness data root (conftest sets IYH_TEST_DATA_DIR;
+    # a live Hermes install leaves it unset, so this is a no-op there). The
+    # engine resolves the perception data root lazily; pin it so the suite's
+    # separate-process half is deterministic + CI-safe.
+    import os
+    import perception.anchors as _anchors
+    _env_root = os.environ.get("IYH_TEST_DATA_DIR")
+    if _env_root:
+        _anchors.set_data_dir_override(_env_root)
+
     import engine
 
     eng = engine.get_engine()
