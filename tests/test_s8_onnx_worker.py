@@ -796,3 +796,108 @@ def test_spawn_records_and_reaps_integration(tmp_path):
         orphan.wait()
     assert orphan.pid in killed  # the orphan was terminated by the reaper
     assert (reg / f"{os.getpid()}.json").exists()  # self recorded
+
+
+def test_reaper_kills_real_process(tmp_path, monkeypatch):
+    """The reaper's kill is a REAL OS termination: here ``_terminate_pid`` is
+    NOT stubbed (contrast ``test_reaper_kills_dead_owner_worker``), so we
+    prove the reaper actually terminates a live process. Only the 'is our
+    worker' safety guard is stubbed (a plain sleeper is not the onnx-venv
+    worker); the kill path runs for real."""
+    import json as _json
+    import subprocess as _sp
+    import time as _time
+    from perception import worker_client as wc
+    reg = wc._registry_dir(tmp_path)
+    assert reg is not None
+    real = _sp.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        dead_owner = 930_001
+        (reg / f"{dead_owner}.json").write_text(
+            _json.dumps({"worker_pid": real.pid, "ts": 0.0}))
+        monkeypatch.setattr(wc, "_proc_is_our_worker", lambda pid: pid == real.pid)
+        wc._reap_stale_workers(tmp_path)
+        _time.sleep(0.5)
+        assert real.poll() is not None, "real worker survived the reaper's kill"
+    finally:
+        if real.poll() is None:
+            real.kill()
+        real.wait()
+
+
+def test_watchdog_terminates_on_owner_death(tmp_path, monkeypatch):
+    """The hard-kill gate: spawn a real OWNER that owns a real WORKER + its
+    real WATCHDOG, hard-kill the owner (TerminateProcess/SIGKILL, so atexit
+    never runs), and assert the worker is killed BY THE WATCHDOG within a few
+    seconds. No _terminate_pid stubbing -- every kill here is a real OS
+    termination. Only when THIS passes on Windows do we claim hard-kill
+    protection is verified."""
+    import json as _json
+    import subprocess as _sp
+    import time as _time
+    from perception import worker_client as wc
+    if not wc._watchdog_supported():
+        import pytest
+        pytest.skip("detached watchdog is not supported on this platform")
+    repo_root = Path(wc.__file__).resolve().parent.parent
+
+    owner_src = (
+        "import sys, os, json, time, subprocess\n"
+        "sys.path.insert(0, sys.argv[3])\n"
+        "from perception import worker_client as wc\n"
+        "worker = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "wd = wc._spawn_watchdog(worker, owner_pid=os.getpid())\n"
+        "with open(sys.argv[2], 'w') as f:\n"
+        "    json.dump({'owner_pid': os.getpid(), 'worker_pid': worker.pid,\n"
+        "               'watchdog_pid': (wd.pid if wd else 0)}, f)\n"
+        "time.sleep(300)\n"
+    )
+    out_file = tmp_path / "watchdog_ready.json"
+    env = dict(os.environ, PYTHONPATH=str(repo_root))
+    owner = _sp.Popen(
+        [sys.executable, "-c", owner_src, str(tmp_path), str(out_file), str(repo_root)],
+        env=env, stdin=_sp.DEVNULL, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+    worker_pid = watchdog_pid = None
+    try:
+        for _ in range(100):
+            if out_file.exists():
+                break
+            _time.sleep(0.1)
+        assert out_file.exists(), "owner never signalled ready (could not spawn watchdog tree)"
+        info = _json.loads(out_file.read_text())
+        worker_pid, watchdog_pid = info["worker_pid"], info["watchdog_pid"]
+        assert watchdog_pid, "watchdog did not start"
+        assert wc._pid_alive(worker_pid), "worker not alive before owner death"
+        assert wc._pid_alive(watchdog_pid), "watchdog not running"
+        # Hard-kill the owner: TerminateProcess/SIGKILL -> atexit never runs.
+        owner.kill()
+        deadline = _time.time() + 10.0
+        while _time.time() < deadline and wc._pid_alive(worker_pid):
+            _time.sleep(0.25)
+        assert not wc._pid_alive(worker_pid), (
+            "worker survived the owner's hard-kill -> the watchdog did not "
+            "terminate it; hard-kill protection is NOT verified")
+    finally:
+        try:
+            owner.wait()
+        except Exception:
+            pass
+        for pid in (worker_pid, watchdog_pid):
+            if pid and wc._pid_alive(pid):
+                wc._terminate_pid(pid)
+        _time.sleep(0.2)
+
+
+def test_guard_status(monkeypatch):
+    """guard_status() reports the mechanism tier honestly: watchdog /
+    reaper-only / unavailable."""
+    import perception.worker_client as wc
+    monkeypatch.setattr(wc, "_watchdog_ok", None)
+    assert wc.guard_status() == "watchdog"  # supported + not yet failed
+    monkeypatch.setattr(wc, "_watchdog_ok", False)
+    assert wc.guard_status() == "reaper-only"  # watchdog spawn failed
+    monkeypatch.setattr(wc, "_watchdog_ok", None)
+    monkeypatch.setattr(wc, "_watchdog_supported", lambda: False)
+    assert wc.guard_status() == "reaper-only"  # unsupported -> reaper carries
+    monkeypatch.setattr(wc, "_reaper_available", lambda: False)
+    assert wc.guard_status() == "unavailable"  # neither

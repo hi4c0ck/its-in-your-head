@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -51,28 +52,35 @@ DEFAULT_TIMEOUT_S = 60.0
 _MODEL_ID_FOR_DIR = "onnx-community/paraphrase-multilingual-MiniLM-L12-v2-ONNX"
 
 # ---------------------------------------------------------------------------
-# Process-tree leak guard (Windows).
+# Process-tree leak guard.
 #
-# The ONNX worker is a Popen child that is reaped ONLY by an explicit
-# shutdown(). With no teardown, a hard-killed owner (the gateway, the
-# plugin-host child, a taskkill) ORPHANS worker.py — each restart stacks
-# another one. Three layers, all best-effort (a failure drops only the
-# safety net, never the worker):
-#   1. atexit  -> on a CLEAN exit, shut the shared client down (reap).
-#   2. a Windows job object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE that every
-#      spawned worker is assigned to: when the owner dies, the OS closes the
-#      job handle + kills the members. VERIFIED best-effort: _windows_kill_job
-#      returns 0 when the limit cannot actually be applied (Set/QueryJobObject
-#      leave the flags unset in some restricted environments), so this layer is
-#      INERT there — the code reads the limit back and bails rather than
-#      claiming protection it does not have.
-#   3. the stale-registry reaper (below) — environment-independent + the
-#      VERIFIED hard-kill backstop: on the next spawn it terminates any worker
-#      whose owning process is gone, after confirming the live pid is really
-#      our onnx-venv worker (never a recycled pid).
+# The ONNX worker is a Popen child reaped ONLY by an explicit shutdown().
+# With no teardown, a hard-killed owner (the gateway, the plugin-host child,
+# a taskkill) ORPHANS worker.py — each restart stacks another one. Four
+# layers, all best-effort (a failure drops only the safety net, never the
+# worker). guard_status() reports which tier is in effect:
+#   1. WATCHDOG (primary immediate cleanup, "watchdog"): a detached
+#      stdlib-only child (perception/worker_watchdog.py) spawned alongside
+#      each worker; when the OWNER dies it terminates the worker AT that
+#      moment — closing the "orphan lives until the next spawn" gap. No
+#      service installer, no elevation.
+#   2. STALE-REGISTRY REAPER (backstop, "reaper-only"): environment-
+#      independent; on the next spawn it terminates any worker whose owner
+#      is gone, after a pid-safety check (never a recycled pid).
+#   3. KILL_ON_JOB_CLOSE JOB OBJECT (best-effort, may be inert): _windows_
+#      kill_job bails when the limit cannot actually be applied on this
+#      system (Set/QueryJobObject leave the flags unset); when it works it
+#      is an OS-level belt alongside the watchdog.
+#   4. atexit: on a CLEAN exit, shut the shared client down (reap worker +
+#      watchdog).
+# Note: guard_status() names the MECHANISM tier; it does NOT assert hard-kill
+# is verified — a verified hard-kill additionally requires the real owner-
+# termination test to have passed on Windows.
 # ---------------------------------------------------------------------------
+WATCHDOG_PY = Path(__file__).resolve().with_name("worker_watchdog.py")
 _kill_job_handle = 0        # the open job handle, kept for the process lifetime
 _kernel32 = None
+_watchdog_ok: bool | None = None  # None = not yet attempted; True/False = last spawn
 _PROC_SET_QUOTA = 0x0100    # PROCESS_SET_QUOTA
 _PROC_TERMINATE = 0x0001    # PROCESS_TERMINATE
 _PROC_QUERY_INFORMATION = 0x0400
@@ -417,6 +425,78 @@ def _forget_worker(model_dir) -> None:
         pass
 
 
+def _watchdog_supported() -> bool:
+    """A detached stdlib child outliving a hard-killed owner: Windows + POSIX."""
+    return os.name in ("nt", "posix")
+
+
+def _reaper_available() -> bool:
+    """The stale-registry reaper is file-based + works on any filesystem."""
+    return True
+
+
+def guard_status() -> str:
+    """The hard-kill protection tier in effect right now.
+
+    - ``"watchdog"``    : a detached watchdog is engaged (primary immediate
+                          cleanup, fires AT owner death) + the reaper backstop.
+    - ``"reaper-only"`` : the watchdog is unavailable (unsupported, or its
+                          last spawn failed) -> the reaper backstop carries.
+    - ``"unavailable"`` : neither the watchdog nor the reaper is available.
+
+    This names the MECHANISM tier; it deliberately does NOT assert hard-kill
+    is *verified*. A verified hard-kill additionally requires the real owner-
+    termination test (``test_watchdog_terminates_on_owner_death``) to have
+    passed on Windows.
+    """
+    global _watchdog_ok
+    if _watchdog_supported() and _watchdog_ok is not False:
+        return "watchdog"
+    if _reaper_available():
+        return "reaper-only"
+    return "unavailable"
+
+
+def _spawn_watchdog(proc: subprocess.Popen | None,
+                    owner_pid: int | None = None,
+                    model_dir=None) -> subprocess.Popen | None:
+    """Spawn a detached watchdog that terminates ``proc`` when ``owner_pid``
+    dies.
+
+    Detached (``DETACHED_PROCESS``/``start_new_session``) so a hard-killed
+    owner (where atexit never runs) does not take the watchdog down with it.
+    Best-effort: returns None + marks the watchdog tier unavailable (so
+    ``guard_status()`` drops to ``reaper-only``) when unsupported or the
+    spawn raises. It never touches the worker itself.
+    """
+    global _watchdog_ok
+    if proc is None or proc.pid is None:
+        _watchdog_ok = False
+        return None
+    if not _watchdog_supported():
+        _watchdog_ok = False
+        return None
+    owner_pid = owner_pid or os.getpid()
+    try:
+        kwargs: dict = dict(stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+        if os.name == "nt":
+            kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
+                                       | subprocess.DETACHED_PROCESS)
+        else:
+            kwargs["start_new_session"] = True
+        wd = subprocess.Popen(
+            [sys.executable, str(WATCHDOG_PY), str(owner_pid), str(proc.pid)],
+            **kwargs)
+        _watchdog_ok = True
+        return wd
+    except Exception as exc:
+        logger.debug("its-in-your-head: watchdog spawn failed: %s", exc)
+        _watchdog_ok = False
+        return None
+
+
 def _safe_model_dirname(model_id: str) -> str:
     return model_id.replace("/", "--")
 
@@ -556,6 +636,7 @@ class OnnxWorkerClient:
         else:
             self._pm = pm_module
         self._proc: subprocess.Popen | None = None
+        self._watchdog: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._next_id = 0
         self._restart_count = 0
@@ -630,6 +711,10 @@ class OnnxWorkerClient:
             # next owner reaps it if we die without a clean shutdown.
             _reap_stale_workers(self.model_dir)
             _record_worker(self.model_dir, self._proc.pid)
+            # Primary immediate cleanup: a detached watchdog that kills this
+            # worker the moment the owner (this process) dies, hard kill
+            # included. Best-effort -> guard_status() drops to reaper-only.
+            self._watchdog = _spawn_watchdog(self._proc, owner_pid=os.getpid())
         except Exception as exc:
             raise Tier1Failure("spawn-failed", f"{type(exc).__name__}: {exc}") from exc
         # ping handshake on start
@@ -648,13 +733,27 @@ class OnnxWorkerClient:
 
     def _kill(self) -> None:
         proc, self._proc = self._proc, None
-        if proc is None:
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except Exception:
+                pass
+        self._stop_watchdog()
+
+    def _stop_watchdog(self) -> None:
+        """Terminate + reap the watchdog for this worker. On a clean shutdown
+        the worker dies first, so the watchdog self-exits; this just reaps
+        the handle so we never hold a stale Popen."""
+        wd, self._watchdog = self._watchdog, None
+        if wd is None:
             return
-        try:
-            if proc.poll() is None:
-                proc.kill()
-        except Exception:
-            pass
+        if wd.poll() is None:
+            try:
+                wd.kill()
+                wd.wait(timeout=2)
+            except Exception:
+                pass
 
     def _readline(self, timeout: float) -> str:
         assert self._proc is not None and self._proc.stdout is not None
@@ -798,6 +897,7 @@ class OnnxWorkerClient:
                 self._kill()
             self._proc = None
             _forget_worker(self.model_dir)
+            self._stop_watchdog()
 
 
 _shared: OnnxWorkerClient | None = None
