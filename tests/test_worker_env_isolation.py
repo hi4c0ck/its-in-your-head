@@ -206,7 +206,17 @@ def test_pm_facing_lacks_readonly_api_degrades(tmp_path):
 
 def test_data_root_uses_active_profile_plugin_data(monkeypatch):
     # In the Hermes venv the canonical resolver is plugin_data_dir;
-    # it must agree with hermes_constants for the active profile.
+    # it must agree with hermes_constants for the active profile. CI runs a
+    # bare Python env with no hermes_constants, so this Hermes-runtime-specific
+    # assertion is skipped there (the no-Hermes path is covered by the next
+    # test, which blocks the imports and expects the explicit error).
+    try:
+        import hermes_constants  # noqa: F401
+    except ImportError:
+        pytest.skip(
+            "hermes_constants unavailable (bare / CI env) — this assertion is "
+            "Hermes-runtime-specific; the no-Hermes path is covered by "
+            "test_data_root_is_explicit_error_without_hermes")
     from hermes_constants import get_hermes_home
 
     root = worker_client.resolve_data_root()
