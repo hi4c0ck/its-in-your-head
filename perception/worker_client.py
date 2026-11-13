@@ -54,26 +54,56 @@ _MODEL_ID_FOR_DIR = "onnx-community/paraphrase-multilingual-MiniLM-L12-v2-ONNX"
 # Process-tree leak guard (Windows).
 #
 # The ONNX worker is a Popen child that is reaped ONLY by an explicit
-# shutdown(). With no atexit hook and no teardown, a hard-killed owner
-# (the gateway, the plugin-host child, a taskkill) ORPHANS worker.py — each
-# restart stacks another one. Two layered fixes:
+# shutdown(). With no teardown, a hard-killed owner (the gateway, the
+# plugin-host child, a taskkill) ORPHANS worker.py — each restart stacks
+# another one. Three layers, all best-effort (a failure drops only the
+# safety net, never the worker):
 #   1. atexit  -> on a CLEAN exit, shut the shared client down (reap).
 #   2. a Windows job object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE that every
-#      spawned worker is assigned to: when the owner process dies ANY way
-#      (including a hard kill), the OS closes the job handle, the job is
-#      destroyed, and every assigned worker is killed with it.
-# Both are best-effort: a failure only drops the safety net, never the worker.
+#      spawned worker is assigned to: when the owner dies, the OS closes the
+#      job handle + kills the members. VERIFIED best-effort: _windows_kill_job
+#      returns 0 when the limit cannot actually be applied (Set/QueryJobObject
+#      leave the flags unset in some restricted environments), so this layer is
+#      INERT there — the code reads the limit back and bails rather than
+#      claiming protection it does not have.
+#   3. the stale-registry reaper (below) — environment-independent + the
+#      VERIFIED hard-kill backstop: on the next spawn it terminates any worker
+#      whose owning process is gone, after confirming the live pid is really
+#      our onnx-venv worker (never a recycled pid).
 # ---------------------------------------------------------------------------
 _kill_job_handle = 0        # the open job handle, kept for the process lifetime
 _kernel32 = None
-_JOB_LIMIT_ACTIVE_PROCESS = 0x1
-_JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+_PROC_SET_QUOTA = 0x0100    # PROCESS_SET_QUOTA
+_PROC_TERMINATE = 0x0001    # PROCESS_TERMINATE
+_PROC_QUERY_INFORMATION = 0x0400
+_JOB_LIMIT_ACTIVE_PROCESS = 0x00000008
+_JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOBOBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_ERROR_MORE_DATA = 24
 
 
 def _job_structs():
     import ctypes
     _c = ctypes
+
+    class _IO_COUNTERS(_c.Structure):
+        _fields_ = [
+            ("ReadOperationCount", _c.c_ulonglong),
+            ("WriteOperationCount", _c.c_ulonglong),
+            ("OtherOperationCount", _c.c_ulonglong),
+            ("ReadTransferCount", _c.c_ulonglong),
+            ("WriteTransferCount", _c.c_ulonglong),
+            ("OtherTransferCount", _c.c_ulonglong),
+        ]
+
+    class _IO_INFO(_c.Structure):
+        _fields_ = [
+            ("IoInfo", _IO_COUNTERS),
+            ("MinUserProcessTime", _c.c_ulonglong),
+            ("MaxUserProcessTime", _c.c_ulonglong),
+            ("MinKernelProcessTime", _c.c_ulonglong),
+            ("MaxKernelProcessTime", _c.c_ulonglong),
+        ]
 
     class _Basic(_c.Structure):
         _fields_ = [
@@ -88,10 +118,13 @@ def _job_structs():
             ("CompletionCode", _c.c_uint32),
         ]
 
+    # Native layout: BasicLimitInformation (56B) + embedded JOBOBJECT_IO_INFO
+    # (IO_COUNTERS 48B + 4x ULONGLONG 32B = 80B) + 4x SIZE_T = 168B. The IoInfo
+    # field is a STRUCT, not a pointer.
     class _Extended(_c.Structure):
         _fields_ = [
             ("BasicLimitInformation", _Basic),
-            ("IoInfo", _c.c_void_p),
+            ("IoInfo", _IO_INFO),
             ("ProcessMemoryLimit", _c.c_size_t),
             ("JobMemoryLimit", _c.c_size_t),
             ("PeakProcessMemoryUsed", _c.c_size_t),
@@ -104,9 +137,14 @@ def _job_structs():
 def _windows_kill_job() -> int:
     """Create (once) + return the process's KILL_ON_JOB_CLOSE job handle.
 
-    Returns 0 when unavailable (non-Windows / failure) — callers fall back to
-    atexit-only cleanup in that case. The handle is kept open for the whole
-    process lifetime so KILL_ON_JOB_CLOSE fires when the process exits.
+    Returns 0 when unavailable (non-Windows, or the limit cannot be applied)
+    so callers fall back to the stale-registry reaper. The handle is kept
+    open for the whole process lifetime so KILL_ON_JOB_CLOSE fires when the
+    process exits — IF the limit was actually applied. A successful
+    ``CreateJobObjectW`` alone is not enough: we must confirm the limit was
+    set (via a read-back), because ``SetInformationJobObject`` can return 0
+    (per MSDN, 0 = failure) and leave the flags unset, in which case the job
+    would keep members but never kill them.
     """
     global _kill_job_handle, _kernel32
     if _kill_job_handle:
@@ -118,11 +156,17 @@ def _windows_kill_job() -> int:
         k = ctypes.windll.kernel32
         k.CreateJobObjectW.restype = ctypes.c_void_p
         k.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        k.SetInformationJobObject.restype = ctypes.c_int
         k.SetInformationJobObject.argtypes = [
-            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        k.QueryInformationJobObject.restype = ctypes.c_int
+        k.QueryInformationJobObject.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        k.AssignProcessToJobObject.restype = ctypes.c_int
         k.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         k.OpenProcess.restype = ctypes.c_void_p
         k.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        k.GetLastError.restype = ctypes.c_uint32
         k.CloseHandle.argtypes = [ctypes.c_void_p]
         _kernel32 = k
     _c, _ext = _job_structs()
@@ -132,15 +176,27 @@ def _windows_kill_job() -> int:
     ext = _ext()
     ext.BasicLimitInformation.LimitFlags = (
         _JOB_LIMIT_ACTIVE_PROCESS | _JOB_LIMIT_KILL_ON_JOB_CLOSE)
-    # NOTE: on Windows this call often returns 0 with ERROR_MORE_DATA even
-    # though the limit is applied (a documented quirk). We fire it + proceed;
-    # only a failed CreateJobObjectW is fatal here.
-    if not _kernel32.SetInformationJobObject(
-            job, _JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            _c.byref(ext), _c.sizeof(ext)):
+    # A 0 (or unspecified) memory limit is invalid; SIZE_T(-1) = unlimited.
+    ext.ProcessMemoryLimit = _c.c_size_t(-1)
+    ext.JobMemoryLimit = _c.c_size_t(-1)
+    _kernel32.SetInformationJobObject(
+        job, _JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        _c.byref(ext), _c.sizeof(ext))
+    # Confirm the limit actually landed: read the flags back. A 0/ERROR_
+    # MORE_DATA SetInformationJobObject leaves the flags unset in restricted
+    # environments, so the job would be inert (members never killed) -> bail.
+    readback = _ext()
+    _kernel32.QueryInformationJobObject(
+        job, _JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        _c.byref(readback), _c.sizeof(readback))
+    if not (readback.BasicLimitInformation.LimitFlags
+            & _JOB_LIMIT_KILL_ON_JOB_CLOSE):
         logger.debug(
-            "its-in-your-head: job-object limit set returned non-zero "
-            "(best-effort, limit typically applied)")
+            "its-in-your-head: KILL_ON_JOB_CLOSE limit not applied on this "
+            "system (Set/QueryJobObject err=%d); using the stale-registry "
+            "reaper instead", _kernel32.GetLastError())
+        _kernel32.CloseHandle(job)
+        return 0
     _kill_job_handle = job
     return job
 
@@ -151,8 +207,9 @@ def _attach_to_kill_job(proc) -> None:
     No-op off-Windows or when the job is unavailable. Best-effort: a failure
     logs + leaves the worker running (losing only the hard-kill safety net).
 
-    ``AssignProcessToJobObject`` needs a handle carrying PROCESS_SET_QUOTA,
-    which the Popen's own process handle does not carry — so we re-open by pid.
+    ``AssignProcessToJobObject`` needs a handle carrying PROCESS_SET_QUOTA
+    (and PROCESS_TERMINATE); the Popen's own handle does not carry it, so we
+    re-open the process by pid.
     """
     if os.name != "nt" or proc is None:
         return
@@ -160,13 +217,10 @@ def _attach_to_kill_job(proc) -> None:
     if not job:
         return
     pid = getattr(proc, "pid", None)
-    if not pid:
+    if not pid or _kernel32 is None:
         return
-    if _kernel32 is None:
-        return
-    import ctypes
-    PROCESS_SET_QUOTA = 0x0020
-    handle = _kernel32.OpenProcess(PROCESS_SET_QUOTA, False, pid)
+    handle = _kernel32.OpenProcess(
+        _PROC_SET_QUOTA | _PROC_TERMINATE, False, pid)
     if not handle:
         return
     try:
@@ -175,8 +229,12 @@ def _attach_to_kill_job(proc) -> None:
         _kernel32.CloseHandle(handle)
     if not ok:
         logger.debug(
-            "its-in-your-head: AssignProcessToJobObject returned %s "
-            "(hard-kill safety net unavailable)", ok)
+            "its-in-your-head: AssignProcessToJobObject failed "
+            "(err=%d); hard-kill safety net unavailable, "
+            "stale-registry reaper remains the backstop",
+            _kernel32.GetLastError())
+    else:
+        logger.debug("its-in-your-head: ONNX worker %d bound to kill-on-close job", pid)
 
 
 # ---------------------------------------------------------------------------

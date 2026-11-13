@@ -611,6 +611,43 @@ def test_guard_rejects_unrelated_process():
         p.wait()
 
 
+def test_job_struct_layout():
+    """Regression for the native Job Object struct layout (defect: the ctypes
+    definitions must match JOBOBJECT_BASIC/EXTENDED_LIMIT_INFORMATION)."""
+    import ctypes
+    import perception.worker_client as wc
+    _c, _ext = wc._job_structs()
+    _basic = _ext._fields_[0][1]
+    # Documented Win32 limit-flag constants + process access rights.
+    assert wc._JOB_LIMIT_ACTIVE_PROCESS == 0x8
+    assert wc._JOB_LIMIT_KILL_ON_JOB_CLOSE == 0x2000
+    assert wc._PROC_SET_QUOTA == 0x100
+    assert wc._PROC_TERMINATE == 0x1
+    if ctypes.sizeof(ctypes.c_size_t) == 8:  # 64-bit layout (all CI + user env)
+        assert ctypes.sizeof(_basic) == 56, ctypes.sizeof(_basic)
+        assert ctypes.sizeof(_ext) == 168, ctypes.sizeof(_ext)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object API only")
+def test_windows_job_object_native():
+    """Exercise the native Job Object calls (CreateJobObjectW + Set/Query +
+    OpenProcess + AssignProcessToJobObject) so the hard-kill path is covered
+    by CI. _windows_kill_job returns a handle only when it has CONFIRMED the
+    KILL_ON_JOB_CLOSE limit was actually applied; otherwise 0 (the reaper is
+    the backstop there)."""
+    import subprocess
+    import perception.worker_client as wc
+    job = wc._windows_kill_job()
+    assert isinstance(job, int)
+    if job:  # limit applied on this environment -> a Popen binds without raising
+        g = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+        try:
+            wc._attach_to_kill_job(g)  # must not raise
+        finally:
+            wc._terminate_pid(g.pid)
+            g.wait()
+
+
 def test_reaper_kills_dead_owner_worker(tmp_path, monkeypatch):
     import json as _json
     from perception import worker_client as wc
