@@ -114,6 +114,26 @@ PLUGIN_ID = "its-in-your-head"
 # existing callers/tests. Do not copy the DDL here.
 _DDL = _migration.EVENTS_DDL
 
+# AUTH BOUNDARY — P1.4, status: NOT VERIFIED (v0.1.28).
+#
+# This router carries NO auth dependency of its own. It is mounted by the
+# Hermes gateway at /api/plugins/{plugin-id}/ inside a namespace-scoped child,
+# and the namespace isolation (traversal to other plugins / core routes is
+# structurally rejected) is what stands between this router and an anonymous
+# or cross-namespace caller. That host middleware is NOT exercised by this
+# repo's TestClient tests — a bare TestClient(api.router) reaches every route
+# unauthenticated, which is correct in-host but proves nothing about the
+# gateway's boundary.
+#
+# So the boundary is asserted, not proven: the destructive routes (POST
+# /reset, POST /settings) and the read routes are reachable by ANY caller
+# whose request the gateway lets through to this namespace. The proof that an
+# anonymous / cross-namespace / bad-origin request is actually rejected lives
+# in a real-gateway integration test (see
+# tests/test_gateway_auth_boundary.py), which this repo's suite marks
+# "not verified" until it runs against the Hermes gateway. Until that test
+# is green, the auth boundary is a documented assumption, not a confirmed
+# guarantee — per the v0.1.28 hardening plan's P1.4.
 router = APIRouter()
 
 
@@ -1583,17 +1603,30 @@ def _reset_dataset() -> dict:
     """
     counts = {t: 0 for t in _ANALYTICAL_TABLES}
     counts["meta_keys"] = 0
+    physical_cleanup = False
+    import metrics as _metrics
+    # P1.1 barrier: enter the reset state + confirm the worker is FULLY stopped
+    # before the wipe. The flag makes any picked-up batch discard (no persist,
+    # no engine write) so a pre-wipe record can never commit after the delete.
+    _metrics._set_reset_in_progress(True)
     try:
-        import metrics as _metrics
-        _metrics.stop_worker(timeout=3.0)  # best-effort; barrier below still holds
+        worker_stopped = _metrics.stop_worker(timeout=3.0)
+    except Exception:
+        worker_stopped = False
+    if not worker_stopped:
+        # P1.1: a live worker can still commit engine-side writes after the
+        # wipe. Abort honestly — never claim a clean reset while the worker is
+        # still draining an in-flight batch.
+        _metrics._set_reset_in_progress(False)
+        return {"reset": False, "reason": "worker-still-active",
+                "wiped": counts}
+    # §7.4: discard the transient raw-text backlog (queue + reasoning buffers).
+    try:
+        _metrics.reset_transient_state()
     except Exception:
         pass
+    reset_ok = False
     try:
-        try:
-            import metrics as _metrics
-            _metrics.reset_transient_state()
-        except Exception:
-            pass
         conn = _connect()
         try:
             _migration.schema_bootstrap(conn, _DDL)
@@ -1609,14 +1642,16 @@ def _reset_dataset() -> dict:
                 f"DELETE FROM meta WHERE key IN ({ph})", _ANALYTICAL_META_KEYS)
             counts["meta_keys"] = cur.rowcount if cur.rowcount is not None else 0
             conn.commit()
-            # §8: controlled WAL checkpoint after the wipe — reclaim the
-            # just-deleted pages so obsolete WAL/SHM state is not left behind
-            # (a full VACUUM is a separate, heavier maintenance operation, not
-            # an automatic part of the reset).
+            # P2.1: confirmed physical WAL cleanup. TRUNCATE shrinks the WAL
+            # file to zero; verify the result (busy==0 + pages checkpointed)
+            # so an incomplete checkpoint is never reported as a physical
+            # erase. (A full VACUUM remains a separate heavier operation.)
             try:
-                conn.execute("PRAGMA wal_checkpoint(RESTART)")
+                row = conn.execute(
+                    "PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                physical_cleanup = bool(row and row[0] == 0)
             except Exception:
-                pass
+                physical_cleanup = False
             reset_ok = True
         except Exception:
             # §7.3: an unsuccessful deletion is NEVER reported as success.
@@ -1632,14 +1667,15 @@ def _reset_dataset() -> dict:
                 pass
     except Exception:
         reset_ok = False
-    finally:
-        # §7.2: resume collection with a clean generation (fresh worker).
-        try:
-            import metrics as _metrics
-            _metrics.start_worker()
-        except Exception:
-            pass
-    return {"wiped": counts, "reset": bool(reset_ok)}
+    # §7.2: resume collection with a clean generation (fresh worker). The flag
+    # is cleared BEFORE the new worker starts so it persists normally.
+    _metrics._set_reset_in_progress(False)
+    try:
+        _metrics.start_worker()
+    except Exception:
+        pass
+    return {"wiped": counts, "reset": bool(reset_ok),
+            "physical_cleanup": physical_cleanup}
 
 
 def _reset_dataset_compat() -> dict:  # keep the legacy name available
@@ -1812,6 +1848,15 @@ async def update_settings(request: Request):
     # write that survives every restart). The ctx config mirror is handled
     # inside the helper (non-authoritative, best-effort).
     persisted = _user_settings_write(accepted)
+    # P2.2: a live retention change must reach the worker NOW (not wait for the
+    # next register()). Best effort — a failure only leaves the worker on its
+    # previous window; the durable write already landed.
+    if "observation.retain_days" in accepted:
+        try:
+            import metrics as _metrics
+            _metrics.set_retain_days(accepted["observation.retain_days"])
+        except Exception:
+            pass
     return {
         "settings": _pane_settings(),
         "accepted": accepted,
@@ -1820,6 +1865,20 @@ async def update_settings(request: Request):
         # (then the value is in-session only and will flush on restart).
         "ephemeral": not persisted,
     }
+
+
+def _bounded_onnx_detail(status: str, errors) -> str | None:
+    """P2.4: a bounded, categorized model-readiness detail. Short per-file
+    missing/mismatch entries are kept (capped); arbitrary exception text
+    (e.g. "manifest unreadable: <path>") is dropped to a category so a
+    diagnostic endpoint never returns unbounded system messages."""
+    if status == "verified" or not errors:
+        return None
+    safe = [str(e) for e in errors
+            if isinstance(e, str) and e.startswith(("missing:", "mismatch:"))]
+    parts = safe if safe else [str(status)]
+    detail = "; ".join(parts)
+    return detail[:200]
 
 
 @router.get("/engine-status")
@@ -1844,10 +1903,12 @@ async def engine_status():
             from perception import worker_client as _wc  # type: ignore
         status, errors = _wc.check_model()
         out["onnx_model"] = status
-        out["onnx_detail"] = "; ".join(errors) if errors else None
+        out["onnx_detail"] = _bounded_onnx_detail(status, errors)
     except Exception as exc:
         out["onnx_model"] = "unavailable"
-        out["onnx_detail"] = str(exc)
+        # P2.4: a normalized category (the exception type), not str(exc)
+        # (which can leak local paths + environment details).
+        out["onnx_detail"] = f"probe-error: {type(exc).__name__}"[:200]
     return out
 
 

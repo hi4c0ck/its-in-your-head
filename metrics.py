@@ -37,11 +37,13 @@ try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from . import embedder
     from .storage import database as _database
     from .storage import migration as _migration
+    from .core import events as _events
     from . import engine as _engine
 except ImportError:
     import embedder
     from storage import database as _database
     from storage import migration as _migration
+    from core import events as _events
     try:
         import engine as _engine
     except ImportError:  # engine is optional plumbing; worker still persists
@@ -57,7 +59,12 @@ logger = logging.getLogger(__name__)
 PLUGIN_ID = "its-in-your-head"
 
 MAX_EVENTS = 50_000      # retention cap for the events table (owner default)
-PRUNE_EVERY = 50         # prune check every N worker batches
+PRUNE_EVERY = 50         # prune check every N worker batches (active floor)
+# P2.2: time-based prune ceiling so an IDLE worker still ages out expired
+# events. The batch floor alone would never fire with no activity.
+PRUNE_INTERVAL_S = 300   # at most 5 min between prune passes when idle
+_last_prune_ts = 0.0     # start_worker() reinitializes this to time.time();
+                        # 0.0 here is only the pre-start placeholder.
 BATCH_MAX = 64           # max events flushed per commit
 QUEUE_GET_TIMEOUT = 0.5  # worker idle poll (s)
 # v0.1.28 P0 (§2.4): the raw-text event queue is BOUNDED. A stopped or slow
@@ -114,7 +121,21 @@ _items: "collections.deque" = collections.deque()
 _worker_lock = threading.Lock()
 _worker_thread: "threading.Thread | None" = None
 _shutdown = threading.Event()
+# P1.1: a /reset in flight. While True the worker discards picked-up batches
+# (no persist, no engine-side write) so a pre-wipe record can never be
+# committed after the delete. Set/cleared by _set_reset_in_progress().
+_reset_in_progress = False
 _batches = 0
+
+
+def _set_reset_in_progress(v: bool) -> None:
+    """Toggle the /reset in-flight flag the worker checks before committing."""
+    global _reset_in_progress
+    _reset_in_progress = bool(v)
+
+
+def reset_in_progress() -> bool:
+    return _reset_in_progress
 
 # Flush-barrier state (F4). _in_flight_events counts events the worker has
 # dequeued but not yet committed (post-persist); _failed_events is the
@@ -215,11 +236,15 @@ def _row_from_event(ev: dict) -> dict:
     if not isinstance(error, dict):
         error = {}
     retryable = ev.get("retryable")
-    # §4.1: bounded error-class category — from the event's "error" dict
-    # (legacy) or its top-level error_type (events.stream_end). Capped at
-    # 64 chars; never the arbitrary raw message.
-    _et = error.get("type") or ev.get("error_type")
-    _error_type = (str(_et)[:64] if _et is not None else None)
+    # §4.1/P1.2: a STRICT error-category allowlist. Both the legacy error dict
+    # + a producer-supplied top-level error_type are coerced through the same
+    # allowlist, so a future producer cannot bypass the policy by passing a
+    # dict directly to metrics.enqueue(). Arbitrary free-text (e.g. "Bearer
+    # <token>") collapses to "unknown"; the raw message is never persisted.
+    if ev.get("error_type") is not None:
+        _error_type = _events._error_type(ev.get("error_type"))
+    else:
+        _error_type = _events._error_type(error) if error else None
     return {
         "ts": ev.get("ts") or time.time(),
         "type": ev.get("type"),
@@ -279,10 +304,12 @@ def _persist_batch(batch: list) -> None:
 
 
 def _prune() -> None:
-    """§6: two complementary limits on the events table — (a) time-based
+    """§6/P2.2: two complementary limits on the events table — (a) time-based
     retention from the live observation.retain_days window (older rows drop),
     and (b) the hard row-count cap (MAX_EVENTS) as a final upper bound. A
-    retention of 0 disables the age leg; the row cap always applies."""
+    retention of 0 disables the age leg; the row cap always applies. A
+    successful prune stamps the P2.2 time-based trigger."""
+    global _last_prune_ts
     try:
         conn = _connect()
         try:
@@ -297,6 +324,7 @@ def _prune() -> None:
                 "(SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?)",
                 (MAX_EVENTS,))
             conn.commit()
+            _last_prune_ts = time.time()
         finally:
             conn.close()
     except Exception:
@@ -339,9 +367,16 @@ def _worker_main() -> None:
         if not batch:
             continue
         try:
-            for ev in batch:
-                if isinstance(ev, dict) and ev.get("type") == "turn":
-                    ev["sketch"] = embedder.sketch(ev.get("user_message"))
+            # P1.1: a batch picked up during a stop/reset must not commit — a
+            # /reset wipe races the engine-side writes that would repopulate
+            # just-deleted rows. Discard it (scrub + tick in the finally),
+            # never persist + never feed the engine.
+            if _shutdown.is_set() or _reset_in_progress:
+                _flush_tick(len(batch))
+            else:
+                for ev in batch:
+                    if isinstance(ev, dict) and ev.get("type") == "turn":
+                        ev["sketch"] = embedder.sketch(ev.get("user_message"))
                 # D4 discard-after-scoring: no Tier-0 sketch is attached
                 # to reasoning_seg events anymore. The raw reasoning text
                 # stays in memory only; the engine encodes it through the
@@ -349,29 +384,36 @@ def _worker_main() -> None:
                 # vector space for prompt + reaction), and the C6 purge
                 # after the feed discards it. Nothing derived from the
                 # raw text persists as a BLOB.
-            # Persist BEFORE the engine feed: the row mapping above no
-            # longer serializes raw text (reasoning rows write a NULL
-            # sketch), and the purge below keeps the raw fields out of
-            # engine state too. The engine feed runs BEFORE the purge, so
-            # the raw reasoning text is still in memory for engine-side
-            # embedding (embed first — engine-side — purge last).
-            _persist_batch(batch)
-            _batches += 1
-            if _batches % PRUNE_EVERY == 0:
-                _prune()
-            # Engine feed BEFORE the tick notification (v0.1.10 spec
-            # §3.2): the desktop's next /pulse refresh is triggered by
-            # the tick, so the pulse_tools registry must already be
-            # updated — a tick that fires first makes the client read a
-            # stale snapshot. The scrub below stays LAST (embed first,
-            # purge last — the invariant from v0.1.3).
-            if _engine is not None:
-                try:
-                    _engine.on_events(batch)
-                except Exception:
-                    logger.exception(
-                        "its-in-your-head: engine feed failed (state dropped)")
-            _flush_tick(len(batch))
+                # Persist BEFORE the engine feed: the row mapping above no
+                # longer serializes raw text (reasoning rows write a NULL
+                # sketch), and the purge below keeps the raw fields out of
+                # engine state too. The engine feed runs BEFORE the purge, so
+                # the raw reasoning text is still in memory for engine-side
+                # embedding (embed first — engine-side — purge last).
+                _persist_batch(batch)
+                _batches += 1
+                # Activity-gated prune: the N-batch floor OR a time ceiling.
+                # The ceiling lets an otherwise-idle worker age out expired
+                # events without waiting for N more batches; both fire ONLY
+                # after a real persist (the DB is open + in use) — never on
+                # the idle wait, so an idle worker still never opens the DB
+                # (the lazy invariant the lazy-DB test guards).
+                if _batches % PRUNE_EVERY == 0 or \
+                        time.time() - _last_prune_ts >= PRUNE_INTERVAL_S:
+                    _prune()
+                # Engine feed BEFORE the tick notification (v0.1.10 spec
+                # §3.2): the desktop's next /pulse refresh is triggered by
+                # the tick, so the pulse_tools registry must already be
+                # updated — a tick that fires first makes the client read a
+                # stale snapshot. The scrub below stays LAST (embed first,
+                # purge last — the invariant from v0.1.3).
+                if _engine is not None:
+                    try:
+                        _engine.on_events(batch)
+                    except Exception:
+                        logger.exception(
+                            "its-in-your-head: engine feed failed (state dropped)")
+                _flush_tick(len(batch))
         except Exception:
             # Failed-batch policy: report via the error path below and DROP
             # the batch — flush() does not retry. The dropped count is
@@ -506,11 +548,18 @@ def start_worker() -> None:
     plugin_data_dir()/plugin_db() can fall back to the gateway's launch
     (default) home and split the writer from the profile-scoped dashboard.
     """
-    global _worker_thread
+    global _worker_thread, _last_prune_ts
     with _worker_lock:
         if _worker_thread is not None and _worker_thread.is_alive():
             return
         _shutdown.clear()
+        # P2.2: the time-based prune ceiling counts from worker start, not
+        # from the epoch (the module-level 0.0 would make the very first
+        # persist look "stale" and trigger a start-prune that deletes
+        # just-written rows). Idle workers still age out old rows on the
+        # next activity after PRUNE_INTERVAL_S without breaking the lazy
+        # invariant (no DB open on a pure idle wait).
+        _last_prune_ts = time.time()
         try:
             # Hermes' helper copies the current ContextVars into the new
             # thread. PluginManager loads a profile's plugin under that
@@ -533,17 +582,30 @@ def start_worker() -> None:
         _worker_thread.start()
 
 
-def stop_worker(timeout: float = 3.0) -> None:
-    """Stop the worker (clean teardown / tests). Unflushed queue items are
-    lost; persistence is best-effort telemetry."""
+def stop_worker(timeout: float = 3.0) -> bool:
+    """Stop the worker (clean teardown / tests). Returns True ONLY if the
+    worker thread is confirmed stopped within `timeout`. A live worker
+    (mid batch) makes this False; the thread reference is then KEPT so
+    start_worker() will not spawn a second thread on top of it. Callers that
+    need a hard stop (e.g. /reset) must abort or retry on False — they must
+    not proceed with a destructive wipe while the worker can still write.
+    Unflushed queue items are lost; persistence is best-effort telemetry."""
     global _worker_thread
     with _worker_lock:
         thread = _worker_thread
-        _worker_thread = None
-        _shutdown.set()
+    _shutdown.set()
     # Stopping releases the flush barrier: wake any flush() waiters so
     # they return promptly with honest pending accounting.
     with _state_cv:
         _state_cv.notify_all()
+    stopped = True
     if thread is not None:
         thread.join(timeout=timeout)
+        stopped = not thread.is_alive()
+    if stopped:
+        with _worker_lock:
+            # Clear the ref only if it still points at the thread we stopped
+            # (a concurrent start_worker may have already replaced it).
+            if _worker_thread is thread:
+                _worker_thread = None
+    return stopped

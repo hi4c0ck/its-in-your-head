@@ -54,15 +54,24 @@ def test_sketch_empty_is_zero_vector():
 
 
 def test_start_worker_is_idempotent(tmp_path):
-    import threading
     import metrics
     importlib.reload(metrics)
     metrics.set_db_path(tmp_path / "data.db")
     metrics.start_worker()
+    first = metrics._worker_thread
+    assert first is not None and first.is_alive()
     metrics.start_worker()  # second call must be a no-op
-    assert len([t for t in threading.enumerate()
-                if t.name == "its-in-your-head-metrics" and t.is_alive()]) == 1
-    metrics.stop_worker()
+    # The idempotency invariant, checked by thread identity (not a global
+    # by-name count, which is fragile: daemon worker threads leak across
+    # importlib.reload in sibling tests and a leaked thread from an earlier
+    # module generation would make a name count read >1 even when this test
+    # correctly spawned exactly one).
+    assert metrics._worker_thread is first, \
+        "second start_worker() must be a no-op, not spawn another thread"
+    # P1.1: stop_worker reports a CONFIRMED stop (bool), so the thread this
+    # test started is provably joined — not merely referenced away.
+    assert metrics.stop_worker() is True, \
+        "stop_worker must confirm the worker thread actually stopped"
 
 
 def test_worker_persists_events(tmp_path):

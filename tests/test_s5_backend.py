@@ -253,12 +253,17 @@ def test_reset_empty_db_ok(tmp_path):
     c = _client(tmp_path)
     r = c.post("/reset")
     assert r.status_code == 200
-    assert r.json() == {"wiped": {"events": 0, "portrait_history": 0,
-                                   "pattern_affinity_history": 0,
-                                   "pattern_bank": 0, "pulse_tools": 0,
-                                   "pulse_prototypes": 0, "pulse_goal": 0,
-                                   "pulse_capsules": 0, "meta_keys": 0},
-                        "reset": True}
+    body = r.json()
+    assert body["reset"] is True
+    assert set(body["wiped"]) == {"events", "portrait_history",
+                                   "pattern_affinity_history", "pattern_bank",
+                                   "pulse_tools", "pulse_prototypes",
+                                   "pulse_goal", "pulse_capsules",
+                                   "meta_keys"}
+    assert all(v == 0 for v in body["wiped"].values())
+    # P2.1: a physical-cleanup flag is now reported (True when the TRUNCATE
+    # checkpoint reclaimed the WAL with no active reader).
+    assert "physical_cleanup" in body
 
 
 def test_reset_wipes_newer_analytical_state(tmp_path):
@@ -315,6 +320,25 @@ def test_reset_reports_failure_when_db_unavailable(tmp_path, monkeypatch):
     body = r.json()
     assert body["reset"] is False
     assert "wiped" not in body or all(v == 0 for v in body["wiped"].values())
+
+
+def test_reset_aborts_when_worker_cannot_stop(tmp_path, monkeypatch):
+    """P1.1: if the metrics worker is still active (stop_worker times out),
+    the wipe is aborted honestly — no partial wipe + the seeded records
+    survive (a live worker could otherwise repopulate just-deleted rows)."""
+    import metrics
+    c = _client(tmp_path, seed=True)
+    n_before = c.get("/metrics").json()["events"]
+    assert n_before > 0
+    # Simulate a live worker that will not stop within the timeout.
+    monkeypatch.setattr(metrics, "stop_worker", lambda timeout=3.0: False)
+    r = c.post("/reset")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["reset"] is False
+    assert body.get("reason") == "worker-still-active"
+    # The wipe never ran: the seeded records are still present.
+    assert c.get("/metrics").json()["events"] == n_before
 
 
 def test_no_route_echoes_raw_event_text(tmp_path):

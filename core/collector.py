@@ -68,6 +68,18 @@ def _setting(key):
     return _settings_snapshot.get(key, settings.DEFAULTS.get(key))
 
 
+def _safe_category(value, cap: int = 32):
+    """P2.3: coerce a categorical field to a bounded, safe string. A missing
+    value -> None; a non-string -> its type name (bounded); a string ->
+    stripped + truncated to `cap`. No newlines/control chars survive."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = type(value).__name__
+    cleaned = "".join(ch for ch in value if ch.isprintable())
+    return cleaned[:cap] if cleaned else None
+
+
 def _corr(kwargs) -> dict:
     return STATE.note(kwargs)
 
@@ -249,7 +261,10 @@ def _on_post_tool_call(tool_name=None, args=None, result=None, task_id=None,
         corr = _corr(kwargs)
         name = tool_name or kwargs.get("tool_name") or "unknown"
         if isinstance(result, dict):
-            result_type = "dict:" + ",".join(sorted(str(k) for k in result)[:8])
+            # P2.3: store only the shape ("dict"), never the dynamic key
+            # names — they can be long + user-controlled, an unnecessary
+            # risk surface. The values are never persisted (C6).
+            result_type = "dict"
             status = "error" if result.get("error") else "ok"
         elif isinstance(result, str):
             result_type, status = "str", "ok"
@@ -257,7 +272,10 @@ def _on_post_tool_call(tool_name=None, args=None, result=None, task_id=None,
             result_type, status = "none", "ok"
         else:
             result_type, status = type(result).__name__, "ok"
-        status = kwargs.get("status") or status
+        # P2.3: a host-supplied status is a short categorical, not free
+        # text — cap it so an arbitrary string can't become a persistent
+        # unbounded field.
+        status = _safe_category(kwargs.get("status") or status) or "unknown"
         STATE.inc("tool_calls_completed")
         if status == "error":
             STATE.inc("tool_errors")

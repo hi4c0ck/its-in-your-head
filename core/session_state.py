@@ -18,6 +18,7 @@ import threading
 REASONING_BUFFER_CAP = 8192      # chars; bounded per buffer (locked rule)
 REASONING_MAX_ACTIVE = 64        # max concurrent unfinished raw buffers
 REASONING_MAX_COMPLETED = 128    # bounded FIFO completion-marker collection
+REASONING_MAX_ENDED = 128        # bounded FIFO ended-session tombstones
 
 
 class SessionState:
@@ -48,6 +49,11 @@ class SessionState:
             # buffer. Metadata only — no text is retained here.
             self._completed = {}
             self._completed_order = []
+            # P1.3: bounded ended-session tombstones. A late reasoning delta
+            # for an already-ended session is rejected (no buffer is ever
+            # recreated for a finished session). Metadata only.
+            self._ended = {}
+            self._ended_order = []
 
     # --- correlation -------------------------------------------------
     def correlate(self, kwargs) -> dict:
@@ -62,8 +68,14 @@ class SessionState:
     def note(self, kwargs) -> dict:
         """Update last-seen correlation ids; return the correlated dict."""
         with self._lock:
-            if kwargs.get("session_id"):
-                self.session_id = kwargs["session_id"]
+            new_sid = kwargs.get("session_id")
+            if new_sid:
+                # P1.3: a session transition must not inherit the previous
+                # session's turn/task correlation.
+                if new_sid != self.session_id:
+                    self.turn_id = None
+                    self.task_id = None
+                self.session_id = new_sid
             if kwargs.get("turn_id"):
                 self.turn_id = kwargs["turn_id"]
             if kwargs.get("task_id"):
@@ -88,14 +100,45 @@ class SessionState:
     def session_started(self, session_id=None):
         with self._lock:
             if session_id:
+                # P1.3: a (re)started session is active again — lift its
+                # ended tombstone + start fresh correlation (no stale turn).
+                self._mark_ended(session_id, drop=True)
                 self.session_id = session_id
+                self.turn_id = None
+                self.task_id = None
             self.live["sessions_started"] += 1
 
     def session_ended(self, session_id=None):
         with self._lock:
             if session_id:
                 self.session_id = session_id
+                # P1.3: tombstone the ended session so a late reasoning delta
+                # for it cannot recreate a raw buffer, + drop its turn/task
+                # correlation so the next session inherits nothing.
+                self._mark_ended(session_id, drop=False)
+                self.turn_id = None
+                self.task_id = None
             self.live["sessions_ended"] += 1
+
+    def _mark_ended(self, session_id, drop):
+        """Manage the bounded ended-session tombstone (caller holds the lock).
+        drop=True removes the tombstone (session restarted active); drop=False
+        adds it (session ended)."""
+        if drop:
+            self._ended.pop(session_id, None)
+            if session_id in self._ended_order:
+                self._ended_order.remove(session_id)
+        else:
+            if session_id not in self._ended:
+                self._ended[session_id] = True
+                self._ended_order.append(session_id)
+            while len(self._ended_order) > REASONING_MAX_ENDED:
+                old = self._ended_order.pop(0)
+                self._ended.pop(old, None)
+
+    def session_ended_is_tombstoned(self, session_id) -> bool:
+        with self._lock:
+            return session_id in self._ended
 
     # --- reasoning-segment bookkeeping (bounded, session-scoped) ----------
     @staticmethod
@@ -117,6 +160,10 @@ class SessionState:
 
     def reasoning_begin(self, session_id, turn_id):
         with self._lock:
+            # P1.3: a late delta for an already-ended session is rejected —
+            # no buffer is ever (re)created for a finished session.
+            if session_id in self._ended:
+                return
             key = self._key(session_id, turn_id)
             if key not in self._reasoning:
                 self._reasoning[key] = {"chunks": 0, "buffer": "", "done": False}
@@ -126,10 +173,14 @@ class SessionState:
     def reasoning_feed(self, session_id, turn_id, delta) -> bool:
         """Append a reasoning delta. Returns True while still capturing
         (first segment of this turn, buffer not yet flushed). A late delta
-        for an already-flushed turn is a no-op (its completion marker wins)."""
+        for an already-flushed turn is a no-op (its completion marker wins).
+        P1.3: a delta for an already-ENDED session is rejected outright so it
+        can never resurrect a raw buffer."""
         if not isinstance(delta, str):
             delta = str(delta) if delta is not None else ""
         with self._lock:
+            if session_id in self._ended:
+                return False
             key = self._key(session_id, turn_id)
             if key in self._completed:
                 return False
@@ -175,13 +226,19 @@ class SessionState:
         """Remove unfinished reasoning buffers + completion markers for the
         session so a session transition cannot leave the preceding session's
         raw text reachable. session_id=None clears everything (the host ended
-        a session without supplying its id)."""
+        a session without supplying its id). P1.3: a cleared session is also
+        tombstoned so a late reasoning delta for it is rejected (the cleared
+        completion markers alone would no longer block resurrection)."""
         with self._lock:
             if session_id is None:
                 self._reasoning.clear()
                 self._completed.clear()
                 self._reasoning_order.clear()
                 self._completed_order.clear()
+                # Reset the live correlation; keep the bounded tombstones so
+                # late deltas for recently-ended sessions stay rejected.
+                self.turn_id = None
+                self.task_id = None
                 return
             self._reasoning = {
                 k: v for k, v in self._reasoning.items() if k[0] != session_id}
@@ -191,3 +248,6 @@ class SessionState:
                                       if k[0] != session_id]
             self._completed_order = [k for k in self._completed_order
                                       if k[0] != session_id]
+            # P1.3: tombstone the cleared session (bounded) so a late delta
+            # cannot recreate its buffer.
+            self._mark_ended(session_id, drop=False)

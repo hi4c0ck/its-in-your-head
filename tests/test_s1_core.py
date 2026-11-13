@@ -125,7 +125,9 @@ def test_simulated_turn_produces_rows(_fresh_pipeline):
 
     tool_end = _query(db, "SELECT tool_name, status, duration_ms, result_type "
                           "FROM events WHERE type='tool_end'")[0]
-    assert tool_end == ("terminal", "ok", 12.5, "dict:n,ok")
+    # P2.3: result_type stores only the shape ("dict"), never the dynamic
+    # key names (which could carry user data).
+    assert tool_end == ("terminal", "ok", 12.5, "dict")
 
     seg = _query(db, "SELECT reasoning_chars, reasoning_deltas, sketch "
                      "FROM events WHERE type='reasoning_seg'")[0]

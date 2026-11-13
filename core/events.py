@@ -49,18 +49,42 @@ def _base(etype, **kw):
     return ev
 
 
+# P1.2 (§4.1): a STRICT error-category allowlist. Arbitrary provider/exception
+# text (a `type`/`code`/`error` field, a raw string) is NEVER stored — any
+# value outside the known set collapses to "unknown" so no external string
+# (e.g. "Bearer <token>") can ride into the event + the DB.
+_ERROR_CATEGORIES = ("http", "timeout", "rate_limit", "authentication",
+                    "connection", "unknown")
+
+
 def _error_type(error) -> "str | None":
-    """§4.1 allowlisted error-class/category. Only a capped categorical string
-    is carried — arbitrary provider message bodies, request fragments, headers
-    or URLs are NEVER retained (the raw text does not enter the event)."""
+    """§4.1/P1.2: a strict, allowlisted error category. Only the six known
+    categories are ever produced; a bounded set of well-known transport/
+    provider terms is mapped onto them, and everything else (including any
+    free-text like "Bearer ...") is "unknown"."""
     if isinstance(error, dict):
         raw = error.get("type") or error.get("code") or error.get("error")
     else:
         raw = error
     if raw is None:
         return None
-    s = str(raw)
-    return s[:64] if len(s) > 64 else s
+    s = str(raw).strip().lower()
+    if s in _ERROR_CATEGORIES:
+        return s
+    if any(t in s for t in ("timeout", "timed out", "deadline", "504")):
+        return "timeout"
+    if any(t in s for t in ("rate", "429", "quota", "throttl")):
+        return "rate_limit"
+    if any(t in s for t in ("auth", "unauthorized", "forbidden", "401",
+                            "403", "api key", "api-key", "invalid key",
+                            "credentials")):
+        return "authentication"
+    if any(t in s for t in ("connection", "connect", "network", "refused",
+                            "502", "503", "500")):
+        return "connection"
+    if s.startswith(("http", "status")):
+        return "http"
+    return "unknown"
 
 
 # Public alias: the collector + stream_end use this as the §4.1 allowlisted

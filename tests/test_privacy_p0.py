@@ -77,6 +77,52 @@ def test_clear_session_removes_buffers_and_markers():
     assert len(s._reasoning) == 0 and len(s._completed) == 0
 
 
+# -- P1.3 session lifecycle: no reasoning resurrection after end -----------
+
+def test_late_reasoning_after_session_end_is_rejected():
+    """A late delta for an already-ended session must not recreate a raw
+    buffer (the ended-session tombstone wins over the cleared markers)."""
+    s = ss.SessionState()
+    s.reasoning_feed("sA", "t1", "secret A")
+    s.session_ended("sA")                  # tombstones sA + resets turn/task
+    s.clear_session("sA")                   # (collector does both)
+    # a late stream delta for the finished session is rejected — no buffer
+    assert s.reasoning_feed("sA", "t1", "late resurrection") is False
+    assert not s.reasoning_pending("sA", "t1")
+    assert ("sA", "t1") not in s._reasoning
+    assert s.reasoning_flush("sA", "t1") is None
+
+
+def test_session_a_to_b_no_turn_inheritance():
+    """Ending session A must not let session B inherit A's turn correlation;
+    a late A delta stays rejected while B captures normally."""
+    s = ss.SessionState()
+    s.reasoning_feed("sA", "tA", "A text")
+    s.reasoning_flush("sA", "tA")
+    s.session_ended("sA")
+    # start B: the host does not pass B's turn yet; A's turn must not stick.
+    s.session_started("sB")
+    assert s.turn_id is None and s.task_id is None
+    # B captures its own delta; a late A delta is still rejected.
+    assert s.reasoning_feed("sB", "tB", "B text") is True
+    assert s.reasoning_feed("sA", "tA", "A late") is False
+    assert s.reasoning_pending("sB", "tB")
+    assert not s.reasoning_pending("sA", "tA")
+
+
+def test_correlation_resets_on_session_transition():
+    """note(): switching session_id drops the previous session's turn/task so
+    a new session inherits nothing."""
+    s = ss.SessionState()
+    s.note({"session_id": "sA", "turn_id": "tA", "task_id": "kA"})
+    assert s.turn_id == "tA" and s.task_id == "kA"
+    out = s.note({"session_id": "sB"})     # transition: turn/task cleared
+    assert out == {"session_id": "sB", "turn_id": None, "task_id": None}
+    # same-session note does NOT clobber a later turn_id
+    out2 = s.note({"turn_id": "tB"})
+    assert out2["turn_id"] == "tB" and out2["session_id"] == "sB"
+
+
 # -- §2.4 bounded event queue + overflow accounting ---------------------------
 
 def test_enqueue_overflow_policy_is_bounded():
@@ -238,9 +284,12 @@ def test_error_message_is_never_persisted():
 
 
 def test_top_level_error_type_is_carried_but_not_message():
+    # P1.2: a top-level error_type is coerced through the strict allowlist
+    # ("upstream_timeout" maps onto the "timeout" category); the raw message
+    # is never persisted.
     row = metrics._row_from_event(
         {"type": "stream_end", "ts": 2.0, "error_type": "upstream_timeout"})
-    assert row["error_type"] == "upstream_timeout"
+    assert row["error_type"] == "timeout"
     assert row["error_message"] is None
 
 
@@ -252,3 +301,56 @@ def test_events_stream_end_does_not_carry_raw_message():
     assert ev.get("error_type") == "rate_limit"
     assert ev.get("error_message") is None
     assert "provider secret text" not in json.dumps(ev)
+
+
+def test_error_type_allowlist_rejects_hostile_free_text():
+    """P1.2: arbitrary free-text (a Bearer token, a raw exception string, a
+    hostile code/error field) is NEVER stored — it collapses to "unknown" at
+    both the extractor + the direct-dict DB boundary."""
+    from core import events
+    SENTINEL = "Bearer abcdef1234567890deadbeef"
+    assert events._error_type({"type": SENTINEL}) == "unknown"
+    assert events._error_type({"code": SENTINEL}) == "unknown"
+    assert events._error_type({"error": SENTINEL}) == "unknown"
+    assert events._error_type(SENTINEL) == "unknown"
+    # DB boundary: a producer-supplied direct error_type is coerced too.
+    row = metrics._row_from_event(
+        {"type": "stream_end", "ts": 2.0, "error_type": SENTINEL})
+    assert row["error_type"] == "unknown"
+    assert SENTINEL not in str(row)
+    # known transport terms still map onto the safe categories.
+    assert events._error_type("Request timed out") == "timeout"
+    assert events._error_type("429 too many requests") == "rate_limit"
+    assert events._error_type("401 invalid api key") == "authentication"
+
+
+# -- P1.1 reset barrier: stop_worker reports a live worker + keeps its ref ----
+
+def test_stop_worker_keeps_ref_when_live():
+    """A worker that cannot be joined within the timeout keeps its thread ref
+    (so start_worker will not spawn a second thread on top of it) +
+    stop_worker reports False. Once it reports dead the ref is cleared + a
+    fresh start works."""
+    import metrics
+    metrics.stop_worker(timeout=2.0)  # drain any real worker before the fake
+
+    class _FakeThread:
+        is_alive_result = True
+        def is_alive(self):
+            return self.is_alive_result
+        def join(self, timeout=None):
+            pass  # simulate a join that times out with the worker still live
+        def start(self):
+            pass
+
+    fake = _FakeThread()
+    metrics._worker_thread = fake
+    assert metrics.stop_worker(timeout=0.1) is False
+    assert metrics._worker_thread is fake  # ref retained, not cleared
+    # start_worker must not spawn a second thread over the live one.
+    metrics.start_worker()
+    assert metrics._worker_thread is fake
+    # Now the (fake) worker reports dead: the next stop clears the ref.
+    fake.is_alive_result = False
+    assert metrics.stop_worker(timeout=0.1) is True
+    assert metrics._worker_thread is None
