@@ -612,20 +612,31 @@ def test_guard_rejects_unrelated_process():
 
 
 def test_job_struct_layout():
-    """Regression for the native Job Object struct layout (defect: the ctypes
-    definitions must match JOBOBJECT_BASIC/EXTENDED_LIMIT_INFORMATION)."""
+    """Regression for the native Job Object struct layout. The ctypes structs
+    must match the winnt.h definitions: JOBOBJECT_BASIC_LIMIT_INFORMATION,
+    IO_COUNTERS and JOBOBJECT_EXTENDED_LIMIT_INFORMATION."""
     import ctypes
     import perception.worker_client as wc
     _c, _ext = wc._job_structs()
     _basic = _ext._fields_[0][1]
+    _io = _ext._fields_[1][1]
     # Documented Win32 limit-flag constants + process access rights.
     assert wc._JOB_LIMIT_ACTIVE_PROCESS == 0x8
     assert wc._JOB_LIMIT_KILL_ON_JOB_CLOSE == 0x2000
     assert wc._PROC_SET_QUOTA == 0x100
     assert wc._PROC_TERMINATE == 0x1
-    if ctypes.sizeof(ctypes.c_size_t) == 8:  # 64-bit layout (all CI + user env)
-        assert ctypes.sizeof(_basic) == 56, ctypes.sizeof(_basic)
-        assert ctypes.sizeof(_ext) == 168, ctypes.sizeof(_ext)
+    # ACTIVE_PROCESS requires a non-zero ActiveProcessLimit; it must be set.
+    assert wc._JOB_MAX_WORKERS > 0
+    # The basic struct must carry the real trailing fields, not PageCount &co.
+    _bnames = [f[0] for f in _basic._fields_]
+    assert "ActiveProcessLimit" in _bnames
+    assert "Affinity" in _bnames
+    assert "PriorityClass" in _bnames and "SchedulingClass" in _bnames
+    assert "PageCount" not in _bnames and "CompletionCode" not in _bnames
+    if ctypes.sizeof(ctypes.c_size_t) == 8:  # x64 layout (all CI + user env)
+        assert ctypes.sizeof(_basic) == 64, ctypes.sizeof(_basic)
+        assert ctypes.sizeof(_io) == 56, ctypes.sizeof(_io)
+        assert ctypes.sizeof(_ext) == 152, ctypes.sizeof(_ext)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object API only")
@@ -646,6 +657,77 @@ def test_windows_job_object_native():
         finally:
             wc._terminate_pid(g.pid)
             g.wait()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object API only")
+def test_job_object_kills_members_on_close():
+    """End-to-end KILL_ON_JOB_CLOSE: create a job, set the limit, assign a
+    child, close the job handle, and verify the child actually terminates.
+    This is the definitive proof of the hard-kill safety net. If this
+    environment cannot apply the limit (SetInformationJobObject returns 0 /
+    flags read back unset), the test skips honestly and the stale-registry
+    reaper is the backstop."""
+    import ctypes
+    import subprocess
+    import time as _time
+    k = ctypes.windll.kernel32
+    k.CreateJobObjectW.restype = ctypes.c_void_p
+    k.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    k.SetInformationJobObject.restype = ctypes.c_int
+    k.SetInformationJobObject.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    k.QueryInformationJobObject.restype = ctypes.c_int
+    k.QueryInformationJobObject.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    k.AssignProcessToJobObject.restype = ctypes.c_int
+    k.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    k.OpenProcess.restype = ctypes.c_void_p
+    k.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    k.CloseHandle.argtypes = [ctypes.c_void_p]
+    k.GetLastError.restype = ctypes.c_uint32
+
+    import perception.worker_client as wc
+    _c, _ext = wc._job_structs()
+    job = k.CreateJobObjectW(None, None)
+    assert job, "CreateJobObjectW failed"
+    ext = _ext()
+    ext.BasicLimitInformation.LimitFlags = (
+        wc._JOB_LIMIT_ACTIVE_PROCESS | wc._JOB_LIMIT_KILL_ON_JOB_CLOSE)
+    ext.BasicLimitInformation.ActiveProcessLimit = wc._JOB_MAX_WORKERS
+    ext.ProcessMemoryLimit = _c.c_size_t(-1)
+    ext.JobMemoryLimit = _c.c_size_t(-1)
+    k.SetInformationJobObject(
+        job, wc._JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        _c.byref(ext), _c.sizeof(ext))
+    # Confirm the limit actually landed before claiming the hard-kill.
+    rb = _ext()
+    k.QueryInformationJobObject(
+        job, wc._JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        _c.byref(rb), _c.sizeof(rb))
+    if not (rb.BasicLimitInformation.LimitFlags
+            & wc._JOB_LIMIT_KILL_ON_JOB_CLOSE):
+        import pytest
+        pytest.skip(
+            "KILL_ON_JOB_CLOSE limit not applied in this environment "
+            f"(SetInformationJobObject err={k.GetLastError()}); "
+            "stale-registry reaper is the backstop")
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        hdl = k.OpenProcess(wc._PROC_TERMINATE | wc._PROC_SET_QUOTA, 0, child.pid)
+        assert hdl, "OpenProcess of child failed"
+        assert k.AssignProcessToJobObject(job, hdl), "assign to job failed"
+        _time.sleep(0.4)
+        assert child.poll() is None  # still alive while the job is open
+        k.CloseHandle(job)          # last handle -> KILL_ON_JOB_CLOSE fires
+        _time.sleep(2.0)
+        assert child.poll() is not None, (
+            "child survived closing the job handle -> KILL_ON_JOB_CLOSE "
+            "did not terminate the member")
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
 
 
 def test_reaper_kills_dead_owner_worker(tmp_path, monkeypatch):

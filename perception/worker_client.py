@@ -80,51 +80,55 @@ _JOB_LIMIT_ACTIVE_PROCESS = 0x00000008
 _JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOBOBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _ERROR_MORE_DATA = 24
+# JOB_OBJECT_LIMIT_ACTIVE_PROCESS requires a non-zero ActiveProcessLimit or
+# association of a process to the job fails. Bound the worker count in the
+# job; the reaper already caps accumulation, this is a secondary hard cap.
+_JOB_MAX_WORKERS = 32
 
 
 def _job_structs():
     import ctypes
     _c = ctypes
 
-    class _IO_COUNTERS(_c.Structure):
-        _fields_ = [
-            ("ReadOperationCount", _c.c_ulonglong),
-            ("WriteOperationCount", _c.c_ulonglong),
-            ("OtherOperationCount", _c.c_ulonglong),
-            ("ReadTransferCount", _c.c_ulonglong),
-            ("WriteTransferCount", _c.c_ulonglong),
-            ("OtherTransferCount", _c.c_ulonglong),
-        ]
-
-    class _IO_INFO(_c.Structure):
-        _fields_ = [
-            ("IoInfo", _IO_COUNTERS),
-            ("MinUserProcessTime", _c.c_ulonglong),
-            ("MaxUserProcessTime", _c.c_ulonglong),
-            ("MinKernelProcessTime", _c.c_ulonglong),
-            ("MaxKernelProcessTime", _c.c_ulonglong),
-        ]
-
+    # Native JOBOBJECT_BASIC_LIMIT_INFORMATION (winnt.h). 64 bytes on x64:
+    # two LONGLONG + DWORD + pad + 2x SIZE_T + DWORD + pad + ULONG_PTR +
+    # 2x DWORD. NOTE: the trailing fields are ActiveProcessLimit / Affinity /
+    # PriorityClass / SchedulingClass -- NOT PageCount/ProcessCount.
     class _Basic(_c.Structure):
         _fields_ = [
             ("PerProcessUserTimeLimit", _c.c_longlong),
             ("PerProcessKernelTimeLimit", _c.c_longlong),
             ("LimitFlags", _c.c_uint32),
-            ("MaximumWorkingSetSize", _c.c_size_t),
             ("MinimumWorkingSetSize", _c.c_size_t),
-            ("PageCount", _c.c_uint32),
-            ("MinimumProcessCount", _c.c_uint32),
-            ("MaximumProcessCount", _c.c_uint32),
-            ("CompletionCode", _c.c_uint32),
+            ("MaximumWorkingSetSize", _c.c_size_t),
+            ("ActiveProcessLimit", _c.c_uint32),
+            ("Affinity", _c.c_size_t),
+            ("PriorityClass", _c.c_uint32),
+            ("SchedulingClass", _c.c_uint32),
         ]
 
-    # Native layout: BasicLimitInformation (56B) + embedded JOBOBJECT_IO_INFO
-    # (IO_COUNTERS 48B + 4x ULONGLONG 32B = 80B) + 4x SIZE_T = 168B. The IoInfo
-    # field is a STRUCT, not a pointer.
+    # Native IO_COUNTERS (winnt.h): 6x LARGE_INTEGER + 2x ULONG. 56 bytes on
+    # x64. This is what JOBOBJECT_EXTENDED_LIMIT_INFORMATION.IoInfo is -- not
+    # the larger JOBOBJECT_IO_INFO.
+    class _IO_COUNTERS(_c.Structure):
+        _fields_ = [
+            ("ReadOperationCount", _c.c_longlong),
+            ("WriteOperationCount", _c.c_longlong),
+            ("OtherOperationCount", _c.c_longlong),
+            ("ReadTransferCount", _c.c_longlong),
+            ("WriteTransferCount", _c.c_longlong),
+            ("OtherTransferCount", _c.c_longlong),
+            ("ReadQuota", _c.c_uint32),
+            ("OtherQuota", _c.c_uint32),
+        ]
+
+    # Native JOBOBJECT_EXTENDED_LIMIT_INFORMATION (winnt.h):
+    # BasicLimitInformation + IO_COUNTERS + 4x SIZE_T = 152 bytes on x64.
+    # The IoInfo field is an embedded IO_COUNTERS struct, not a pointer.
     class _Extended(_c.Structure):
         _fields_ = [
             ("BasicLimitInformation", _Basic),
-            ("IoInfo", _IO_INFO),
+            ("IoInfo", _IO_COUNTERS),
             ("ProcessMemoryLimit", _c.c_size_t),
             ("JobMemoryLimit", _c.c_size_t),
             ("PeakProcessMemoryUsed", _c.c_size_t),
@@ -176,6 +180,9 @@ def _windows_kill_job() -> int:
     ext = _ext()
     ext.BasicLimitInformation.LimitFlags = (
         _JOB_LIMIT_ACTIVE_PROCESS | _JOB_LIMIT_KILL_ON_JOB_CLOSE)
+    # ACTIVE_PROCESS requires a non-zero ActiveProcessLimit, otherwise the
+    # kernel refuses to associate any process with the job.
+    ext.BasicLimitInformation.ActiveProcessLimit = _JOB_MAX_WORKERS
     # A 0 (or unspecified) memory limit is invalid; SIZE_T(-1) = unlimited.
     ext.ProcessMemoryLimit = _c.c_size_t(-1)
     ext.JobMemoryLimit = _c.c_size_t(-1)
