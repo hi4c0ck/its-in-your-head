@@ -163,6 +163,29 @@
   /* a whisper of warmth so it reads inviting, not clinical */
   body::after{ content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
     background:radial-gradient(620px 420px at 0% 100%, rgba(255,178,122,.07), transparent 60%); }
+
+  /* ══ calm + readable — no acidic / neon ══════════════════ */
+  :root{
+    --accent:#6E8CA0;          /* muted steel-blue, not neon */
+    --accent2:#97A2C0;
+    --foreground:#E9E6DF;      /* warm off-white */
+    --muted-foreground:#9C9BA3;
+    --border:#2B2D35;
+    --card:#1B1D24;
+    --bg:#131519;             /* soft charcoal, not pitch-black */
+  }
+  html,body{ background:var(--bg)!important; }
+  body{ color:var(--foreground); }
+  body::before{ background:none!important; }   /* kill the neon HUD grid + glow */
+  body::after{ display:none!important; }       /* kill the warm-amber glow */
+  .iyyh .title .d{ text-shadow:none; }
+  .iyyh .live .dot{ box-shadow:none; }
+  .iyyh .close .line em{ text-shadow:none; }
+  .iyyh .study{ background:var(--card); box-shadow:0 6px 16px rgba(0,0,0,.34); }
+  .iyyh .study .art svg{ filter:none; }
+  .iyyh .callout,.iyyh .close{ box-shadow:none; }
+  .iyyh .callout{ border-left:2px solid var(--accent); }
+  .iyyh .stripnote .mini{ background:var(--card); }
 </style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
