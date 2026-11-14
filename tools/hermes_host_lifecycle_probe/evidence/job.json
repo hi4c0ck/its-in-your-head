@@ -1,0 +1,53 @@
+{
+  "scenario": "job",
+  "controller_pid": 26384,
+  "worker_py": "C:/Users/user/AppData/Local/hermes/profiles/plugin-studio/environments/its-in-your-head-onnx/gen-e76ec4e770054bf283dc35abba5a27af/venv/Scripts/python.exe",
+  "hostA": {
+    "host": 1912,
+    "worker": 22804,
+    "watchdog": 9108,
+    "mode": "job",
+    "job": true
+  },
+  "pre_teardown": {
+    "worker_alive": true,
+    "watchdog_alive": true,
+    "host_alive": true
+  },
+  "hostA_teardown": {
+    "t": 1794616619.1091053,
+    "result": "hard-killed"
+  },
+  "post_teardown": {
+    "worker_alive_just_after_kill": false,
+    "worker_died": true,
+    "worker_death_poll_s": 0.5,
+    "host_dead": true,
+    "watchdog_exited_after_killing": true
+  },
+  "hostB": {
+    "host": 4228,
+    "worker": 26288,
+    "watchdog": 7848
+  },
+  "exit_evidence": {
+    "hostA_killed_at": 1794616619.1091053,
+    "hostA_dead": true,
+    "hostB_started_after": true,
+    "note": "hostA actually exited (its Popen reaped) before hostB started"
+  },
+  "no_duplication": {
+    "new_worker_distinct": true,
+    "new_watchdog_distinct": true,
+    "old_worker_gone": true,
+    "old_watchdog_gone": true
+  },
+  "reaper": "job object (KILL_ON_CLOSE) + watchdog (both belts)",
+  "cleanup": {
+    "B_worker": "hard-killed",
+    "B_watchdog": "hard-killed",
+    "B_host": "hard-killed"
+  },
+  "verdict": "PASS",
+  "verdict_note": "worker was alive before the host teardown, then died after it; reaper = job object (KILL_ON_CLOSE) + watchdog (both belts); replacement host got a fresh pair, no duplication"
+}
