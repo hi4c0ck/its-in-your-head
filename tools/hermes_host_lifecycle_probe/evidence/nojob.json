@@ -1,11 +1,11 @@
 {
   "scenario": "nojob",
-  "controller_pid": 10004,
+  "controller_pid": 2708,
   "worker_py": "C:/Users/user/AppData/Local/hermes/profiles/plugin-studio/environments/its-in-your-head-onnx/gen-e76ec4e770054bf283dc35abba5a27af/venv/Scripts/python.exe",
   "hostA": {
-    "host": 30944,
-    "worker": 25064,
-    "watchdog": 9756,
+    "host": 30136,
+    "worker": 16632,
+    "watchdog": 22800,
     "mode": "nojob",
     "job": false
   },
@@ -15,7 +15,7 @@
     "host_alive": true
   },
   "hostA_teardown": {
-    "t": 1794616612.4565358,
+    "t": 1794623245.4744563,
     "result": "hard-killed"
   },
   "post_teardown": {
@@ -26,12 +26,12 @@
     "watchdog_exited_after_killing": true
   },
   "hostB": {
-    "host": 21300,
-    "worker": 15696,
-    "watchdog": 15216
+    "host": 3164,
+    "worker": 15836,
+    "watchdog": 20852
   },
   "exit_evidence": {
-    "hostA_killed_at": 1794616612.4565358,
+    "hostA_killed_at": 1794623245.4744563,
     "hostA_dead": true,
     "hostB_started_after": true,
     "note": "hostA actually exited (its Popen reaped) before hostB started"

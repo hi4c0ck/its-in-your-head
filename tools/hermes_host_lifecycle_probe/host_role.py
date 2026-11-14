@@ -37,9 +37,26 @@ def main() -> None:
     mode = sys.argv[2] if len(sys.argv) > 2 else "job"
     py = _interp()
     host_pid = os.getpid()
+    release_file = os.environ.get("IYH_PROBE_RELEASE")  # set only in gated mode
 
     # The real host creates the KILL_ON_CLOSE job ONCE (module global).
     job = wc._windows_kill_job() if mode == "job" else 0
+
+    # Gated two-phase startup (used by the outerjob probe). Announce READY,
+    # then block until the controller creates the release file. The children
+    # are spawned ONLY AFTER that -- i.e. after the controller has assigned
+    # THIS host to a containing Job Object. Windows adds a parent's NEW children
+    # to the parent's job automatically, but it does NOT retro-add children
+    # that already exist; so spawning must follow the assignment for the worker
+    # + watchdog to actually be members of the outer job.
+    if release_file:
+        print(json.dumps({"phase": "ready", "host": host_pid, "mode": mode,
+                          "job": bool(job), "worker_py": py}), flush=True)
+        _deadline = time.time() + 30
+        while not os.path.exists(release_file):
+            if time.time() > _deadline:
+                sys.exit("gated host: release file never appeared")
+            time.sleep(0.05)
 
     # A normal child of the host (only the watchdog is detached) -- matching
     # OnnxWorkerClient._spawn, so hard-killing the host orphans it and the
@@ -55,7 +72,7 @@ def main() -> None:
     wc._record_worker(model_dir, worker.pid)    # belt 2: reaper registry
     watchdog = wc._spawn_watchdog(worker, owner_pid=host_pid)  # belt 1: primary
 
-    print(json.dumps({"host": host_pid, "worker": worker.pid,
+    print(json.dumps({"phase": "up", "host": host_pid, "worker": worker.pid,
                       "watchdog": watchdog.pid if watchdog else 0,
                       "mode": mode, "job": bool(job), "worker_py": py}), flush=True)
     time.sleep(3000)  # host stays alive until the orchestrator tears it down

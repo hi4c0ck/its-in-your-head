@@ -91,7 +91,10 @@ _PROC_QUERY_INFORMATION = 0x0400
 _JOB_LIMIT_ACTIVE_PROCESS = 0x00000008
 _JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOBOBJECT_EXTENDED_LIMIT_INFORMATION = 9
-_ERROR_MORE_DATA = 24      # SetInformationJobObject: wrong/short struct -> an ABI bug
+_ERROR_BAD_LENGTH = 24     # SetInformationJobObject: wrong/short struct -> an ABI bug.
+                          # 24 = ERROR_BAD_LENGTH (0x18). NOT the invented 136, and NOT
+                          # ERROR_MORE_DATA (that is 234/0xEA) -- value 24 is the right
+                          # signal, the name was mislabeled.
 _ERROR_ACCESS_DENIED = 5   # recognized host-policy refusal to apply the limit (skip, not fail)
 
 

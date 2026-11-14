@@ -22,13 +22,24 @@ from the live process tree, not from mocks.
   watchdog acting together (the full belt layering).
 - **Outer-Job containment (`outerjob` mode).** Puts the simulated host *inside*
   a containing `KILL_ON_CLOSE` Job Object (the case the real Hermes host may
-  sit in) and proves the worker is reaped under BOTH teardown paths:
-  (a) owner termination with the outer job still open → the outer job's
-  `KILL_ON_CLOSE` has not fired, so the detached watchdog (a member, still
-  alive) reaps the worker; (b) outer job closure → `KILL_ON_CLOSE` reaps the
-  whole subtree (host + worker + watchdog) together. This covers the
-  `CREATE_BREAKAWAY_FROM_JOB` concern: a detached child is still a member of
-  the parent's job, but the worker stays contained either way.
+  sit in), via a **two-phase host start**: the host announces `READY`, the
+  controller assigns it to the outer job, the controller releases it, and *only
+  then* does the host spawn the worker + watchdog (the sequencing the reviewer
+  requires — not assign-after-spawn). Membership is proven with
+  `IsProcessInJob`, not assumed. It shows the worker is reaped under BOTH
+  teardown paths: (a) owner termination with the outer job still open → the
+  detached watchdog (a member, still alive) reaps the worker; (b) outer job
+  closure → `KILL_ON_CLOSE` reaps the whole contained subtree.
+- **A Windows Job-Object subtlety (documented + empirically confirmed on
+  Win11).** A process **assigned to a job post-creation does NOT
+  retro-contain the children it later spawns** — `inherited_membership` for the
+  worker + watchdog is `false` when only the host was assigned. A process
+  created *outside* the job carries an empty creation-time job chain, so
+  `CreateProcess` children don't inherit the post-hoc assignment. Genuine
+  containment therefore requires the containing supervisor to put *each*
+  already-running member into the job — what the probe models with
+  `explicit_child_assign` (and what a host *created into* a containing job
+  would get for free via creation-time inheritance).
 
 ## Run (Windows, onnx venv interpreter available)
 ```
@@ -59,6 +70,9 @@ venv, then `sys.executable`).
   detached watchdog is still a member of the host's `KILL_ON_CLOSE` job unless
   it breaks away — is now exercised: `outerjob` shows the worker stays
   contained under both owner-termination (watchdog reaps it, the outer job
-  still open) and outer-job closure (`KILL_ON_CLOSE` reaps the whole subtree).
-  The Job Object is retained as an independent belt (owner decision); the
-  probe certifies the containment, it does not justify removing the Job Object.
+  still open) and outer-job closure (`KILL_ON_CLOSE` reaps the whole
+  contained subtree). The evidence also records the post-created-assignment
+  subtlety (children don't auto-inherit a host's post-hoc job membership) and
+  proves containment by explicitly placing every member in the outer job. The
+  Job Object is retained as an independent belt (owner decision); the probe
+  certifies the containment, it does not justify removing the Job Object.

@@ -625,10 +625,11 @@ def test_job_struct_layout():
     assert wc._JOB_LIMIT_KILL_ON_JOB_CLOSE == 0x2000
     assert wc._PROC_SET_QUOTA == 0x100
     assert wc._PROC_TERMINATE == 0x1
-    # Win32 error codes used by the Job Object gate: ERROR_MORE_DATA (24) is
+    # Win32 error codes used by the Job Object gate: ERROR_BAD_LENGTH (24) is
     # the wrong/short-struct (ABI) signal; ERROR_ACCESS_DENIED (5) is a
-    # recognized host-policy refusal.
-    assert wc._ERROR_MORE_DATA == 24
+    # recognized host-policy refusal. (24 is ERROR_BAD_LENGTH, not 136 and not
+    # ERROR_MORE_DATA which is 234.)
+    assert wc._ERROR_BAD_LENGTH == 24
     assert wc._ERROR_ACCESS_DENIED == 5
     # The basic struct must carry the real trailing fields, not PageCount &co.
     _bnames = [f[0] for f in _basic._fields_]
@@ -675,7 +676,7 @@ def test_job_object_kills_members_on_close():
     close the job handle, and verify the child actually terminates.
 
     Per MSDN, SetInformationJobObject returns 0 = failure. A failure whose
-    GetLastError is ERROR_MORE_DATA (24) means the struct size is wrong -- an
+    GetLastError is ERROR_BAD_LENGTH (24) means the struct size is wrong -- an
     ABI bug, so it FAILS the test (never a silent 'environment restriction'
     skip). A recognized host-policy refusal (ERROR_ACCESS_DENIED) skips
     honestly; any other 0-return fails rather than silently skipping. The
@@ -711,12 +712,12 @@ def test_job_object_kills_members_on_close():
         _c.byref(ext), _c.sizeof(ext))
     if not ok:
         err = k.GetLastError()
-        if err == wc._ERROR_MORE_DATA:
+        if err == wc._ERROR_BAD_LENGTH:
             # Wrong/short struct = an ABI regression. This is a test failure,
             # never a silent "environment restriction" skip.
             k.CloseHandle(job)
             pytest.fail(
-                f"SetInformationJobObject -> ERROR_MORE_DATA ({err}): the "
+                f"SetInformationJobObject -> ERROR_BAD_LENGTH ({err}): the "
                 f"{ctypes.sizeof(_ext)}-byte JOBOBJECT_EXTENDED_LIMIT_ "
                 f"INFORMATION is not the native 144-byte layout -- an "
                 f"ABI bug, not an environment restriction")

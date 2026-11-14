@@ -1,40 +1,74 @@
 {
   "scenario": "outerjob",
-  "controller_pid": 21672,
+  "controller_pid": 17816,
   "worker_py": "C:/Users/user/AppData/Local/hermes/profiles/plugin-studio/environments/its-in-your-head-onnx/gen-e76ec4e770054bf283dc35abba5a27af/venv/Scripts/python.exe",
   "outer_job_available": true,
-  "A_assigned_to_outer": true,
-  "A_host": {
-    "host": 7376,
-    "worker": 27376,
-    "watchdog": 8552
+  "A_host_assigned_to_outer": true,
+  "A_inherited_membership": {
+    "host": true,
+    "worker": false,
+    "watchdog": false
   },
-  "A_pre": {
+  "A_explicit_child_assign": {
     "worker": true,
-    "watchdog": true,
-    "host": true
+    "watchdog": true
+  },
+  "A_pids": {
+    "host": 31068,
+    "worker": 7840,
+    "watchdog": 27228
+  },
+  "A_membership_in_outer": {
+    "host": true,
+    "worker": true,
+    "watchdog": true
+  },
+  "A_all_members": true,
+  "A_pre": {
+    "host": true,
+    "worker": true,
+    "watchdog": true
   },
   "A_teardown": {
     "result": "hard-killed",
-    "note": "outer job A still open -> KILL_ON_CLOSE has not fired"
+    "note": "outer job A kept open -> KILL_ON_CLOSE not yet fired; only the watchdog can kill the worker here"
   },
   "A_post": {
     "worker_died": true,
     "worker_death_poll_s": 0.5,
     "host_dead": true,
-    "watchdog_exited": true,
+    "watchdog_exited_after_killing": true,
     "outer_job_A_still_open": true
   },
-  "B_assigned_to_outer": true,
-  "B_host": {
-    "host": 19668,
-    "worker": 23364,
-    "watchdog": 21056
+  "B_host_assigned_to_outer": true,
+  "B_inherited_membership": {
+    "host": true,
+    "worker": false,
+    "watchdog": false
   },
-  "B_pre": {
+  "B_explicit_child_assign": {
     "worker": true,
-    "watchdog": true,
-    "host": true
+    "watchdog": true
+  },
+  "B_pids": {
+    "host": 1544,
+    "worker": 16104,
+    "watchdog": 10060
+  },
+  "B_membership_in_outer": {
+    "host": true,
+    "worker": true,
+    "watchdog": true
+  },
+  "B_all_members": true,
+  "B_pre": {
+    "host": true,
+    "worker": true,
+    "watchdog": true
+  },
+  "B_teardown": {
+    "result": "close_job(outerB)",
+    "note": "KILL_ON_CLOSE -> host + worker + watchdog die together"
   },
   "B_post": {
     "host_died": true,
@@ -43,5 +77,12 @@
     "outer_job_B_closed": true
   },
   "verdict": "PASS",
-  "note": "owner-termination: the still-open outer job keeps the watchdog alive to reap the worker; job-closure: KILL_ON_CLOSE reaps the whole subtree; no leak under either path"
+  "required_for_PASS": [
+    "A/B host assigned to the outer job",
+    "A/B all-three IsProcessInJob members (genuine containment)",
+    "A: owner terminated + outer job kept open -> worker died + host dead (the watchdog, a surviving member, reaped the worker)",
+    "B: outer job closed -> host + worker + watchdog all died together"
+  ],
+  "finding_inherited_membership": "on this build, a host assigned to the outer job POST-creation does not auto-contain the children it later spawns (inherited_membership for the worker + watchdog is False) -- a process created outside the job carries an empty creation-time job chain. Genuine containment therefore requires the containing supervisor to put each already-running member into the job, which is what the explicit_child_assign step models.",
+  "note": "two-phase host (assign, then spawn) + explicit containment of all three (IsProcessInJob-verified); owner-termination left the outer job open so the watchdog reaped the worker, and closing the outer job killed the whole contained subtree"
 }
