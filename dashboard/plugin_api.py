@@ -16,6 +16,7 @@ Error posture: DB unavailable / table absent / write-locked -> routes return
 the documented empty shapes (zeros, empty cells, []) so the desktop half
 degrades to "no data", it never 500s.
 """
+import asyncio
 import importlib
 import importlib.util
 import math
@@ -135,6 +136,24 @@ _DDL = _migration.EVENTS_DDL
 # is green, the auth boundary is a documented assumption, not a confirmed
 # guarantee — per the v0.1.28 hardening plan's P1.4.
 router = APIRouter()
+
+# Loop contract (30s-timeout fix): every READ route in this file is a
+# SYNC def. This router runs inside the plugin host child's SINGLE
+# asyncio loop (op_asgi); a blocking async handler there serializes all
+# of the desktop's parallel endpoint polls on that one loop - the
+# uniform 30s "Timed out connecting to Hermes backend" timeouts.
+# Sync defs are offloaded to Starlette's thread pool (default 40
+# workers, well above the desktop's 7 concurrent polls), so each
+# poll is independent again. The lone async route (POST /settings)
+# needs `await request.json()`, so it stays async but moves its
+# blocking calls behind asyncio.to_thread. Regression-pinned by
+# tests/test_dashboard_loop_contract.py.
+
+# Bounded series / scan caps: a sparkline or fallback scan carries
+# only the newest N rows per poll - an unbounded full-history scan
+# per poll wedges the host on a growing store.
+DRIFT_SERIES_CAP = 500    # /drift: newest points per dimension
+PORTRAIT_SCAN_CAP = 2000  # /portrait fallback: newest pattern rows
 
 
 def set_db_path(path: "Path | str") -> None:
@@ -356,7 +375,7 @@ def _pulse_activity_events(after_event_id: int | None = None,
 
 
 @router.get("/metrics")
-async def metrics():
+def metrics():
     """Aggregate totals. Response shape (contract for the desktop half):
     {"events": int, "total_tokens": int, "last_event": float | None}"""
     rows = _query(
@@ -368,7 +387,7 @@ async def metrics():
 
 
 @router.get("/heatmap")
-async def heatmap(window: str = Query("24h")):
+def heatmap(window: str = Query("24h")):
     """Hourly cells for the heat canvas. window in {"1h","24h","7d"}.
     Response shape: {"hours": int, "cells": {"<hour_index>":
     {"turns": int, "calls": int, "errors": int}}} — hour_index 0 is the
@@ -391,7 +410,7 @@ async def heatmap(window: str = Query("24h")):
 
 
 @router.get("/recent")
-async def recent(limit: int = Query(12, le=100)):
+def recent(limit: int = Query(12, le=100)):
     """Last N I/O frames. Response shape: list of
     {"type", "ts", "model", "total_tokens", "finish_reason", "status_code",
     "tool", "tool_name", "status_word"}, newest first.
@@ -1272,12 +1291,17 @@ def _portrait_db_fallback(shape: dict, dims) -> dict:
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name='pattern_affinity_history'").fetchone()
             if prow is not None:
+                # Bounded: the newest PORTRAIT_SCAN_CAP rows. Card /
+                # per-name / repeated-window selection all read the
+                # TOP of the ts-desc window, so the cap only drops
+                # rows older than the cap (display-data history).
                 rows = conn.execute(
-                    "SELECT top_pattern, rank, top_prompt_affinity, "
-                    "top_agent_affinity, top_margin, top_amplification, "
-                    "evidence, confidence FROM pattern_affinity_history "
-                    "WHERE top_pattern IS NOT NULL "
-                    "ORDER BY ts DESC, id DESC").fetchall()
+                    f"SELECT top_pattern, rank, top_prompt_affinity, "
+                    f"top_agent_affinity, top_margin, top_amplification, "
+                    f"evidence, confidence FROM pattern_affinity_history "
+                    f"WHERE top_pattern IS NOT NULL "
+                    f"ORDER BY ts DESC, id DESC "
+                    f"LIMIT {PORTRAIT_SCAN_CAP}").fetchall()
                 if rows:
                     # Latest row PER name (first occurrence in ts-desc
                     # order, any rank). Column layout:
@@ -1479,9 +1503,13 @@ def _drift_shape() -> dict:
             if not present:
                 return shape
             order = "ts" if "ts" in cols else "rowid"
+            # Bounded sparkline: the newest DRIFT_SERIES_CAP points per
+            # dimension (DESC scan, reversed back to ascending order so
+            # the series contract is unchanged).
             rows = conn.execute(
                 f"SELECT {', '.join(present)} FROM portrait_history "
-                f"ORDER BY {order}").fetchall()
+                f"ORDER BY {order} DESC LIMIT {DRIFT_SERIES_CAP}").fetchall()
+            rows = list(reversed(rows))
             idx = {d: present.index(d) for d in present}
             for d in present:
                 shape["series"][d] = [
@@ -1685,7 +1713,7 @@ def _reset_dataset_compat() -> dict:  # keep the legacy name available
 
 
 @router.get("/pulse")
-async def pulse(after_event_id: int | None = Query(default=None),
+def pulse(after_event_id: int | None = Query(default=None),
                 tool_name: str | None = Query(default=None)):
     """Pulse matrix (rows x 4 columns) + additive v2 lanes envelope:
     the live in-process engine view when the agent half holds rows;
@@ -1762,7 +1790,7 @@ def _portrait_live_view() -> dict | None:
 
 
 @router.get("/portrait")
-async def portrait():
+def portrait():
     """Portrait: six dimensions + confidence + user/agent split +
     additive ``perception`` + optional ``live_expression`` (transient,
     neutral in the DB fallback) and ``morphology`` (learned-pair
@@ -1784,7 +1812,7 @@ async def portrait():
 
 
 @router.get("/drift")
-async def drift():
+def drift():
     """Drift: per-dim sparkline arrays. In-memory engine history first,
     then the portrait_history table probe (S5), else empty shape."""
     try:
@@ -1799,13 +1827,13 @@ async def drift():
 
 
 @router.get("/context")
-async def context():
+def context():
     """Provenance table shell (static model; S7 fills it)."""
     return _context_shape()
 
 
 @router.get("/settings")
-async def settings():
+def settings():
     """C4 keys + current values. The DURABLE pane read: the profile-DB
     user-data store is the source of truth (survives restarts); the flat
     dotted-key map lives under "settings"/"keys"; the nested top-level
@@ -1847,7 +1875,7 @@ async def update_settings(request: Request):
     # SOURCE OF TRUTH: the durable profile-DB user-data store (a single
     # write that survives every restart). The ctx config mirror is handled
     # inside the helper (non-authoritative, best-effort).
-    persisted = _user_settings_write(accepted)
+    persisted = await asyncio.to_thread(_user_settings_write, accepted)
     # P2.2: a live retention change must reach the worker NOW (not wait for the
     # next register()). Best effort — a failure only leaves the worker on its
     # previous window; the durable write already landed.
@@ -1857,8 +1885,9 @@ async def update_settings(request: Request):
             _metrics.set_retain_days(accepted["observation.retain_days"])
         except Exception:
             pass
+    pane = await asyncio.to_thread(_pane_settings)
     return {
-        "settings": _pane_settings(),
+        "settings": pane,
         "accepted": accepted,
         "persisted": persisted,
         # Back-compat flag: True only when the durable write did NOT land
@@ -1882,7 +1911,7 @@ def _bounded_onnx_detail(status: str, errors) -> str | None:
 
 
 @router.get("/engine-status")
-async def engine_status():
+def engine_status():
     """Read-only Tier-1 readiness for the dashboard encoder switcher.
 
     Reports the persisted ``perception.encoder`` and whether the Tier-1 ONNX
@@ -1913,7 +1942,7 @@ async def engine_status():
 
 
 @router.post("/reset")
-async def reset():
+def reset():
     """Explicit wipe of the plugin-data analytical dataset (NOT config)."""
     out = _reset_dataset()
     try:

@@ -169,7 +169,7 @@ def test_pulse_live_view_wins_over_fallback(agent_env, monkeypatch):
     monkeypatch.setattr(
         api, "_pulse_shape", lambda: called.setdefault("n", 1) or {})
     import asyncio
-    body = asyncio.run(api.pulse())
+    body = api.pulse()
     assert body["rows"], "live view must carry rows"
     assert "n" not in called, "fallback must not be consulted when live"
 

@@ -255,7 +255,7 @@ def test_pulse_route_direct_call_query_sentinel_normalizes_to_none(env):
     base = api._pulse_activity_events(None)["next_cursor"]
     i = _tool_start(conn, "terminal", 4000.0)
     import asyncio
-    out = asyncio.run(api.pulse(after_event_id=base))
+    out = api.pulse(after_event_id=base)
     assert [e["id"] for e in out["activity_events"]["events"]] == [i]
     # And a real string filter still works through the same route helper.
     j = _tool_start(conn, "read_file", 4001.0)

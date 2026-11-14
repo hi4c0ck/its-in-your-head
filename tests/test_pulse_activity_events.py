@@ -179,12 +179,12 @@ def test_pulse_route_carries_activity_events(env, monkeypatch):
     base = api._pulse_activity_events(None)["next_cursor"]
     i = _tool_start(conn, "terminal")
     # The engine half is absent in this fixture: fallback path.
-    out = asyncio.run(api.pulse(after_event_id=base))
+    out = api.pulse(after_event_id=base)
     assert out["schema_version"] == 2
     assert out["lane_order"] == ["live", "goal", "good", "friction"]
     assert "lanes" in out and "rows" in out, "legacy envelope intact"
     assert [e["id"] for e in out["activity_events"]["events"]] == [i]
     # No cursor -> baseline (additive, same envelope).
-    out2 = asyncio.run(api.pulse())
+    out2 = api.pulse()
     assert out2["activity_events"]["events"] == []
     assert out2["activity_events"]["next_cursor"] == i

@@ -191,7 +191,7 @@ def test_portrait_live_view_wins_over_fallback(agent_env, monkeypatch):
     monkeypatch.setattr(
         api, "_portrait_shape", lambda: called.setdefault("n", 1) or {})
     import asyncio
-    body = asyncio.run(api.portrait())
+    body = api.portrait()
     assert body["available"] is True
     assert body["dimensions"], "live view must carry observed values"
     assert "n" not in called, "fallback must not be consulted when live"
@@ -336,7 +336,7 @@ def test_portrait_live_perception_passthrough(agent_env, monkeypatch):
         "agent": {d: None for d in api._dimensions()},
         "perception": perc})
     import asyncio
-    body = asyncio.run(api.portrait())
+    body = api.portrait()
     assert body["perception"] == perc  # passed through unchanged
 
 
@@ -352,6 +352,6 @@ def test_portrait_live_missing_perception_gets_empty(agent_env, monkeypatch):
         "user": {d: 0.5 for d in api._dimensions()},
         "agent": {d: None for d in api._dimensions()}})
     import asyncio
-    body = asyncio.run(api.portrait())
+    body = api.portrait()
     assert body["perception"] == _empty_perception_expected(
         list(api._dimensions()))
