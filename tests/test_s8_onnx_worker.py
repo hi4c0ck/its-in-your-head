@@ -625,7 +625,11 @@ def test_job_struct_layout():
     assert wc._JOB_LIMIT_KILL_ON_JOB_CLOSE == 0x2000
     assert wc._PROC_SET_QUOTA == 0x100
     assert wc._PROC_TERMINATE == 0x1
-    assert wc._ERROR_BAD_LENGTH == 136
+    # Win32 error codes used by the Job Object gate: ERROR_MORE_DATA (24) is
+    # the wrong/short-struct (ABI) signal; ERROR_ACCESS_DENIED (5) is a
+    # recognized host-policy refusal.
+    assert wc._ERROR_MORE_DATA == 24
+    assert wc._ERROR_ACCESS_DENIED == 5
     # The basic struct must carry the real trailing fields, not PageCount &co.
     _bnames = [f[0] for f in _basic._fields_]
     assert "PerJobUserTimeLimit" in _bnames
@@ -671,11 +675,12 @@ def test_job_object_kills_members_on_close():
     close the job handle, and verify the child actually terminates.
 
     Per MSDN, SetInformationJobObject returns 0 = failure. A failure whose
-    GetLastError is ERROR_BAD_LENGTH means the struct size is wrong -- an
+    GetLastError is ERROR_MORE_DATA (24) means the struct size is wrong -- an
     ABI bug, so it FAILS the test (never a silent 'environment restriction'
-    skip). A genuine, non-ABI refusal to apply the limit (the belt is
-    unavailable on this host) skips honestly; the detached watchdog + the
-    stale-registry reaper carry the hard-kill there."""
+    skip). A recognized host-policy refusal (ERROR_ACCESS_DENIED) skips
+    honestly; any other 0-return fails rather than silently skipping. The
+    detached watchdog + the stale-registry reaper carry the hard-kill where
+    the belt is unavailable."""
     import ctypes
     import subprocess
     import time as _time
@@ -706,18 +711,28 @@ def test_job_object_kills_members_on_close():
         _c.byref(ext), _c.sizeof(ext))
     if not ok:
         err = k.GetLastError()
-        if err == wc._ERROR_BAD_LENGTH:
+        if err == wc._ERROR_MORE_DATA:
+            # Wrong/short struct = an ABI regression. This is a test failure,
+            # never a silent "environment restriction" skip.
             k.CloseHandle(job)
             pytest.fail(
-                f"SetInformationJobObject -> ERROR_BAD_LENGTH ({err}): the "
-                f"{ctypes.sizeof(_ext)}-byte JOBOBJECT_EXTENDED_LIMIT_"
-                f"INFORMATION is not the native layout (should be 144) -- an "
+                f"SetInformationJobObject -> ERROR_MORE_DATA ({err}): the "
+                f"{ctypes.sizeof(_ext)}-byte JOBOBJECT_EXTENDED_LIMIT_ "
+                f"INFORMATION is not the native 144-byte layout -- an "
                 f"ABI bug, not an environment restriction")
+        if err == wc._ERROR_ACCESS_DENIED:
+            # A recognized host-policy refusal to apply the limit: the belt is
+            # genuinely unavailable on this host.
+            k.CloseHandle(job)
+            pytest.skip(
+                f"KILL_ON_CLOSE refused by host policy "
+                f"(SetInformationJobObject err={err}); the watchdog + reaper "
+                f"carry the hard-kill")
+        # Any other 0-return is unexpected -> fail rather than silently skip.
         k.CloseHandle(job)
-        pytest.skip(
-            f"KILL_ON_JOB_CLOSE not applied in this environment "
-            f"(SetInformationJobObject err={err}); the watchdog + reaper "
-            f"carry the hard-kill")
+        pytest.fail(
+            f"SetInformationJobObject failed unexpectedly (err={err}); the "
+            f"limit state is unknown, so the hard-kill belt is unverified")
     # No class-9 QueryInformationJobObject read-back here: on some Windows
     # builds that Query blocks indefinitely on a KILL_ON_CLOSE job. Set
     # returned nonzero above (= applied, per MSDN); the close-kills-member

@@ -20,11 +20,21 @@ from the live process tree, not from mocks.
   *before* the replacement host starts.
 - **`job` mode** additionally shows the Job Object `KILL_ON_CLOSE` + the
   watchdog acting together (the full belt layering).
+- **Outer-Job containment (`outerjob` mode).** Puts the simulated host *inside*
+  a containing `KILL_ON_CLOSE` Job Object (the case the real Hermes host may
+  sit in) and proves the worker is reaped under BOTH teardown paths:
+  (a) owner termination with the outer job still open → the outer job's
+  `KILL_ON_CLOSE` has not fired, so the detached watchdog (a member, still
+  alive) reaps the worker; (b) outer job closure → `KILL_ON_CLOSE` reaps the
+  whole subtree (host + worker + watchdog) together. This covers the
+  `CREATE_BREAKAWAY_FROM_JOB` concern: a detached child is still a member of
+  the parent's job, but the worker stays contained either way.
 
 ## Run (Windows, onnx venv interpreter available)
 ```
-python tools/hermes_host_lifecycle_probe/lifecycle_probe.py nojob   # watchdog-only proof
-python tools/hermes_host_lifecycle_probe/lifecycle_probe.py job     # full belt
+python tools/hermes_host_lifecycle_probe/lifecycle_probe.py nojob      # watchdog-only proof
+python tools/hermes_host_lifecycle_probe/lifecycle_probe.py job        # full belt
+python tools/hermes_host_lifecycle_probe/lifecycle_probe.py outerjob   # host inside a containing job
 python tools/hermes_host_lifecycle_probe/lifecycle_probe.py nojob --save  # also write evidence/nojob.json
 ```
 The worker/host run under the onnx venv python so the worker's image carries
@@ -32,7 +42,8 @@ the `its-in-your-head-onnx` marker the reaper's identity check matches.
 Override the interpreter with `IYH_ONNX_PYTHON` (or it falls back to the local
 venv, then `sys.executable`).
 
-`evidence/` holds two captured runs (2026-11-14) showing both scenarios PASS.
+`evidence/` holds three captured runs (2026-11-14): `nojob.json`, `job.json`,
+`outerjob.json` — all PASS.
 
 ## Boundaries (honest scope)
 - **Stand-in worker.** The ONNX model is not provisioned in this profile, so
@@ -42,10 +53,12 @@ venv, then `sys.executable`).
 - **Controlled host, not the live gateway.** This hard-kills a test-spawned
   host, not the running Hermes gateway/plugin-host (doing that would 502 the
   live session for the gateway's ~30s respawn). It certifies the mechanism
-  under a host death, not every host/job-teardown path.
-- **`CREATE_BREAKAWAY_FROM_JOB` is not proven here.** If the real Hermes host
-  itself sits in a `KILL_ON_CLOSE` Job Object, a *detached* watchdog is still a
-  member of that job unless the job allows breakaway; this probe's host is not
-  in a job, so it does not exercise that case. The Job Object remains retained
-  as an independent belt (owner decision); this probe certifies it fires, it
-  does not justify removing it.
+  under a host death + a containing-job membership, not the gateway's exact
+  job/breakaway configuration.
+- **Outer-Job case is covered by `outerjob`.** The earlier open question — a
+  detached watchdog is still a member of the host's `KILL_ON_CLOSE` job unless
+  it breaks away — is now exercised: `outerjob` shows the worker stays
+  contained under both owner-termination (watchdog reaps it, the outer job
+  still open) and outer-job closure (`KILL_ON_CLOSE` reaps the whole subtree).
+  The Job Object is retained as an independent belt (owner decision); the
+  probe certifies the containment, it does not justify removing the Job Object.

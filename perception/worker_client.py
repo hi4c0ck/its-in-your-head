@@ -91,10 +91,8 @@ _PROC_QUERY_INFORMATION = 0x0400
 _JOB_LIMIT_ACTIVE_PROCESS = 0x00000008
 _JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOBOBJECT_EXTENDED_LIMIT_INFORMATION = 9
-_ERROR_MORE_DATA = 24
-_ERROR_BAD_LENGTH = 136
-_ERROR_ACCESS_DENIED = 5
-_ERROR_INVALID_PARAMETER = 87
+_ERROR_MORE_DATA = 24      # SetInformationJobObject: wrong/short struct -> an ABI bug
+_ERROR_ACCESS_DENIED = 5   # recognized host-policy refusal to apply the limit (skip, not fail)
 
 
 def _job_structs():
@@ -151,14 +149,17 @@ def _job_structs():
 def _windows_kill_job() -> int:
     """Create (once) + return the process's KILL_ON_JOB_CLOSE job handle.
 
-    Returns 0 when unavailable (non-Windows, or the limit cannot be applied)
-    so callers fall back to the stale-registry reaper. The handle is kept
-    open for the whole process lifetime so KILL_ON_JOB_CLOSE fires when the
-    process exits — IF the limit was actually applied. A successful
-    ``CreateJobObjectW`` alone is not enough: we must confirm the limit was
-    set (via a read-back), because ``SetInformationJobObject`` can return 0
-    (per MSDN, 0 = failure) and leave the flags unset, in which case the job
-    would keep members but never kill them.
+    Returns 0 when unavailable (non-Windows, or ``SetInformationJobObject``
+    fails) so callers fall back to the watchdog + stale-registry reaper. The
+    handle is kept open for the whole process lifetime so KILL_ON_JOB_CLOSE
+    fires when the process exits — but only after a successful Set. We gate on
+    ``SetInformationJobObject``'s return value (0 = failure, nonzero = success
+    per MSDN): a failed Set means the limit was NOT applied, so we close the
+    handle and return 0 (never retain a job that is not actually
+    KILL_ON_CLOSE-configured). We do NOT confirm via a class-9
+    ``QueryInformationJobObject`` read-back, because that call blocks
+    indefinitely on a KILL_ON_CLOSE job on some Windows builds and would hang
+    the host.
     """
     global _kill_job_handle, _kernel32
     if _kill_job_handle:
@@ -193,23 +194,21 @@ def _windows_kill_job() -> int:
     # count fields stay 0 (unlimited) and process association is unrestricted.
     # A clean close of the handle then kills every member of the job.
     #
-    # Gate on SetInformationJobObject's return value (0 = failure, nonzero =
-    # success per MSDN) — NOT on a class-9 QueryInformationJobObject read-back:
-    # on some Windows builds that Query blocks indefinitely on a KILL_ON_CLOSE
-    # job and would hang the host. A 0 return with a *genuine* failure code
-    # (access denied / invalid param / BAD_LENGTH = a struct-ABI bug) means the
-    # limit was not applied -> bail to the reaper; anything else keeps the job,
-    # and the e2e close-kills-member test is the authoritative proof the belt
-    # actually fires (it fails if the job is inert).
+    # MSDN: SetInformationJobObject returns 0 on failure, nonzero on success.
+    # Gate ONLY on that return value (never on a class-9 Query read-back,
+    # which blocks indefinitely on a KILL_ON_CLOSE job on some builds). A
+    # failed Set means the limit was NOT applied -> close the handle + bail to
+    # the watchdog + reaper; a failed Set must never leave us retaining a job
+    # that is not actually KILL_ON_CLOSE-configured.
     ok = _kernel32.SetInformationJobObject(
         job, _JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         _c.byref(ext), _c.sizeof(ext))
-    err = _kernel32.GetLastError()
-    if not ok and err in (_ERROR_ACCESS_DENIED, _ERROR_INVALID_PARAMETER,
-                          _ERROR_BAD_LENGTH):
-        logger.debug(
-            "its-in-your-head: KILL_ON_CLOSE limit not applied on this system "
-            "(Set err=%d); using the stale-registry reaper instead", err)
+    if not ok:
+        err = _kernel32.GetLastError()
+        logger.warning(
+            "its-in-your-head: KILL_ON_CLOSE unavailable "
+            "(SetInformationJobObject error=%d); the detached watchdog + "
+            "stale-registry reaper carry the hard-kill", err)
         _kernel32.CloseHandle(job)
         return 0
     _kill_job_handle = job

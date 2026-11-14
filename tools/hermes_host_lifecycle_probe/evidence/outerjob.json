@@ -1,0 +1,47 @@
+{
+  "scenario": "outerjob",
+  "controller_pid": 21672,
+  "worker_py": "C:/Users/user/AppData/Local/hermes/profiles/plugin-studio/environments/its-in-your-head-onnx/gen-e76ec4e770054bf283dc35abba5a27af/venv/Scripts/python.exe",
+  "outer_job_available": true,
+  "A_assigned_to_outer": true,
+  "A_host": {
+    "host": 7376,
+    "worker": 27376,
+    "watchdog": 8552
+  },
+  "A_pre": {
+    "worker": true,
+    "watchdog": true,
+    "host": true
+  },
+  "A_teardown": {
+    "result": "hard-killed",
+    "note": "outer job A still open -> KILL_ON_CLOSE has not fired"
+  },
+  "A_post": {
+    "worker_died": true,
+    "worker_death_poll_s": 0.5,
+    "host_dead": true,
+    "watchdog_exited": true,
+    "outer_job_A_still_open": true
+  },
+  "B_assigned_to_outer": true,
+  "B_host": {
+    "host": 19668,
+    "worker": 23364,
+    "watchdog": 21056
+  },
+  "B_pre": {
+    "worker": true,
+    "watchdog": true,
+    "host": true
+  },
+  "B_post": {
+    "host_died": true,
+    "worker_died": true,
+    "watchdog_died": true,
+    "outer_job_B_closed": true
+  },
+  "verdict": "PASS",
+  "note": "owner-termination: the still-open outer job keeps the watchdog alive to reap the worker; job-closure: KILL_ON_CLOSE reaps the whole subtree; no leak under either path"
+}
