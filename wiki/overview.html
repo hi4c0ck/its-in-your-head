@@ -112,7 +112,61 @@
   /* standalone / GitHub Pages — dark theme, centered */
   html,body{background:#0E0F12;margin:0;padding:0}
   .iyyh{width:100%;max-width:880px;margin:0 auto;padding:46px 22px}
+
+  /* ── robotics + friendly redesign ─────────────────────────── */
+  :root{ --accent:#45D6E8; --accent2:#8B93FF; --foreground:#EAF0FA;
+         --muted-foreground:#8C97B0; --border:#1B2740; --card:#0D1524; --bg:#070B14; }
+  html,body{ background:var(--bg)!important; margin:0; }
+  body{ font-family:"Inter",system-ui,-apple-system,sans-serif; color:var(--foreground); }
+  /* ambient HUD: soft cyan/violet glow + faint grid */
+  body::before{ content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
+    background:
+      radial-gradient(900px 520px at 50% -10%, rgba(69,214,232,.14), transparent 60%),
+      radial-gradient(760px 520px at 108% 0%, rgba(139,147,255,.12), transparent 55%),
+      linear-gradient(rgba(120,150,200,.05) 1px, transparent 1px) 0 0/100% 44px,
+      linear-gradient(90deg, rgba(120,150,200,.05) 1px, transparent 1px) 0 0/44px 100%; }
+  .iyyh{ max-width:920px; }
+  /* robotic display headings */
+  .iyyh .title{ font-family:"Orbitron",sans-serif; font-weight:800; letter-spacing:.055em; }
+  .iyyh .title .d{ color:var(--accent); text-shadow:0 0 20px rgba(69,214,232,.55); }
+  /* HUD labels (condensed, tracked) */
+  .iyyh .kicker,.iyyh .kick,.iyyh .live,.iyyh .when,.iyyh .h,
+  .iyyh .study .cap b,.iyyh .blk .h,.iyyh .close .under,.iyyh .sect .sub{
+    font-family:"Rajdhani",sans-serif; font-weight:600; letter-spacing:.14em; text-transform:uppercase; }
+  .iyyh .kicker,.iyyh .kick{ color:var(--accent); }
+  .iyyh .live{ gap:9px; }
+  .iyyh .live .dot{ box-shadow:0 0 10px var(--accent),0 0 4px var(--accent); }
+  .iyyh .when{ color:var(--accent); letter-spacing:.08em; }
+  /* friendly + glowing accents */
+  .iyyh .study{ background:linear-gradient(180deg,var(--card),#0A1120);
+    box-shadow:0 8px 26px rgba(0,0,0,.45), inset 0 1px 0 rgba(120,150,200,.08); }
+  .iyyh .study .art svg{ filter:drop-shadow(0 8px 18px rgba(0,0,0,.5)); }
+  .iyyh .callout,.iyyh .close{ box-shadow:0 14px 44px rgba(69,214,232,.12); }
+  .iyyh .callout{ border-left:2px solid var(--accent); }
+  .iyyh .close{ border:1px solid var(--border); }
+  .iyyh .close .line{ font-family:"Rajdhani",sans-serif; font-weight:600; font-size:22px; letter-spacing:.02em; }
+  .iyyh .close .line em{ color:var(--accent); font-style:normal; text-shadow:0 0 16px rgba(69,214,232,.45); }
+  .iyyh .hero{ animation:fadein .6s ease both; }
+  @keyframes fadein{ from{opacity:0; transform:translateY(8px);} to{opacity:1; transform:none;} }
+
+  /* ── friendly + readable polish ────────────────────────── */
+  .iyyh .lead,.iyyh .beat p,.iyyh .blk p,.iyyh .cap,.iyyh .study .cap,
+  .iyyh .trustbox p,.iyyh .close .line,.iyyh .close .under{ line-height:1.82; }
+  .iyyh .lead{ max-width:620px; }
+  .iyyh .beat{ padding-bottom:24px; }
+  /* rounder + warmer cards */
+  .iyyh .study,.iyyh .callout,.iyyh .close,.iyyh .trustbox,.iyyh .blk,
+  .iyyh .stripnote .mini{ border-radius:18px; }
+  .iyyh .study{ background:linear-gradient(180deg,#171B25,#0F1420);
+    box-shadow:0 10px 30px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,220,190,.07); }
+  .iyyh .callout,.iyyh .close{ background:linear-gradient(180deg,#131722,#0C1018); }
+  /* a whisper of warmth so it reads inviting, not clinical */
+  body::after{ content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
+    background:radial-gradient(620px 420px at 0% 100%, rgba(255,178,122,.07), transparent 60%); }
 </style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Orbitron:wght@500;700;800;900&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
 <div class="iyyh">
