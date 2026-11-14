@@ -718,14 +718,11 @@ def test_job_object_kills_members_on_close():
             f"KILL_ON_JOB_CLOSE not applied in this environment "
             f"(SetInformationJobObject err={err}); the watchdog + reaper "
             f"carry the hard-kill")
-    # Confirm the limit actually landed: read the flags back (class 9).
-    rb = _ext()
-    k.QueryInformationJobObject(
-        job, wc._JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        _c.byref(rb), _c.sizeof(rb))
-    assert rb.BasicLimitInformation.LimitFlags \
-        & wc._JOB_LIMIT_KILL_ON_JOB_CLOSE, \
-        "KILL_ON_CLOSE did not read back"
+    # No class-9 QueryInformationJobObject read-back here: on some Windows
+    # builds that Query blocks indefinitely on a KILL_ON_CLOSE job. Set
+    # returned nonzero above (= applied, per MSDN); the close-kills-member
+    # check below is the authoritative proof the limit actually took effect
+    # (an inert job would leave the child alive when the handle closes).
 
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(120)"])

@@ -93,6 +93,8 @@ _JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOBOBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _ERROR_MORE_DATA = 24
 _ERROR_BAD_LENGTH = 136
+_ERROR_ACCESS_DENIED = 5
+_ERROR_INVALID_PARAMETER = 87
 
 
 def _job_structs():
@@ -187,25 +189,27 @@ def _windows_kill_job() -> int:
         return 0
     ext = _ext()
     ext.BasicLimitInformation.LimitFlags = _JOB_LIMIT_KILL_ON_JOB_CLOSE
-    # KILL_ON_JOB_CLOSE only: no memory / active-process caps, so the size +
+    # KILL_ON_CLOSE only: no memory / active-process caps, so the size +
     # count fields stay 0 (unlimited) and process association is unrestricted.
     # A clean close of the handle then kills every member of the job.
-    _kernel32.SetInformationJobObject(
+    #
+    # Gate on SetInformationJobObject's return value (0 = failure, nonzero =
+    # success per MSDN) — NOT on a class-9 QueryInformationJobObject read-back:
+    # on some Windows builds that Query blocks indefinitely on a KILL_ON_CLOSE
+    # job and would hang the host. A 0 return with a *genuine* failure code
+    # (access denied / invalid param / BAD_LENGTH = a struct-ABI bug) means the
+    # limit was not applied -> bail to the reaper; anything else keeps the job,
+    # and the e2e close-kills-member test is the authoritative proof the belt
+    # actually fires (it fails if the job is inert).
+    ok = _kernel32.SetInformationJobObject(
         job, _JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         _c.byref(ext), _c.sizeof(ext))
-    # Confirm the limit actually landed: read the flags back. A 0/ERROR_
-    # MORE_DATA SetInformationJobObject leaves the flags unset in restricted
-    # environments, so the job would be inert (members never killed) -> bail.
-    readback = _ext()
-    _kernel32.QueryInformationJobObject(
-        job, _JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        _c.byref(readback), _c.sizeof(readback))
-    if not (readback.BasicLimitInformation.LimitFlags
-            & _JOB_LIMIT_KILL_ON_JOB_CLOSE):
+    err = _kernel32.GetLastError()
+    if not ok and err in (_ERROR_ACCESS_DENIED, _ERROR_INVALID_PARAMETER,
+                          _ERROR_BAD_LENGTH):
         logger.debug(
-            "its-in-your-head: KILL_ON_JOB_CLOSE limit not applied on this "
-            "system (Set/QueryJobObject err=%d); using the stale-registry "
-            "reaper instead", _kernel32.GetLastError())
+            "its-in-your-head: KILL_ON_CLOSE limit not applied on this system "
+            "(Set err=%d); using the stale-registry reaper instead", err)
         _kernel32.CloseHandle(job)
         return 0
     _kill_job_handle = job
