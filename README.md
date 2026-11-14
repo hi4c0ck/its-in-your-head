@@ -48,6 +48,30 @@ perception engine, semantic desktop views, smaller optional ONNX install.
   confirm the install; inference is local CPU-only, in an isolated worker
   process, pinned by revision + SHA-256 manifest, size-capped.
 
+## Disclosures (catalog Rule 13)
+
+- **Data access** — Reads the Hermes-provided tool, session, API and stream
+  hook payloads. Reasoning deltas are optional and transient (captured only
+  when the profile sets `plugins.stream_reasoning_deltas: true`, buffered in
+  memory for the stream and discarded at the boundary; only derived features
+  are persisted). Does not inspect arbitrary user files or credential stores.
+- **Network** — No network by default. The explicit ONNX enable
+  (`/mirror engine enable`) downloads the revision- and SHA-256-pinned model
+  from Hugging Face once. Maintainer-only model repinning also contacts
+  Hugging Face. No other network calls.
+- **Processes** — A background aggregation worker; an optional persistent
+  Python ONNX subprocess (PM-isolated); and a **detached watchdog** process
+  used exclusively to clean up the ONNX worker on exit (Windows Job Object
+  containment + stale-worker reaping). No shell-command execution.
+- **Credentials** — No stored credentials, no provider-token forwarding to
+  the worker, no external telemetry. The worker receives an explicit
+  environment allowlist (PATH, HOME, LANG, LC_ALL and Windows
+  SYSTEMROOT/TEMP/TMP) and does not inherit Hermes provider credentials.
+- **Storage** — Derived analytics, caches and (opt-in) model files remain in
+  the active Hermes profile's plugin data directory
+  (`plugins.plugin_storage.plugin_data_dir("its-in-your-head")`). Raw prompts
+  and reasoning are never stored.
+
 ## Install (manual)
 
 Copy this folder into the profile plugins root
