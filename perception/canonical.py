@@ -28,6 +28,7 @@ from __future__ import annotations
 import math
 import random
 import zlib
+from collections import OrderedDict
 
 # The stable sketch (Tier-0 / fallback) dimension -- the floor of the PULSE
 # meet-dim. 384 (Tier-1 ONNX) is the higher-res upgrade. Track embedder.DIM
@@ -51,6 +52,21 @@ CANONICAL_SPACE_ID = "canon-256"
 _PROJ_SALT = "its-in-your-head-crossdim"
 
 _proj_cache: dict = {}
+
+# Bounded result cache for project_down's PROJECTION branch only
+# (the len(v) > target_dim case - the ~O(src_dim * target_dim) pure
+# Python path). project_down is a pure, seed-deterministic function
+# of (vec, target_dim): the stored original is never touched, so the
+# cached value is byte-identical to a recompute across runs and the
+# matrix/lanes/live-engine scoring cannot diverge. The PULSE read
+# path projects the same stored vectors many times per poll
+# (build_matrix + build_lanes + every cross_dim_cosine pair); the
+# cache turns that fan-out into one projection per distinct vector.
+# Keyed by the exact input tuple; small FIFO cap keeps it bounded on
+# a growing store. Identity / shorter-vec branches stay uncached
+# (already O(n) cheap) and the projector-matrix cache is unchanged.
+_PROJ_VALUE_CACHE: "OrderedDict" = OrderedDict()
+_PROJ_VALUE_CACHE_MAX = 256
 
 
 def _l2_normalize(v: list[float]) -> list[float]:
@@ -105,9 +121,20 @@ def project_down(vec, target_dim: int) -> list[float]:
     if len(v) == target_dim:
         return _l2_normalize(v)
     if len(v) > target_dim:
+        key = (target_dim, tuple(v))
+        cached = _PROJ_VALUE_CACHE.get(key)
+        if cached is not None:
+            _PROJ_VALUE_CACHE.move_to_end(key)
+            return list(cached)  # a copy: callers may mutate results
         rows = _projector_rows(len(v), target_dim)
-        out = [sum(r[j] * v[j] for j in range(len(v))) for r in rows]
-        return _l2_normalize(out)
+        out = _l2_normalize(
+            [sum(r[j] * v[j] for j in range(len(v))) for r in rows])
+        _PROJ_VALUE_CACHE[key] = out
+        if len(_PROJ_VALUE_CACHE) > _PROJ_VALUE_CACHE_MAX:
+            _PROJ_VALUE_CACHE.popitem(last=False)
+        # Return a copy on the miss path too: the original contract hands a
+        # caller a fresh list, so a caller mutation never reaches the cache.
+        return list(out)
     return _l2_normalize(v)
 
 

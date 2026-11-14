@@ -139,3 +139,42 @@ def test_cross_dim_scoring_does_not_mutate_stored_vectors():
 if __name__ == "__main__":  # pragma: no cover
     import sys
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def _manual_projection(vec, target_dim):
+    """Independent recompute WITHOUT the result cache (projector rows are
+    still shared, but the per-vector multiply-add runs fresh)."""
+    v = [float(x) for x in vec]
+    rows = canonical._projector_rows(len(v), target_dim)
+    out = [sum(r[j] * v[j] for j in range(len(v))) for r in rows]
+    n = math.sqrt(sum(x * x for x in out))
+    return [0.0] * len(out) if n == 0 else [x / n for x in out]
+
+
+def test_project_down_result_cache_is_value_pure():
+    """The bounded result cache must not change observable values: repeated
+    calls return the byte-identical projection, an evicted key recomputes
+    to the same value, and callers get a copy (mutation-safe)."""
+    import random as _random
+    rng = _random.Random(11)
+    vec = [rng.random() - 0.5 for _ in range(384)]
+    target = 256
+
+    first = canonical.project_down(vec, target)
+    assert first == canonical.project_down(vec, target)
+    # the cached value equals an independent (uncached) recompute
+    assert first == _manual_projection(vec, target)
+    # returned lists are copies: mutating the result never poisons the cache
+    first[0] += 99.0
+    assert canonical.project_down(vec, target) == _manual_projection(vec, target)
+
+    # Evict a key by overflowing the bounded cache, then re-request it:
+    # the recomputed value must still equal the manual projection.
+    for i in range(canonical._PROJ_VALUE_CACHE_MAX + 4):
+        filler = [float(i) * 0.1 + rng.random() for _ in range(384)]
+        canonical.project_down(filler, target)
+    assert canonical.project_down(vec, target) == _manual_projection(vec, target)
+    # short / empty branches stay correct and uncached (cheap O(n))
+    assert canonical.project_down([], target) == [0.0] * target
+    short = [0.5, 0.5]
+    assert len(canonical.project_down(short, target)) == 2
