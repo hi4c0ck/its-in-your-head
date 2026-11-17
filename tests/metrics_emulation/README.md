@@ -26,10 +26,17 @@ values and real drift — it does not invent larger swings.
    `engine._ensure_portrait_thresholds()` applies it once per backend, reset
    on `/reset`. `STRONG_R_DEFAULT` stays 0.5 as the documented fallback — no
    global magic knob. R=0 still gives Q=0 and **no movement**; DELTA_MAX=0.18
-   still caps each step. Spans: 0.567 / 0.659 / 0.646 (volatile directness
-   range 0.646). Gates: `test_strong_thresholds_fitted_per_dimension`,
+   still caps each step. Spans: 0.585 / 0.667 / 0.667 (volatile directness
+   range 0.667). Gates: `test_strong_thresholds_fitted_per_dimension`,
    `test_engine_fits_per_dim_portrait_thresholds`,
    `test_volatile_weak_contrast_moves_portrait`.
+   - **Nonlinear mismatch response.** `GAP_GAIN = 1.0` multiplies the
+     step by `1 + GAP_GAIN·|T−V|·(1−Q)`: a big gap at low confidence gets a
+     hard correction (0.9 with a 0.1 signal moves decisively), a near-value
+     gap stays linear, and a value already below the signal is not lifted
+     for free. At Q=1 the gain is exactly 1, so the pinned reference
+     sequences are unchanged; DELTA_MAX=0.18 still caps every step. Gate:
+     `test_mismatch_gain_calibration_cases`.
 2. **GOOD/FRICTION were flat because feedback association was missing.**
    `core/collector.py::_on_pre_llm_call` calls `_apply_explicit_feedback()` →
    `pulse.feedback.apply_feedback()` on every user turn. The harness now calls

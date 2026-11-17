@@ -223,6 +223,35 @@ def test_two_sided_full_range_dynamics():
     assert all(a >= b - 1e-12 for a, b in zip(lo, lo[1:]))
 
 
+def test_mismatch_gain_calibration_cases():
+    """Far low-confidence mismatch gets a big call; near-value stays linear."""
+    r = 0.5
+
+    def step(v, target, gain):
+        contrast = 2.0 * r * (target - 0.5)
+        p = portrait.Portrait(strong_r=r, gap_gain=gain)
+        p._observed.values["directness"] = v
+        p.update_observed({d: {"S": contrast, "C": 0.0, "R": contrast}
+                           for d in anchors.DIMENSIONS}, support=0.2)
+        return p.snapshot()["values"]["directness"]
+
+    far = step(0.9, 0.1, 1.0)
+    plain = step(0.9, 0.1, 0.0)
+    assert 0.9 - far > (0.9 - plain) * 1.4, (far, plain)
+    near = step(0.25, 0.1, 1.0)
+    near_plain = step(0.25, 0.1, 0.0)
+    assert abs(near - near_plain) < 0.01, (near, near_plain)
+    below = step(0.05, 0.1, 1.0)
+    assert 0.0 < below - 0.05 < 0.01, below
+
+    p = portrait.Portrait(strong_r=r, gap_gain=1.0)
+    p._observed.values["directness"] = 0.52
+    for _ in range(5):
+        p.update_observed({d: {"S": 1.0, "C": -1.0, "R": 2.0}
+                           for d in anchors.DIMENSIONS})
+    assert p.snapshot()["values"]["directness"] == pytest.approx(0.987, abs=1e-3)
+
+
 def test_volatile_weak_contrast_moves_portrait():
     """ENGINE: realistic weak contrasts must visibly follow story volatility.
 

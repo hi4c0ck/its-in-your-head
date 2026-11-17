@@ -51,6 +51,7 @@ DEFAULT_RETAIN_DAYS = 90  # mirrors core/settings.py DEFAULTS; read via C4 key
 ALPHA_MAX = 0.55         # alpha_{d,t} = ALPHA_MAX * Q_{d,t}  (confidence-gated speed)
 DELTA_MAX = 0.18         # hard per-observation step cap per dimension
 CONF_BETA = 0.25         # displayed (session) confidence EMA: Qs=(1-b)*Qs+b*Q
+GAP_GAIN = 1.0           # mismatch amplification: gain = 1 + GAP_GAIN*|T-V|*(1-Q)
 # Per-dimension strong-contrast thresholds r_d. The DEFAULT is the owner's
 # starting parameter from the adaptive-model spec; production should pass a
 # per-dim dict fitted from the labeled fixture via
@@ -110,7 +111,7 @@ class Portrait:
     def __init__(self, *, retain_days: int | None = None, max_evidence: int | None = None,
                  base_alpha: float = BASE_ALPHA, max_step: float = MAX_STEP,
                  alpha_max: float = ALPHA_MAX, delta_max: float = DELTA_MAX,
-                 conf_beta: float = CONF_BETA,
+                 conf_beta: float = CONF_BETA, gap_gain: float = GAP_GAIN,
                  strong_r: dict | float | None = None,
                  calibration: Calibration | None = None) -> None:
         self.retain_days = DEFAULT_RETAIN_DAYS if retain_days is None else int(retain_days)
@@ -121,6 +122,7 @@ class Portrait:
         self.alpha_max = float(alpha_max)        # alpha_{d,t} = alpha_max * Q_{d,t}
         self.delta_max = float(delta_max)        # hard per-observation step cap
         self.conf_beta = float(conf_beta)        # displayed-confidence EMA beta
+        self.gap_gain = float(gap_gain)          # mismatch amplification (0 = pure spec EMA)
         self.strong_r = strong_thresholds(strong_r)  # per-dim strong-contrast r_d
         self.calibration = calibration or DEFAULT_CALIBRATION
         self._observed = _Track()
@@ -215,7 +217,14 @@ class Portrait:
                                     support=support, provenance=provenance)
             old = track.values[dim]
             alpha = self.alpha_max * conf                       # alpha_{d,t}
-            delta = alpha * (target - old)
+            gap = target - old
+            # Mismatch amplification: a LOW-confidence observation that
+            # points far away from the current value gets a bigger call,
+            # so a strong signal dropping e.g. 0.9 -> 0.1 is not strangled
+            # by Q. Near the value the gain is ~1 (linear), and at Q=1 it
+            # is exactly 1 -- the pinned strong-signal sequences are intact.
+            gain = 1.0 + self.gap_gain * abs(gap) * (1.0 - conf)
+            delta = alpha * gap * gain
             delta = max(-self.delta_max, min(self.delta_max, delta))
             track.values[dim] = _clip01(old + delta)
             track.targets[dim] = target
