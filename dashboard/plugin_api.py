@@ -174,6 +174,18 @@ def set_profile_path(path) -> None:
     _profile_path_override = None if path is None else Path(path)
 
 
+_fan_in_root_override = None  # test-only, see set_fan_in_root()
+
+
+def set_fan_in_root(path) -> None:
+    """TEST ONLY: override the Hermes root used by the cross-profile
+    portrait fan-in (or None to clear). Mirrors set_profile_path: fixture
+    profiles stay hermetic; production derives the root from the public
+    hermes_constants.get_default_hermes_root()."""
+    global _fan_in_root_override
+    _fan_in_root_override = None if path is None else Path(path)
+
+
 def _ctx_profile_root(ctx):
     """Profile root exposed by a ctx double / real ctx, or None.
 
@@ -1397,6 +1409,103 @@ def _portrait_db_fallback(shape: dict, dims) -> dict:
     return shape
 
 
+def _portrait_fan_in(shape: dict, dims) -> dict:
+    """Cross-profile portrait fan-in (READ-ONLY, public surfaces only).
+
+    When the active profile has no observed portrait, borrow the most
+    recently observed profile's persisted dims so one human sees one
+    live portrait across all their profiles. This is the "up to live"
+    half of the design: every profile keeps its own DB and its own
+    writer; the read path simply looks across profiles at poll time.
+
+    Hermes coupling is limited to the PUBLIC ``hermes_constants`` module
+    (get_default_hermes_root) plus stdlib sqlite3/Path — no private core
+    imports, no runtime overrides, no writes, no schema changes. Missing,
+    locked or corrupt sibling DBs are skipped; nothing here can raise or
+    produce a 500. Only ``dimensions``/``user`` are filled (the observed
+    track); confidence/agent stay None — never invented. Additive key
+    ``source_profile`` names the profile the values came from (None when
+    this profile served its own data).
+    """
+    shape["source_profile"] = None
+    root = _fan_in_root_override
+    if root is None:
+        # Hermetic test pin (same env var conftest + fixtures already use):
+        # when set, it is the data root and has no sibling profiles -> no
+        # borrow. Production leaves it unset and uses the public resolver.
+        import os
+        env_root = os.environ.get("IYH_TEST_DATA_DIR")
+        if env_root:
+            root = Path(env_root)
+        else:
+            try:
+                from hermes_constants import get_default_hermes_root
+                root = Path(get_default_hermes_root())
+            except Exception:
+                return shape  # no public resolver available -> neutral, no 500
+    profiles_dir = root / "profiles"
+    try:
+        candidates = sorted(
+            p / "plugin-data" / PLUGIN_ID / "data.db"
+            for p in profiles_dir.iterdir() if p.is_dir()
+        )
+    except OSError:
+        candidates = []
+    # Best = most recently observed (largest ts) non-empty row.
+    best_ts = None
+    best_vals = None
+    best_name = None
+    for db in candidates:
+        try:
+            if not db.is_file():
+                continue
+            conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=1)
+        except Exception:
+            continue
+        try:
+            probe = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='portrait_history'").fetchone()
+            if probe is None:
+                continue
+            cols = [r[1] for r in conn.execute(
+                "PRAGMA table_info(portrait_history)").fetchall()]
+            present = [d for d in dims if d in cols]
+            has_ts = "ts" in cols
+            if not present and not has_ts:
+                continue
+            sel = ", ".join((["ts"] if has_ts else []) + present)
+            row = conn.execute(
+                f"SELECT {sel} FROM portrait_history "
+                f"ORDER BY {'ts DESC, ' if has_ts else ''}id DESC LIMIT 1").fetchone()
+            if row is None:
+                continue
+            off = 1 if has_ts else 0
+            vals = {d: row[off + i] for i, d in enumerate(present)
+                    if row[off + i] is not None}
+            if not vals:
+                continue
+            ts = row[0] if has_ts else 0
+            if ts is None:
+                ts = 0
+            if best_ts is None or ts > best_ts:
+                best_ts, best_vals, best_name = ts, vals, db.parent.parent.parent.name
+        except Exception:
+            continue
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    if best_vals:
+        for d, v in best_vals.items():
+            shape["dimensions"][d] = v
+            shape["user"][d] = v
+        shape["available"] = any(v is not None for v in shape["dimensions"].values())
+        shape["source_profile"] = best_name
+    return shape
+
+
 def _portrait_shape() -> dict:
     """Six dimension values + per-dim confidence + user/agent split
     (S3 perception.portrait when importable; else the profile-DB
@@ -1415,6 +1524,10 @@ def _portrait_shape() -> dict:
     dims = _dimensions()
     shape = {
         "available": False,
+        # Additive provenance: None = this profile served its own data;
+        # a profile name = dims borrowed via cross-profile fan-in. Always
+        # present so the pane sees a stable key on every path.
+        "source_profile": None,
         "dimensions": {d: None for d in dims},
         "targets": {d: None for d in dims},
         "confidence": {d: None for d in dims},
@@ -1471,6 +1584,12 @@ def _portrait_shape() -> dict:
     # so persisted observations survive restarts and process boundaries.
     if not shape["available"]:
         shape = _portrait_db_fallback(shape, dims)
+    # Cross-profile fan-in: when NO profile-local observation exists,
+    # borrow the most recently observed profile's dims so one human sees
+    # one live portrait across all their profiles. Read-only; pulse/drift/
+    # context stay strictly profile-local. Additive source_profile key.
+    if not shape["available"]:
+        shape = _portrait_fan_in(shape, dims)
     # Per-set reference-seed structure ("expand the algo"): make every
     # session's face differ via a bounded, deterministic projection of its
     # rolling reference — additive on the learned-pair treatment, reversible
@@ -1807,6 +1926,9 @@ def portrait():
             view = {**view, "live_expression": dict(_NEUTRAL_LIVE_EXPRESSION)}
         if "morphology" not in view:
             view = {**view, "morphology": dict(_NEUTRAL_MORPHOLOGY)}
+        # Additive provenance: the live engine IS this profile's own
+        # observation, so no cross-profile borrow happened.
+        view = {**view, "source_profile": view.get("source_profile")}
         return view
     return _portrait_shape()
 

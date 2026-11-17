@@ -164,6 +164,9 @@ def test_portrait_fallback_empty_db_returns_documented_shape(tmp_path):
         api._engine_first = orig
     dims = list(shape["dimensions"].keys())
     assert shape == {"available": False,
+                     # Cross-profile fan-in additive provenance: no borrow
+                     # in this hermetic test (IYH_TEST_DATA_DIR pin).
+                     "source_profile": None,
                      "dimensions": {d: None for d in dims},
                      "targets": {d: None for d in dims},
                      "confidence": {d: None for d in dims},
