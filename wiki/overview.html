@@ -198,35 +198,36 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
 
   <section class="section">
     <p class="eyebrow">Session</p>
-    <h2>What happens during an hour of work</h2>
-    <p class="intro">The strip is there from the start. You do not have to open it or check it.</p>
+    <h2>How the plugin works during a session</h2>
+    <p class="intro">The strip changes as the plugin reads the tool calls in your session. Each state comes from what happened, and each one tells you whether to keep going or look closer.</p>
     <ol class="timeline">
       <li>
-        <div class="when">09:14 · you begin</div>
-        <div class="what">You start work.</div>
-        <p>The strip is already there. You work as you normally do.</p>
+        <div class="when">Session start · it attaches</div>
+        <div class="what">The strip appears.</div>
+        <p>The plugin reads the tool calls in the active session and shows a thin strip at the bottom of the screen. There is no window to open and nothing to set up.</p>
       </li>
       <li>
-        <div class="when">09:16 · work is moving</div>
-        <div class="what">Tool calls land.</div>
-        <p>Your turns are short. The pulse shows <em>good</em>.</p>
+        <div class="when">Each tool call · it sets the pulse</div>
+        <div class="what">Good, goal, or friction.</div>
+        <p>Every call and its result update one of three states. Good means calls are landing, goal means you have settled on a target, friction means the same step is repeating.</p>
       </li>
       <li>
-        <div class="when">09:32 · you start going in circles</div>
-        <div class="what">You reopen the same file.</div>
-        <p>Three times in ten minutes. The pulse switches to <em>friction</em>. You stop and look at what is stuck.</p>
+        <div class="when">Repeated steps · it flags friction</div>
+        <div class="what">A reason to stop and check.</div>
+        <p>When the same step repeats, the strip changes to friction. That marks the step that is failing, so you can check it before spending more time on it.</p>
       </li>
       <li>
-        <div class="when">09:40 · you check what the assistant saw</div>
-        <div class="what">You check what the assistant saw.</div>
-        <p>You run <em>/mirror context</em>. The assistant had not seen the file. You attach it and continue.</p>
+        <div class="when">On request · it opens the context audit</div>
+        <div class="what">What the model could see.</div>
+        <p>/mirror context shows the plugin's record for this turn: what was in the model's context and what was not. If a file is missing, you can attach it and ask again.</p>
       </li>
       <li>
-        <div class="when">10:05 · the session ends</div>
-        <div class="what">The session ends.</div>
-        <p>The portrait shows direct, focused, thorough. It is measured from your actions. The next session starts from that reading.</p>
+        <div class="when">Session end · it records your style</div>
+        <div class="what">A portrait for the next session.</div>
+        <p>The plugin scores six axes from the session's tool activity and draws the portrait. The reading stays in your profile and is available to the next session.</p>
       </li>
     </ol>
+    <p class="note">What you get from it: a signal when to stop and look, a view of what the model could see, and a portrait the assistant can use next time.</p>
   </section>
 
   <section class="section">
