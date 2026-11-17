@@ -34,16 +34,19 @@ values and real drift — it does not invent larger swings.
    Gate: `test_explicit_feedback_drives_good_and_friction_lanes`.
 3. **ENGINE FIX — gapped GOOD/FRICTION values.** `_lane_accumulation` used a
    HARD `similarity >= threshold` include/exclude plus a MEAN over the matching
-   capsules, so one capsule crossing the gate moved the lane by a whole step
-   (the "0.6–0.7 gaps"), while GOAL's cosine similarity moved smoothly.
-   It now uses a continuous channel gate (0 at threshold → 1 at sim 1) times
-   the recency weight, accumulated as `1 - exp(-weighted / half_life)` —
-   the smooth saturating model the accumulate plan specified ("EMA movement
-   preserved, no jumps"). 3/6/12 effective calls → 0.31/0.53/0.78. Value and
-   confidence remain decoupled; objective hint stays capped and separate.
-   Gates: updated `test_pulse_lanes.py` expectations + new
-   `test_good_friction_values_are_continuous_no_jumps` (similarity and age
-   sweeps, monotone with bounded steps).
+   capsules, so one capsule crossing the gate moved the lane by a whole step.
+   Now a continuous channel gate × recency weight, accumulated as
+   `1 - exp(-weighted / half_life)` ("no jumps"). 3/6/12 calls → 0.31/0.53/0.78.
+4. **ENGINE FIX — contra-verse GOOD/FRICTION.** Independent saturating sums let
+   one tool read 0.9+ in BOTH lanes (a capsule can match both banks). The two
+   lanes now share ONE evidence budget: `value = activation(total) × share`,
+   with `activation = 1 - exp(-(good_w + fric_w) / half_life)`. With one channel
+   empty this reduces exactly to the documented accumulation; with both, their
+   sum never exceeds the activation (measured max pair sum 0.996) and shifting
+   evidence moves them in opposite directions. When evidence is genuinely
+   balanced they sit near 0.5/0.5 — that is the real state, not saturation.
+   Objective friction stays a separate capped hint, never summed.
+   Gate: `test_good_and_friction_share_one_budget_contra_verse`.
 
 ## Speedrun mode (forced engine poll times)
 

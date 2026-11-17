@@ -133,26 +133,14 @@ def _channel_gate(sim: float | None, threshold: float) -> float:
     return max(0.0, min(1.0, (float(sim) - float(threshold)) / headroom))
 
 
-def _lane_accumulation(capsules, bank, threshold: float, half_life: int,
-                       now: float | None = None) -> float:
-    """P2 channel-gated call-accumulation: SMOOTH, time-decayed, 0-baseline.
+def _lane_weights(capsules, bank, threshold: float,
+                  now: float | None = None) -> float:
+    """Raw evidence weight for one channel (the input to saturation).
 
-    Each channel-matched capsule contributes a continuous evidence weight
-    ``_channel_gate(similarity, threshold)`` multiplied by a recency weight
-    ``exp(-ln2 * age / PULSE_VALUE_HALF_LIFE_S)`` (halves every half-life).
-    The value is a SATURATING accumulation of those weights over the count
-    scale ``1 - exp(-weighted / PULSE_ACCUM_HALF_LIFE)`` — 3 effective calls
-    -> 0.31, 6 -> 0.53, 12 -> 0.78, matching the documented P2 metric.
-
-    Both the evidence gate and the decay are CONTINUOUS, so the value moves
-    in bounded steps as similarity or time changes instead of jumping when a
-    capsule crosses a hard threshold. This is the "EMA movement preserved,
-    no jumps" requirement from the accumulate model. It stays pure/stateless:
-    only capsule ts + the request's `now` drive decay.
-
-    VALUE and CONFIDENCE remain decoupled: bank support is reported
-    separately and never multiplies into this value. No matching bank or no
-    channel evidence -> 0.0 (the 0-baseline).
+    Continuous channel gate (0 at/below threshold -> 1 at similarity 1)
+    times the capsule's recency weight. Shared by the single-channel
+    accumulation and by the GOOD/FRICTION budget split so both use the exact
+    same evidence calculation.
     """
     if not bank:
         return 0.0
@@ -165,13 +153,26 @@ def _lane_accumulation(capsules, bank, threshold: float, half_life: int,
         if gate <= 0.0:
             continue
         if now is None:
-            weighted += gate  # legacy count shape, now continuous in sim
+            weighted += gate
         else:
             ts = capsule.get("ts")
             age = max(0.0, float(now) - float(ts)) if ts is not None else 0.0
             hl = max(1.0, float(PULSE_VALUE_HALF_LIFE_S))
-            weighted += gate * math.exp(
-                -math.log(2.0) * age / hl)
+            weighted += gate * math.exp(-math.log(2.0) * age / hl)
+    return weighted
+
+
+def _lane_accumulation(capsules, bank, threshold: float, half_life: int,
+                       now: float | None = None) -> float:
+    """P2 channel-gated call-accumulation: SMOOTH, time-decayed, 0-baseline.
+
+    Saturating accumulation ``1 - exp(-weight / half_life)`` of the evidence
+    from :func:`_lane_weights` — 3 effective calls -> 0.31, 6 -> 0.53,
+    12 -> 0.78, matching the documented P2 metric. Kept as the single-channel
+    helper (used by the objective hint); GOOD/USER-FRICTION share a budget in
+    build_lanes and derive their values from the same weights.
+    """
+    weighted = _lane_weights(capsules, bank, threshold, now)
     if weighted <= 0.0:
         return 0.0
     return round(min(1.0, 1.0 - math.exp(
@@ -606,18 +607,35 @@ def build_lanes(registry, prototypes, session_state=None,
         })
         good_scored, good_supported = _gated_bank(tool, prototypes, "good",
                                                    vector_space)
+        # P2 contra-verse: GOOD and USER-FRICTION are computed from the SAME
+        # capsule window and share one evidence budget (below). Both banks
+        # must be in scope before either value is derived.
+        user_scored, user_supported = _gated_bank(
+            tool, prototypes, "friction", vector_space)
+        obj_scored, obj_supported = _gated_bank(
+            tool, prototypes, "objective_friction", vector_space)
         good_count = len(bank["good"])  # raw evidence fact
+        user_count = len(user_supported)
+        obj_count = len(obj_supported)
         good_similarity = _floor(strongest_similarity(goal_vector, good_scored))
-        # P2: display value = channel-gated accumulation (recent calls that
-        # resemble this tool's own labeled good bank). VALUE (how valuable the
-        # tool's activity is) and CONFIDENCE (how much evidence supports it --
-        # the bank's support below) are DECOUPLED: a few calls above the floor
-        # reach a valuable score even on a thin bank; the confidence is a
-        # separate field, never multiplied into the value. The single-prompt
-        # similarity stays the `similarity` field.
-        good_value = round(
-            _lane_accumulation(capsules, good_scored, thr["good"],
-                               PULSE_ACCUM_HALF_LIFE, now_ts), 4)
+        # P2 contra-verse: each lane's value is its SHARE of the total
+        # good+friction evidence, scaled by an absolute activation from that
+        # total. A capsule can match both banks (tier-0 vectors are similar),
+        # so independent saturating sums let one tool read 0.9+ in BOTH lanes.
+        # Sharing the budget keeps them opposed and leaves headroom for the
+        # share to move as real feedback lands. With one channel empty this
+        # reduces exactly to the documented 1-exp(-n/half_life) accumulation.
+        good_w = _lane_weights(capsules, good_scored, thr["good"], now_ts)
+        fric_w = _lane_weights(capsules, user_scored, thr["friction"], now_ts)
+        total_w = good_w + fric_w
+        if total_w > 0.0:
+            activation = 1.0 - math.exp(
+                -total_w / max(1.0, float(PULSE_ACCUM_HALF_LIFE)))
+            good_value = round(activation * (good_w / total_w), 4)
+            user_hint = round(activation * (fric_w / total_w), 4)
+        else:
+            good_value = 0.0
+            user_hint = 0.0
         good.append({
             "tool_id": tid, "tool_name": tool, "rank": 0,
             "value": good_value, "threshold": thr["good"],
@@ -627,12 +645,6 @@ def build_lanes(registry, prototypes, session_state=None,
             "similarity": good_similarity,
             "evidence_source": "good_prototypes" if good_count else "none",
         })
-        user_scored, user_supported = _gated_bank(
-            tool, prototypes, "friction", vector_space)
-        obj_scored, obj_supported = _gated_bank(
-            tool, prototypes, "objective_friction", vector_space)
-        user_count = len(user_supported)
-        obj_count = len(obj_supported)
         user_value = _floor(strongest_similarity(goal_vector,
                                                  user_scored))
         obj_value = _floor(strongest_similarity(
@@ -654,17 +666,10 @@ def build_lanes(registry, prototypes, session_state=None,
                 has_goal,
                 user_count if dominant == "user" else obj_count,
                 user_fric_req if dominant == "user" else obj_fric_req)
-        # P2 balancer: the friction DISPLAY value is the USER-labeled friction
-        # accumulation only. Objective friction (a thin system-detected signal)
-        # is a SEPARATE capped hint that can never read "strong" and is never
-        # summed into the value -- honoring the module invariant ("never
-        # conflated"). VALUE and CONFIDENCE are DECOUPLED: the bank's support
-        # is a separate field, never multiplied into value, so a few calls
-        # above the floor still reach a valuable score on a thin bank. Without
-        # user labels the value is 0.0.
-        user_acc = _lane_accumulation(
-            capsules, user_scored, thr["friction"], PULSE_ACCUM_HALF_LIFE, now_ts)
-        user_hint = round(user_acc, 4)
+        # P2 balancer: OBJECTIVE friction stays a SEPARATE capped hint that
+        # can never read 'strong' and is never summed into the user-friction
+        # display value -- the module invariant ("never conflated").
+        # user_hint was derived from the shared good/friction budget above.
         obj_acc = _lane_accumulation(
             capsules, obj_scored, thr["friction"], PULSE_ACCUM_HALF_LIFE, now_ts)
         obj_hint = round(min(obj_acc, PULSE_OBJ_HINT_CAP), 4)

@@ -374,6 +374,46 @@ def test_good_friction_values_are_continuous_no_jumps():
     assert max(a - b for a, b in zip(aged, aged[1:])) < 0.05, aged
 
 
+def test_good_and_friction_share_one_budget_contra_verse():
+    """ENGINE: good/friction must oppose, not both saturate for one tool.
+
+    A capsule can resemble both labeled banks, so independent accumulations
+    let a tool read 0.9+ in BOTH lanes. The two lanes now split one evidence
+    budget: equal evidence -> equal moderate values; shifting evidence moves
+    them in opposite directions; their sum never exceeds the activation.
+    """
+    reg = _FakeRegistry([_row("browser", 7)])
+    now = 1_000_000.0
+
+    # Same vector in both banks: every capsule matches both channels.
+    both = _FakeProtos({
+        "browser": {"good": [[1.0, 0.0]] * 3,
+                    "friction": [[1.0, 0.0]] * 3,
+                    "objective_friction": []}})
+    caps = [{"vector": [1.0, 0.0], "ts": now} for _ in range(8)]
+    lanes = build_lanes(reg, both, goal_vector=[1.0, 0.0],
+                        capsules_by_tool={"browser": caps}, now=now)
+    g = next(e for e in lanes["good"] if e["tool_name"] == "browser")["value"]
+    f = next(e for e in lanes["friction"] if e["tool_name"] == "browser")["value"]
+    assert abs(g - f) < 0.01, (g, f)          # equal evidence, equal share
+    assert g + f <= 1.0, (g, f)               # never both ~0.9
+    assert g < 0.9 and f < 0.9, (g, f)
+
+    # Now make FRICTION evidence dominate with disjoint banks.
+    split = _FakeProtos({
+        "browser": {"good": [[1.0, 0.0]] * 3,
+                    "friction": [[0.0, 1.0]] * 3,
+                    "objective_friction": []}})
+    caps2 = ([{"vector": [1.0, 0.0], "ts": now} for _ in range(8)] +
+             [{"vector": [0.0, 1.0], "ts": now} for _ in range(16)])
+    lanes2 = build_lanes(reg, split, goal_vector=[1.0, 0.0],
+                         capsules_by_tool={"browser": caps2}, now=now)
+    g2 = next(e for e in lanes2["good"] if e["tool_name"] == "browser")["value"]
+    f2 = next(e for e in lanes2["friction"] if e["tool_name"] == "browser")["value"]
+    assert f2 > g2, (g2, f2)                  # opposition follows evidence
+    assert g2 < g, (g, g2)                    # good falls as friction rises
+
+
 def test_goal_and_good_reach_ready_independently():
     reg = _FakeRegistry([_row("t", 9)])
     protos = _FakeProtos({

@@ -175,24 +175,29 @@ verification section. Commit.
   - `friction-to-good`: 80 turns, 7 corners, span 0.263, Fpeak 0.3245, 19.6 s
   - `volatile-amplification`: 80 turns, 7 corners, span 0.142, Fpeak 0.3148, 31.4 s
   - GOOD/FRICTION lanes now graded (9–25 distinct values per lane) instead of 0 / 0.3.
-- `build_board.py` → `board.html` 2,658,125 bytes; board browser: 3 runs, 9 corners,
+- `build_board.py` → `board.html` 2,657,662 bytes; board browser: 3 runs, 9 corners,
   corners wrapped (no horizontal scroll), 1 real SVG with 50 paths, 6 axes, 4 lanes,
   zero JS errors; run switch / step / seek / star / hide all verified.
-- Full suite: **657 passed, 8 skipped, 1 warning in 66.98s** (includes the engine
-  no-jumps regression + speedrun gate; no regressions from the math change)
+- Full suite: **658 passed, 8 skipped, 1 warning in 69.48s** (includes the engine
+  no-jumps + contra-verse regressions + speedrun gate; no regressions)
 - `tools/check_contracts.py`: `G5: CLEAN` · temp budget `1.8 MB` · plugin ESM check OK
 - `test_desktop_bubble.mjs` 142, `test_desktop_pulse.mjs` 113,
   `test_pulse_tick_reducer.mjs` 71, calibration/encoder/petstate suites all pass.
 
-### Engine fix verified 2026-11-17 (the actual product change)
-- `pulse/matrix.py::_lane_accumulation`: hard-gated MEAN → continuous gate ×
-  recency weight with saturating sum. Good/friction per-tool values now move in
-  bounded steps (max adjacent step 0.034 in the volatile story) instead of
-  jumping across the 0.6–0.7 band; GOAL was already smooth, now both are.
+### Engine fix verified 2026-11-17 (the actual product changes)
+- `pulse/matrix.py::_channel_gate` + `_lane_weights` + `_lane_accumulation`:
+  hard-gated MEAN → continuous gate × recency weight with saturating sum.
+  Good/friction per-tool values move in bounded steps (max adjacent step 0.034).
+- `pulse/matrix.py::build_lanes`: GOOD and USER-FRICTION now split one shared
+  evidence budget (`activation × share`). Per-tool pair sums ≤ 0.996 in all
+  three 80-turn runs (never both 0.9+); evidence shifts move them oppositely.
+  Objective friction remains a separate capped hint.
 - `engine.py::pulse_view(now=None)` optional data clock threaded to velocity and
   `build_lanes`, so `--speedrun` forces real engine polls at chosen times.
-- `tests/test_pulse_lanes.py::test_good_friction_values_are_continuous_no_jumps`
-  sweeps similarity and age monotonically with steps < 0.05.
+- New gates: `test_good_friction_values_are_continuous_no_jumps` (similarity +
+  age sweeps), `test_good_and_friction_share_one_budget_contra_verse`,
+  `test_speedrun_forces_engine_polls_at_chosen_times`.
+- Full suite **658 passed, 8 skipped, 1 warning in 69.48s**.
 
 Observed honest result: the real engine smooths portrait movement (max adjacent
 axis step ≈0.05 even under alternating prompts). The volatile story therefore
