@@ -89,7 +89,13 @@ def _alive(pid: int) -> bool:
 
 def _windows_main(owner: int, worker: int) -> int:
     """Hold handles to the owner + worker (stable identity) + fire
-    TerminateProcess on the worker handle the moment the owner exits."""
+    TerminateProcess on the worker handle the moment the owner exits.
+
+    Handle opening is retried for a few seconds: on a loaded Windows box
+    ``OpenProcess`` can transiently return NULL (Err 87) at startup, and a
+    bail there used to silently drop the immediate guard (the documented
+    local watchdog-test flake). A short retry loop closes that race.
+    """
     k = ctypes.windll.kernel32
     k.OpenProcess.restype = ctypes.c_void_p
     k.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
@@ -98,12 +104,35 @@ def _windows_main(owner: int, worker: int) -> int:
     k.TerminateProcess.restype = ctypes.c_int
     k.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     k.CloseHandle.argtypes = [ctypes.c_void_p]
-    owner_h = k.OpenProcess(_PROCESS_QUERY_INFORMATION, 0, owner)
-    worker_h = k.OpenProcess(_PROCESS_TERMINATE | _PROCESS_QUERY_INFORMATION,
-                             0, worker)
+
+    # Retry both opens for up to ~5s. If the OWNER is already gone before we
+    # can open it, the worker is an orphan -> terminate it via a fresh handle
+    # and exit (the owner's death is exactly the event we guard against).
+    owner_h = worker_h = None
+    for attempt in range(25):
+        owner_h = k.OpenProcess(_PROCESS_QUERY_INFORMATION, 0, owner)
+        worker_h = k.OpenProcess(_PROCESS_TERMINATE | _PROCESS_QUERY_INFORMATION,
+                                 0, worker)
+        if owner_h and worker_h:
+            break
+        # Owner gone but worker still up -> reap the orphan directly.
+        if not owner_h and worker_h:
+            k.TerminateProcess(worker_h, 1)
+            k.CloseHandle(worker_h)
+            return 0
+        # Close any partial handles before the next attempt.
+        if owner_h:
+            k.CloseHandle(owner_h); owner_h = None
+        if worker_h:
+            k.CloseHandle(worker_h); worker_h = None
+        time.sleep(0.2)
     if not owner_h or not worker_h:
-        # Already gone or no right to open it: cannot guard. The reaper is the
-        # backstop; a live owner + worker is handled on its clean path.
+        # Never opened both -> cannot guard. The reaper + sweep are the
+        # environment-independent backstop for this path.
+        if owner_h:
+            k.CloseHandle(owner_h)
+        if worker_h:
+            k.CloseHandle(worker_h)
         return 0
     try:
         while True:

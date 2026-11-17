@@ -14,6 +14,24 @@ import sys
 import pytest
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
+    """Deep real-process tests are PRE-RELEASE ONLY.
+
+    ``@pytest.mark.prerelease`` tests spawn/kill real OS processes and collect
+    the system process table over time. They are skipped in normal feature
+    runs (fast, deterministic CI); a release gate opts in with
+    ``IYH_RUN_PRERELEASE=1 pytest -m prerelease``. This keeps the heavy
+    concurrency/teardown checks out of every feature-update run.
+    """
+    if os.environ.get("IYH_RUN_PRERELEASE") == "1":
+        return
+    skip = pytest.mark.skip(reason="prerelease-only: IYH_RUN_PRERELEASE=1")
+    for item in items:
+        if "prerelease" in item.keywords:
+            item.add_marker(skip)
+
+
 def pytest_sessionfinish(session, exitstatus):
     factory = session.config.pluginmanager.get_plugin("tmpdir_factory")
     base = factory.getbasetemp() if factory is not None else None

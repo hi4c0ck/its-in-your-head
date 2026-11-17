@@ -825,7 +825,9 @@ def test_spawn_records_and_reaps_integration(tmp_path):
         orphan.terminate()
         orphan.wait()
     assert orphan.pid in killed  # the orphan was terminated by the reaper
-    assert (reg / f"{os.getpid()}.json").exists()  # self recorded
+    # Generation-keyed entry: worker-<pid>.json records the current worker
+    # owned by this process (the old owner-keyed <pid>.json is migration-only).
+    assert (reg / f"worker-{orphan.pid}.json").exists()  # self recorded
 
 
 def test_reaper_kills_real_process(tmp_path, monkeypatch):
@@ -873,6 +875,7 @@ def test_reaper_kills_real_process(tmp_path, monkeypatch):
         real.wait()
 
 
+@pytest.mark.prerelease
 def test_watchdog_terminates_on_owner_death(tmp_path, monkeypatch):
     """The hard-kill gate: spawn a real OWNER that owns a real WORKER + its
     real WATCHDOG, hard-kill the owner (TerminateProcess/SIGKILL, so atexit
