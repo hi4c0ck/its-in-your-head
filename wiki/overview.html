@@ -6,8 +6,8 @@
 <title>It's in Your Head — wiki guide</title>
 <meta name="description" content="User guide for the It's in Your Head Hermes plugin: the 96px strip, /mirror commands, six-axis portrait, local data path and privacy.">
 <style>
-/* One theme, two modes. Plain documentation typography. The five portraits
-   are the first thing on the page; explanatory copy is collapsed. */
+/* One theme, two modes. Plain documentation typography. Portraits first;
+   every section below stays visible, with compact spacing. */
 :root{
   --bg:#F6F7F5; --surface:#FFFFFF; --ink:#17202B; --soft:#4B586B;
   --line:#DCE2E6; --accent:#0F6E77; --accent-wash:#E8F3F2;
@@ -39,14 +39,14 @@ a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
   background:var(--accent-wash);border:1px solid var(--line);border-radius:999px;padding:5px 12px}
 .ghost:hover{border-color:var(--accent)}
 .ghost:focus-visible,.card:focus-visible,.navbtn:focus-visible,#mClose:focus-visible,
-.explain summary:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.install summary:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 
-/* compact masthead — one line, portraits follow immediately */
+/* compact masthead — portraits follow immediately */
 .hero{padding:12px 0 10px}
 .eyebrow{font-size:11px;letter-spacing:.1em;text-transform:uppercase;font-weight:750;color:var(--accent);margin:0 0 2px}
 .hero h1{font-size:clamp(1.35rem,4vw,1.85rem);line-height:1.15;letter-spacing:-.025em;margin:0}
 
-/* portrait cards: one row on the first page */
+/* portrait cards: one row on first page */
 .gallery{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:0}
 @media(max-width:620px){.gallery{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:380px){.gallery{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -64,22 +64,14 @@ a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
 .card-body{padding:7px 9px 9px}
 .card-name{display:block;font-weight:750;font-size:12px;margin-bottom:0}
 .card-desc{display:block;color:var(--soft);font-size:10.5px;line-height:1.35;min-height:1.35em}
-.gallery-note{font-size:11.5px;color:var(--soft);margin:9px 0 0}
 
-/* collapsed explanations — for readers who want them */
-.explain{border-top:1px solid var(--line);margin-top:12px}
-.explain summary{cursor:pointer;list-style:none;font-size:13px;font-weight:700;color:var(--soft);
-  padding:10px 2px;display:flex;align-items:center;gap:8px}
-.explain summary::-webkit-details-marker{display:none}
-.explain summary::before{content:'›';font-size:17px;line-height:1;color:var(--accent);transition:transform .15s ease}
-.explain[open] summary::before{transform:rotate(90deg)}
-.explain summary .hint{font-weight:500;font-size:11.5px;opacity:.8}
-.explain-body{padding:0 2px 16px}
-.explain-body h2{font-size:1.15rem;line-height:1.3;letter-spacing:-.015em;margin:0 0 6px}
-.intro{color:var(--soft);margin:0 0 14px;max-width:70ch;font-size:13.5px}
-.lead{font-size:14px;line-height:1.6;max-width:70ch;color:var(--soft);margin:0 0 10px}
+/* compact section rhythm — all content visible */
+.section{margin-top:24px}
+.section h2{font-size:1.15rem;line-height:1.3;letter-spacing:-.015em;margin:0 0 5px}
+.intro{color:var(--soft);margin:0 0 11px;max-width:70ch;font-size:13.5px}
+.lead{font-size:14px;line-height:1.6;max-width:70ch;color:var(--soft);margin:0 0 8px}
 .lead strong{color:var(--ink);font-weight:700}
-.meta{font-size:12.5px;color:var(--soft);margin:0 0 14px}
+.meta{font-size:12.5px;color:var(--soft);margin:0 0 13px}
 
 /* hermes / plugin context */
 .context{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
@@ -97,36 +89,36 @@ a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
 .install details ul{margin:5px 0 0}
 code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.92em;color:var(--ink)}
 
-.strip-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px}
+.strip-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:11px}
 .strip-row .mini{background:var(--mirror);border-radius:10px;padding:7px;width:105px}
 .strip-row .mini img{display:block;width:100%;height:auto;aspect-ratio:570/570;object-fit:contain}
 .strip-row .cap{font-size:12.5px;color:var(--soft)}
 
-.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 @media(max-width:640px){.grid2{grid-template-columns:1fr}}
-.feature{background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:14px 16px;box-shadow:var(--shadow)}
-.feature .part{font-size:11px;font-weight:750;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-bottom:4px}
-.feature h3{font-size:14px;margin:0 0 5px}
+.feature{background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:12px 14px;box-shadow:var(--shadow)}
+.feature .part{font-size:11px;font-weight:750;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-bottom:3px}
+.feature h3{font-size:14px;margin:0 0 4px}
 .feature p{margin:0;color:var(--soft);font-size:13px}
 
 table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--line);border-radius:11px;overflow:hidden}
-caption{text-align:left;font-weight:750;margin-bottom:7px;font-size:13px}
-th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}
+caption{text-align:left;font-weight:750;margin-bottom:6px;font-size:13px}
+th,td{text-align:left;padding:7px 12px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}
 th{color:var(--accent);font-size:11px;letter-spacing:.06em;text-transform:uppercase}
 td:first-child{white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px}
 tr:last-child td{border-bottom:0}
 
 .steps{list-style:none;counter-reset:s;margin:0;padding:0}
-.steps li{counter-increment:s;position:relative;padding:0 0 16px 40px}
+.steps li{counter-increment:s;position:relative;padding:0 0 13px 40px}
 .steps li:last-child{padding-bottom:0}
 .steps li::before{content:counter(s);position:absolute;left:0;top:1px;width:26px;height:26px;border-radius:50%;
   display:grid;place-items:center;font-size:12px;font-weight:750;color:var(--accent);background:var(--accent-wash)}
 .steps .what{font-weight:750;margin-bottom:2px;font-size:13.5px}
 .steps p{margin:0;color:var(--soft);font-size:13px}
 
-.trust{background:var(--accent-wash);border-left:3px solid var(--accent);border-radius:0 11px 11px 0;padding:14px 17px}
+.trust{background:var(--accent-wash);border-left:3px solid var(--accent);border-radius:0 11px 11px 0;padding:13px 16px}
 .trust p{margin:0;font-size:13px}
-footer{border-top:1px solid var(--line);margin-top:16px;padding:14px 0 26px;color:var(--soft)}
+footer{border-top:1px solid var(--line);margin-top:24px;padding:14px 0 26px;color:var(--soft)}
 .fine{font-size:12px;margin:0}
 
 .modal[hidden]{display:none}
@@ -191,167 +183,162 @@ footer{border-top:1px solid var(--line);margin-top:16px;padding:14px 0 26px;colo
       <span class="card-body"><span class="card-name">Tense</span><span class="card-desc">Tense, uncertain</span></span>
     </button>
   </div>
-  <p class="gallery-note">Six dimensions project into the five states above. At strip size: bold contours only. Click a face to enlarge.</p>
 
-  <details class="explain">
-    <summary>What it is · install <span class="hint">links and setup</span></summary>
-    <div class="explain-body">
-      <p class="lead">A small strip at the bottom of the desktop app. <strong>Tools, turns, friction</strong> — shown while you work. No prompts stored. No claims about your thoughts.</p>
-      <p class="meta">Local · derived data only · no network by default</p>
-      <div class="context">
-        <div class="ctx">
-          <div class="k"><a href="https://hermes-agent.nousresearch.com/docs/" target="_blank" rel="noopener">Hermes Agent ↗</a></div>
-          <p>Open-source agent by Nous Research. Terminal, desktop app, chat platforms. Runs tools.</p>
-        </div>
-        <div class="ctx">
-          <div class="k"><a href="https://hermes-agent.nousresearch.com/docs/developer-guide/plugins" target="_blank" rel="noopener">Plugins ↗</a></div>
-          <p>Optional add-ons in your Hermes plugins folder. Subscribe to agent events. Add commands, tools or a desktop pane.</p>
-        </div>
-        <div class="ctx">
-          <div class="k"><a href="https://github.com/hi4c0ck/its-in-your-head" target="_blank" rel="noopener">This plugin ↗</a></div>
-          <p>Agent hooks with /mirror commands and a desktop pane. Separate toggles in Settings → Plugins.</p>
-        </div>
+  <section class="section">
+    <p class="eyebrow">Hermes plugin</p>
+    <h2>It's in Your Head</h2>
+    <p class="lead">A small strip at the bottom of the desktop app. <strong>Tools, turns, friction</strong> — shown while you work. No prompts stored. No claims about your thoughts.</p>
+    <p class="meta">Local · derived data only · no network by default</p>
+
+    <div class="context">
+      <div class="ctx">
+        <div class="k"><a href="https://hermes-agent.nousresearch.com/docs/" target="_blank" rel="noopener">Hermes Agent ↗</a></div>
+        <p>Open-source agent by Nous Research. Terminal, desktop app, chat platforms. Runs tools.</p>
       </div>
+      <div class="ctx">
+        <div class="k"><a href="https://hermes-agent.nousresearch.com/docs/developer-guide/plugins" target="_blank" rel="noopener">Plugins ↗</a></div>
+        <p>Optional add-ons in your Hermes plugins folder. Subscribe to agent events. Add commands, tools or a desktop pane.</p>
+      </div>
+      <div class="ctx">
+        <div class="k"><a href="https://github.com/hi4c0ck/its-in-your-head" target="_blank" rel="noopener">This plugin ↗</a></div>
+        <p>Agent hooks with /mirror commands and a desktop pane. Separate toggles in Settings → Plugins.</p>
+      </div>
+    </div>
 
-      <div class="install">
-        <div class="k">Install and enable</div>
+    <div class="install">
+      <div class="k">Install and enable</div>
+      <ul>
+        <li>Catalog link: <a href="hermes://plugin/install?repo=hi4c0ck/its-in-your-head&amp;enable=1"><code>Install in Hermes ↗</code></a></li>
+        <li>Settings → Plugins: backend and desktop toggles, separate.</li>
+      </ul>
+      <details>
+        <summary>Manual setup</summary>
         <ul>
-          <li>Catalog link: <a href="hermes://plugin/install?repo=hi4c0ck/its-in-your-head&amp;enable=1"><code>Install in Hermes ↗</code></a></li>
-          <li>Settings → Plugins: backend and desktop toggles, separate.</li>
+          <li>Copy the folder into <code>~/.hermes/profiles/&lt;profile&gt;/plugins/</code><br>then run <code>hermes -p &lt;profile&gt; plugins enable its-in-your-head</code></li>
+          <li>Check: <code>hermes -p &lt;profile&gt; plugins doctor its-in-your-head --ci</code></li>
         </ul>
-        <details>
-          <summary>Manual setup</summary>
-          <ul>
-            <li>Copy the folder into <code>~/.hermes/profiles/&lt;profile&gt;/plugins/</code><br>then run <code>hermes -p &lt;profile&gt; plugins enable its-in-your-head</code></li>
-            <li>Check: <code>hermes -p &lt;profile&gt; plugins doctor its-in-your-head --ci</code></li>
-          </ul>
-        </details>
+      </details>
+    </div>
+  </section>
+
+  <section class="section">
+    <p class="eyebrow">Portrait</p>
+    <h2>What the strip draws</h2>
+    <p class="intro">Six dimensions — directness, context richness, exploration, analytical depth, iteration, scope — project into openness, focus and warmth. Five rendered states. Click to enlarge.</p>
+
+    <div class="strip-row">
+      <div class="mini"><img src="images/strip-rest.svg" alt="Rest portrait at strip size" width="570" height="570"></div>
+      <div class="mini"><img src="images/strip-locked.svg" alt="Locked portrait at strip size" width="570" height="570"></div>
+      <span class="cap">At strip size: bold contours only.</span>
+    </div>
+  </section>
+
+  <section class="section">
+    <p class="eyebrow">Surface</p>
+    <h2>Where the information appears</h2>
+    <p class="intro">Two places: the bottom strip and <code>/mirror</code> in chat.</p>
+    <div class="grid2">
+      <div class="feature">
+        <div class="part">The strip</div>
+        <h3>Always visible</h3>
+        <p>Tool-call matrix, portrait sketch, trend bars, ticker. Short labels by design.</p>
+      </div>
+      <div class="feature">
+        <div class="part">The workspace</div>
+        <h3>Workspace</h3>
+        <p>Wider PULSE view. Per-tool table: call volume, goal / good / friction.</p>
       </div>
     </div>
-  </details>
 
-  <details class="explain">
-    <summary>Portrait detail <span class="hint">six dimensions, strip size</span></summary>
-    <div class="explain-body">
-      <p class="intro">Six dimensions — directness, context richness, exploration, analytical depth, iteration, scope — project into openness, focus and warmth. Five rendered states. Click to enlarge.</p>
-      <div class="strip-row">
-        <div class="mini"><img src="images/strip-rest.svg" alt="Rest portrait at strip size" width="570" height="570"></div>
-        <div class="mini"><img src="images/strip-locked.svg" alt="Locked portrait at strip size" width="570" height="570"></div>
-        <span class="cap">At strip size: bold contours only.</span>
+    <table style="margin-top:14px">
+      <caption>/mirror — chat quick reference</caption>
+      <thead><tr><th scope="col">Command</th><th scope="col">What it shows</th></tr></thead>
+      <tbody>
+        <tr><td>/mirror</td><td>Events and tokens</td></tr>
+        <tr><td>/mirror pulse</td><td>Goal / good / friction per label</td></tr>
+        <tr><td>/mirror portrait</td><td>Six dimensions, confidence</td></tr>
+        <tr><td>/mirror portrait draw</td><td>ASCII face, six-axis evidence</td></tr>
+        <tr><td>/mirror drift</td><td>Six-dimension series, last eight points</td></tr>
+        <tr><td>/mirror context</td><td>Model visibility this turn</td></tr>
+        <tr><td>/mirror adaptation</td><td>State and rules: on, off, status, rules</td></tr>
+        <tr><td>/mirror engine</td><td>Perception mode: status, enable, disable</td></tr>
+        <tr><td>/mirror reset --yes</td><td>Wipe dataset, confirmation-gated</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="section">
+    <p class="eyebrow">Signals</p>
+    <h2>What the plugin reads</h2>
+    <p class="intro">From tool and session events. No prompt text.</p>
+    <div class="grid2">
+      <div class="feature">
+        <div class="part">Pulse</div>
+        <h3>Tool-call flow</h3>
+        <p>Goal, good or friction. State, not score.</p>
+      </div>
+      <div class="feature">
+        <div class="part">Portrait</div>
+        <h3>Six dimensions, confidence</h3>
+        <p>Directness, context richness, exploration, analytical depth, iteration, scope.</p>
+      </div>
+      <div class="feature">
+        <div class="part">Drift</div>
+        <h3>Change over a session</h3>
+        <p>Six series, last eight points.</p>
+      </div>
+      <div class="feature">
+        <div class="part">Context audit</div>
+        <h3>What was in reach</h3>
+        <p>Model visibility for this turn.</p>
+      </div>
+      <div class="feature">
+        <div class="part">Adaptation</div>
+        <h3>Opt-in</h3>
+        <p>Off by default. One bounded instruction per turn.</p>
+      </div>
+      <div class="feature">
+        <div class="part">Engine</div>
+        <h3>Perception</h3>
+        <p>Local sketch by default. Optional local model, on request.</p>
       </div>
     </div>
-  </details>
+  </section>
 
-  <details class="explain">
-    <summary>Where information appears <span class="hint">strip, workspace, /mirror</span></summary>
-    <div class="explain-body">
-      <p class="intro">Two places: the bottom strip and <code>/mirror</code> in chat.</p>
-      <div class="grid2">
-        <div class="feature">
-          <div class="part">The strip</div>
-          <h3>Always visible</h3>
-          <p>Tool-call matrix, portrait sketch, trend bars, ticker. Short labels by design.</p>
-        </div>
-        <div class="feature">
-          <div class="part">The workspace</div>
-          <h3>Workspace</h3>
-          <p>Wider PULSE view. Per-tool table: call volume, goal / good / friction.</p>
-        </div>
-      </div>
+  <section class="section">
+    <p class="eyebrow">Data path</p>
+    <h2>From hook to strip</h2>
+    <ol class="steps">
+      <li>
+        <div class="what">Capture</div>
+        <p>Nine hooks on tool, API, stream and session events. Queue only: tool, duration, success, turn index.</p>
+      </li>
+      <li>
+        <div class="what">Aggregate</div>
+        <p>Isolated worker drains the queue. Derived features to local SQLite. No prompts written.</p>
+      </li>
+      <li>
+        <div class="what">Perceive</div>
+        <p>Features become six dimensions, pulse and drift. Local sketch by default; optional model on request.</p>
+      </li>
+      <li>
+        <div class="what">Surface</div>
+        <p>Strip and /mirror read the local database.</p>
+      </li>
+      <li>
+        <div class="what">Adapt</div>
+        <p>One bounded instruction per turn. Off by default.</p>
+      </li>
+    </ol>
+  </section>
 
-      <table style="margin-top:14px">
-        <caption>/mirror — chat quick reference</caption>
-        <thead><tr><th scope="col">Command</th><th scope="col">What it shows</th></tr></thead>
-        <tbody>
-          <tr><td>/mirror</td><td>Events and tokens</td></tr>
-          <tr><td>/mirror pulse</td><td>Goal / good / friction per label</td></tr>
-          <tr><td>/mirror portrait</td><td>Six dimensions, confidence</td></tr>
-          <tr><td>/mirror portrait draw</td><td>ASCII face, six-axis evidence</td></tr>
-          <tr><td>/mirror drift</td><td>Six-dimension series, last eight points</td></tr>
-          <tr><td>/mirror context</td><td>Model visibility this turn</td></tr>
-          <tr><td>/mirror adaptation</td><td>State and rules: on, off, status, rules</td></tr>
-          <tr><td>/mirror engine</td><td>Perception mode: status, enable, disable</td></tr>
-          <tr><td>/mirror reset --yes</td><td>Wipe dataset, confirmation-gated</td></tr>
-        </tbody>
-      </table>
+  <section class="section">
+    <p class="eyebrow">Privacy</p>
+    <h2>Where the data stays</h2>
+    <div class="trust">
+      <p>Profile-local storage. No prompt text, reasoning text or credentials written. Reasoning deltas, when enabled, are buffered in memory for the stream and discarded. One model download, only when enabled. <code>/mirror reset --yes</code> wipes the dataset.</p>
     </div>
-  </details>
-
-  <details class="explain">
-    <summary>What the plugin reads <span class="hint">signals, no prompt text</span></summary>
-    <div class="explain-body">
-      <p class="intro">From tool and session events. No prompt text.</p>
-      <div class="grid2">
-        <div class="feature">
-          <div class="part">Pulse</div>
-          <h3>Tool-call flow</h3>
-          <p>Goal, good or friction. State, not score.</p>
-        </div>
-        <div class="feature">
-          <div class="part">Portrait</div>
-          <h3>Six dimensions, confidence</h3>
-          <p>Directness, context richness, exploration, analytical depth, iteration, scope.</p>
-        </div>
-        <div class="feature">
-          <div class="part">Drift</div>
-          <h3>Change over a session</h3>
-          <p>Six series, last eight points.</p>
-        </div>
-        <div class="feature">
-          <div class="part">Context audit</div>
-          <h3>What was in reach</h3>
-          <p>Model visibility for this turn.</p>
-        </div>
-        <div class="feature">
-          <div class="part">Adaptation</div>
-          <h3>Opt-in</h3>
-          <p>Off by default. One bounded instruction per turn.</p>
-        </div>
-        <div class="feature">
-          <div class="part">Engine</div>
-          <h3>Perception</h3>
-          <p>Local sketch by default. Optional local model, on request.</p>
-        </div>
-      </div>
-    </div>
-  </details>
-
-  <details class="explain">
-    <summary>Data path <span class="hint">hook to strip</span></summary>
-    <div class="explain-body">
-      <ol class="steps">
-        <li>
-          <div class="what">Capture</div>
-          <p>Nine hooks on tool, API, stream and session events. Queue only: tool, duration, success, turn index.</p>
-        </li>
-        <li>
-          <div class="what">Aggregate</div>
-          <p>Isolated worker drains the queue. Derived features to local SQLite. No prompts written.</p>
-        </li>
-        <li>
-          <div class="what">Perceive</div>
-          <p>Features become six dimensions, pulse and drift. Local sketch by default; optional model on request.</p>
-        </li>
-        <li>
-          <div class="what">Surface</div>
-          <p>Strip and /mirror read the local database.</p>
-        </li>
-        <li>
-          <div class="what">Adapt</div>
-          <p>One bounded instruction per turn. Off by default.</p>
-        </li>
-      </ol>
-    </div>
-  </details>
-
-  <details class="explain">
-    <summary>Privacy <span class="hint">where the data stays</span></summary>
-    <div class="explain-body">
-      <div class="trust">
-        <p>Profile-local storage. No prompt text, reasoning text or credentials written. Reasoning deltas, when enabled, are buffered in memory for the stream and discarded. One model download, only when enabled. <code>/mirror reset --yes</code> wipes the dataset.</p>
-      </div>
-    </div>
-  </details>
+  </section>
 
 </main>
 
