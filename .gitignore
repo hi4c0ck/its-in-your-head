@@ -30,3 +30,6 @@ scratch/
 .agnes/
 
 nul
+
+# metrics emulation run outputs (generated JSON; board.html embeds them)
+tests/metrics_emulation/runs/

@@ -29,6 +29,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid  # noqa: F401 — re-exported as _new_token for the registry/watchdog
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -255,19 +256,40 @@ def _attach_to_kill_job(proc) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Stale-registry reaper (layer 2, environment-independent).
+# Generation-aware ownership registry + process-table sweep (leak fix).
 #
-# The Job Object above is the hard-kill guard, but it needs the process tree
-# to NOT already be job-governed — which it usually is under a gateway / MSYS
-# host, where AssignProcessToJobObject returns ACCESS_DENIED. This reaper
-# works everywhere: each owner records its worker pid under a file named by
-# the owner pid; on the next spawn we terminate any worker whose owner is
-# gone. A killed-by-PID is only taken after a command-line check proves the
-# live pid is still our worker (guards against a recycled pid), so we never
-# take down an unrelated process.
+# The ORIGINAL reaper keyed entries by OWNER PID and only reaped workers whose
+# owner process had DIED. That is correct for short-lived CLI owners, but
+# wrong for the real deployment: the encoder runs inside the long-lived
+# gateway (or a long-lived plugin-host child), which is ALIVE for the whole
+# session. Consequences observed 2026-11-17: 13 live worker generations
+# stacked, all owned by the immortal gateway pid 380; the registry held ONE
+# entry (380.json -> newest worker), so 12 workers were untracked, and every
+# watchdog watched owner=380 (never died) so none ever fired.
+#
+# Two changes fix it, both best-effort and never on the encode hot path:
+#
+# 1. GENERATION KEY. Each worker is registered by its own PID,
+#    ``<model_dir>/onnx-workers/worker-<worker_pid>.json`` with an owner_pid
+#    field. ``_reap_stale_workers`` now ALSO reaps any worker whose owner is
+#    alive but is NOT the current process's own live worker (i.e. a prior
+#    generation) — a new owner version retires the previous one immediately.
+#    Legacy ``<owner_pid>.json`` entries are still understood for migration.
+#
+# 2. PROCESS-TABLE SWEEP. Registry entries can be lost (overwritten, crash
+#    between spawn and record). ``_sweep_unregistered_workers`` enumerates
+#    ACTUAL live processes whose image is the dedicated onnx venv (Windows)
+#    or whose cmdline carries the worker markers (POSIX), and terminates any
+#    that is neither a recorded current-worker nor the caller's own live
+#    worker. The image/marker identity check guards against PID recycling.
+#
+# The detached watchdog (below) remains the immediate owner-death guard; the
+# reaper + sweep are the environment-independent backstops that also cover
+# long-lived owners.
 # ---------------------------------------------------------------------------
 _WORKER_CMDLINE_MARKERS = ("worker.py", "its-in-your-head-onnx")
 _ONNX_VENV_MARKER = "its-in-your-head-onnx"  # dedicated venv -> image-path signal
+_WORKER_ENTRY_PREFIX = "worker-"            # worker-<pid>.json (generation key)
 
 
 def _registry_dir(model_dir) -> Path | None:
@@ -279,6 +301,110 @@ def _registry_dir(model_dir) -> Path | None:
         return d
     except Exception:
         return None
+
+
+def _live_worker_pids(interpreter=None) -> set:
+    """PIDs of ACTUAL live processes that are ONNX workers of THIS venv.
+
+    Windows: enumerate all PIDs via ``EnumProcesses`` and match each process
+    IMAGE path against ``interpreter`` (the exact exe of this profile's
+    dedicated onnx venv) when supplied, else the venv marker. Exact-image
+    matching is what prevents a sweep from touching another profile's worker
+    (each profile has its own venv path) and guards against PID recycling.
+    POSIX: read ``/proc/<pid>/cmdline`` and require BOTH worker markers.
+    Best-effort: returns whatever it could enumerate; never raises.
+    """
+    out: set = set()
+    exact = str(interpreter).lower().replace("/", "\\") if interpreter else None
+    try:
+        if os.name == "nt":
+            import ctypes
+            psapi = ctypes.windll.psapi
+            k32 = ctypes.windll.kernel32
+            k32.OpenProcess.restype = ctypes.c_void_p
+            k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+            k32.QueryFullProcessImageNameW.restype = ctypes.c_int
+            k32.QueryFullProcessImageNameW.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint32, ctypes.c_wchar_p,
+                ctypes.POINTER(ctypes.c_uint32)]
+            k32.CloseHandle.argtypes = [ctypes.c_void_p]
+            arr = (ctypes.c_ulong * 16384)()
+            needed = ctypes.c_ulong()
+            if not psapi.EnumProcesses(ctypes.byref(arr), ctypes.sizeof(arr),
+                                       ctypes.byref(needed)):
+                return out
+            count = needed.value // ctypes.sizeof(ctypes.c_ulong)
+            for i in range(count):
+                pid = int(arr[i])
+                if not pid or pid == os.getpid():
+                    continue
+                h = k32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFO
+                if not h:
+                    continue
+                try:
+                    buf = ctypes.create_unicode_buffer(2048)
+                    size = ctypes.c_uint32(buf._length_)
+                    if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                        image = buf.value.lower().replace("/", "\\")
+                        match = (image == exact) if exact else \
+                            (_ONNX_VENV_MARKER in image)
+                        if match:
+                            out.add(pid)
+                finally:
+                    k32.CloseHandle(h)
+        else:
+            for entry in Path("/proc").iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    cmd = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                        "utf-8", "replace").lower()
+                    if all(m.lower() in cmd for m in _WORKER_CMDLINE_MARKERS):
+                        out.add(int(entry.name))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return out
+
+
+def _sweep_unregistered_workers(model_dir, keep_pid=None, interpreter=None) -> list:
+    """Terminate live workers that the registry does NOT account for.
+
+    ``keep_pid`` is the caller's own just-spawned worker (protected even if
+    its entry has not been written yet). A live worker is kept if a registry
+    entry records it as the current worker of a LIVE owner, or if it is the
+    keep_pid. Everything else — lost tracking, prior generations of a
+    long-lived owner — is terminated (image-guarded). ``interpreter`` scopes
+    the process-table sweep to THIS profile's dedicated venv. Returns PIDs
+    killed.
+    """
+    reg = _registry_dir(model_dir)
+    if reg is None:
+        return []
+    protected: set = set()
+    if keep_pid:
+        protected.add(int(keep_pid))
+    for f in reg.iterdir():
+        try:
+            data = json.loads(f.read_text())
+            owner = int(data.get("owner_pid", 0))
+            wpid = int(data.get("worker_pid", 0))
+        except Exception:
+            continue
+        if wpid and _pid_alive(owner):
+            protected.add(wpid)
+    killed = []
+    for pid in _live_worker_pids(interpreter) - protected:
+        if pid == os.getpid():
+            continue
+        # Identity belt: exact-image enumeration scopes to this profile's venv;
+        # the marker/image check is kept too (existing guard tests stub it, and a
+        # fake-worker test shares sys.executable with unrelated processes).
+        if _pid_alive(pid) and _proc_is_our_worker(pid) and _terminate_pid(pid):
+            killed.append(pid)
+            logger.info("its-in-your-head: swept unregistered ONNX worker pid %d", pid)
+    return killed
 
 
 def _pid_alive(pid: int) -> bool:
@@ -371,7 +497,21 @@ def _terminate_pid(pid: int) -> bool:
         return False
 
 
-def _reap_stale_workers(model_dir) -> None:
+def _reap_stale_workers(model_dir, current_pid=None) -> None:
+    """Retire stale workers from the registry (generation-aware).
+
+    A worker entry is stale when:
+      * its OWNER is gone (the original dead-owner case), OR
+      * it belongs to THIS owner but is a PRIOR generation — i.e. its pid is
+        not ``current_pid`` (the worker this owner just spawned). This is the
+        fix for a long-lived owner: it used to be alive, so its old entry was
+        never reaped and workers stacked.
+
+    ``current_pid`` defaults to None for compatibility with the direct unit
+    tests; with None, only dead-owner entries are reaped (legacy behaviour).
+    Entries are keyed by worker pid (``worker-<pid>.json``); legacy
+    ``<owner_pid>.json`` entries are still read for migration.
+    """
     reg = _registry_dir(model_dir)
     if reg is None:
         return
@@ -379,52 +519,69 @@ def _reap_stale_workers(model_dir) -> None:
     for f in sorted(reg.iterdir()):
         if not f.name.endswith(".json"):
             continue
+        legacy = not f.name.startswith(_WORKER_ENTRY_PREFIX)
         try:
             data = json.loads(f.read_text())
-            owner = int(f.stem)
-            wpid = int(data.get("worker_pid", 0))
+            owner = int(data.get("owner_pid", f.stem if legacy else 0))
+            wpid = int(data.get("worker_pid",
+                                f.stem[len(_WORKER_ENTRY_PREFIX):] if not legacy else 0))
         except Exception:
             try:
                 f.unlink()  # corrupt/unreadable entry: safe to drop
             except Exception:
                 pass
             continue
-        if _pid_alive(owner) or owner == self_pid:
-            # Live owner: keep its entry + do not touch its worker.
-            continue
-        # Owner gone -> the recorded worker is a stale orphan (if still up).
+        owner_gone = not _pid_alive(owner)
+        prior_same_owner = (current_pid is not None and owner == self_pid
+                            and wpid and wpid != current_pid)
+        if not owner_gone and not prior_same_owner:
+            continue  # live owner, still-current generation -> keep
         if wpid and wpid != self_pid and _pid_alive(wpid) \
                 and _proc_is_our_worker(wpid):
             _terminate_pid(wpid)
             logger.info(
-                "its-in-your-head: reaped stale ONNX worker pid %d "
-                "(owner %d gone)", wpid, owner)
+                "its-in-your-head: reaped ONNX worker pid %d "
+                "(owner %d %s)", wpid, owner,
+                "gone" if owner_gone else "superseded")
         try:
-            f.unlink()  # drop the dead owner's entry
+            f.unlink()
         except Exception:
             pass
 
 
 def _record_worker(model_dir, worker_pid: int) -> None:
+    """Register the CURRENT worker by its own pid (generation key).
+
+    The filename is the worker pid, not the owner pid, so N generations from
+    one long-lived owner get N entries instead of overwriting a single one.
+    """
     reg = _registry_dir(model_dir)
     if reg is None:
         return
-    f = reg / "{}.json".format(os.getpid())
+    f = reg / "{}{}.json".format(_WORKER_ENTRY_PREFIX, int(worker_pid))
     try:
-        f.write_text(json.dumps({"worker_pid": int(worker_pid), "ts": time.time()}))
+        f.write_text(json.dumps({"worker_pid": int(worker_pid),
+                                 "owner_pid": int(os.getpid()),
+                                 "token": uuid.uuid4().hex,
+                                 "ts": time.time()}))
     except Exception:
         pass
 
 
-def _forget_worker(model_dir) -> None:
+def _forget_worker(model_dir, worker_pid: int | None = None) -> None:
+    """Drop this client's current worker entry on clean shutdown."""
     reg = _registry_dir(model_dir)
     if reg is None:
         return
-    f = reg / "{}.json".format(os.getpid())
-    try:
-        f.unlink()
-    except Exception:
-        pass
+    candidates = []
+    if worker_pid:
+        candidates.append(reg / "{}{}.json".format(_WORKER_ENTRY_PREFIX, int(worker_pid)))
+    candidates.append(reg / "{}.json".format(os.getpid()))  # legacy
+    for f in candidates:
+        try:
+            f.unlink()
+        except Exception:
+            pass
 
 
 def _watchdog_supported() -> bool:
@@ -724,10 +881,16 @@ class OnnxWorkerClient:
             # Best-effort: bind this worker to the process's KILL_ON_JOB_CLOSE
             # job so it is reaped even if the owner is hard-killed (taskkill).
             _attach_to_kill_job(self._proc)
-            # Reap orphans from dead owners, then record this worker so the
-            # next owner reaps it if we die without a clean shutdown.
-            _reap_stale_workers(self.model_dir)
+            # Reap stale workers: dead-owner orphans AND prior generations of
+            # THIS long-lived owner (which never dies -> the old reaper never
+            # fired). Then record this generation by its own pid. Finally a
+            # process-table sweep catches workers whose registry entry was
+            # lost/overwritten (the 12 untracked workers of the 2026-11-17
+            # incident), protecting this just-spawned worker explicitly.
+            _reap_stale_workers(self.model_dir, current_pid=self._proc.pid)
             _record_worker(self.model_dir, self._proc.pid)
+            _sweep_unregistered_workers(self.model_dir, keep_pid=self._proc.pid,
+                                        interpreter=interp)
             # Primary immediate cleanup: a detached watchdog that kills this
             # worker the moment the owner (this process) dies, hard kill
             # included. Best-effort -> guard_status() drops to reaper-only.
@@ -756,6 +919,9 @@ class OnnxWorkerClient:
                     proc.kill()
             except Exception:
                 pass
+            # Drop this generation's registry entry so a crash-restart cannot
+            # mistake a recycled pid for our worker.
+            _forget_worker(self.model_dir, proc.pid)
         self._stop_watchdog()
 
     def _stop_watchdog(self) -> None:
@@ -913,8 +1079,9 @@ class OnnxWorkerClient:
                 self._proc.wait(timeout=5)  # type: ignore[union-attr]
             except Exception:
                 self._kill()
+            wpid = self._proc.pid if self._proc is not None else None
             self._proc = None
-            _forget_worker(self.model_dir)
+            _forget_worker(self.model_dir, wpid)
             self._stop_watchdog()
 
 

@@ -79,6 +79,31 @@ def test_agent_side_persists_portrait_observations(agent_env):
         conn.close()
 
 
+def test_portrait_history_evidence_columns_match_their_dimension(agent_env):
+    """Writer order must be d_target, d_confidence, next dim — not all
+    targets then all confidences (the fallback reads by column name)."""
+    eng, db = agent_env
+    dims = list(eng.portrait.normalized()["values"].keys())
+    entry = {
+        "ts": 123.0,
+        "values": {d: 0.10 + i * 0.01 for i, d in enumerate(dims)},
+        "targets": {d: 0.20 + i * 0.01 for i, d in enumerate(dims)},
+        "confidences": {d: 0.30 + i * 0.01 for i, d in enumerate(dims)},
+    }
+    eng._append_history(entry)
+    conn = sqlite3.connect(str(db))
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(portrait_history)")]
+        row = dict(zip(cols, conn.execute(
+            "SELECT * FROM portrait_history ORDER BY id DESC LIMIT 1"
+        ).fetchone()))
+    finally:
+        conn.close()
+    for d in dims:
+        assert row[f"{d}_target"] == pytest.approx(entry["targets"][d])
+        assert row[f"{d}_confidence"] == pytest.approx(entry["confidences"][d])
+
+
 def test_portrait_fallback_serves_last_observation(agent_env, monkeypatch):
     eng, db = agent_env
     now = time.time()
@@ -99,8 +124,10 @@ def test_portrait_fallback_serves_last_observation(agent_env, monkeypatch):
     assert all(v is not None for v in dims.values()), dims
     # Observed track: dimensions and user carry the same stored values
     assert shape["user"] == dims
-    # Neither track is persisted -> confidence/agent stay None
-    assert all(v is None for v in shape["confidence"].values())
+    # Observed-track evidence is now persisted alongside the value; the
+    # interpreted (agent) track is still never persisted.
+    assert all(v is not None for v in shape["targets"].values())
+    assert all(v is not None for v in shape["confidence"].values())
     assert all(v is None for v in shape["agent"].values())
     # No pattern_affinity_history rows -> empty perception shape
     assert shape["perception"] == _empty_perception_expected(
@@ -141,7 +168,7 @@ def test_portrait_probe_importable_but_empty_serves_db_fallback(
     assert shape["available"] is True
     assert all(v is not None for v in shape["dimensions"].values()), shape
     assert shape["user"] == shape["dimensions"]
-    assert all(v is None for v in shape["confidence"].values())
+    assert all(v is not None for v in shape["confidence"].values())
     assert all(v is not None for v in shape["dimensions"].values())
 
 
@@ -225,8 +252,8 @@ def test_separate_processes_portrait_bridge(tmp_path):
     assert all(v is not None for v in dims.values()), dims
     # user track mirrors the observed dimensions (same stored values)
     assert body["user"] == dims
-    # unpersisted tracks stay None, never invented
-    assert all(v is None for v in body["confidence"].values())
+    # observed-track evidence is persisted; interpreted track stays None
+    assert all(v is not None for v in body["confidence"].values())
     assert all(v is None for v in body["agent"].values())
     # perception filled from the dashboard fixture's seeded latest row
     perc = body["perception"]

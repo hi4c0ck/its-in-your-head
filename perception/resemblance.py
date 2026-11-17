@@ -125,6 +125,81 @@ def fit_from_fixture(backend, anchor_vectors: dict | None = None, **kw) -> Calib
     return fit_calibration(pairs)
 
 
+def strong_threshold_from_pairs(pairs: list[tuple[float, bool]],
+                                floor: float = 1e-3) -> float | None:
+    """Per-dimension strong-contrast scale r_d from labeled R pairs.
+
+    A "strong contrast" is HALF the separation between the mean R of the
+    positively-labeled examples and the mean R of the negatively-labeled
+    ones for that dimension -- the same midpoint idea `fit_calibration`
+    uses for confidence, applied to the portrait's target scale. Returns
+    None when a class is missing or the separation is non-positive; the
+    caller then keeps the documented default (no invented scale).
+    """
+    pos = [r for r, y in pairs if y]
+    neg = [r for r, y in pairs if not y]
+    if not pos or not neg:
+        return None
+    r = (_mean(pos) - _mean(neg)) / 2.0
+    if not (r > 0.0):
+        return None
+    return max(floor, r)
+
+
+def fit_strong_thresholds(backend, anchor_vectors: dict | None = None,
+                          floor: float = 1e-3, **kw) -> dict[str, float]:
+    """Fit the per-dimension portrait thresholds r_d from LABELLED_FIXTURE.
+
+    Uses the same pinned resemblance math and the same active backend as the
+    live encoder, so the thresholds track the model's real contrast scale
+    instead of a hard-coded global constant. Only dimensions with BOTH a
+    positive and a negative labeled example are returned; `strong_thresholds`
+    fills any remaining dimension with STRONG_R_DEFAULT. No pair is invented.
+    """
+    vectors = anchor_vectors if anchor_vectors is not None else \
+        get_anchor_vectors(backend, **kw)
+    pairs: dict[str, list[tuple[float, bool]]] = {
+        d: [] for d in DIMENSIONS}
+    for text, labels in LABELLED_FIXTURE:
+        scores = resemblance_for_text(text, backend, anchor_vectors=vectors)
+        for dim, label in labels.items():
+            pairs[dim].append((scores[dim]["R"], label))
+    out: dict[str, float] = {}
+    for dim, dim_pairs in pairs.items():
+        r = strong_threshold_from_pairs(dim_pairs, floor)
+        if r is not None:
+            out[dim] = r
+    return out
+
+
+def baseline_from_pairs(pairs: list[tuple[float, bool]]) -> float:
+    """Neutral contrast mid_d = (mean R_positive + mean R_negative)/2.
+
+    The per-dimension anchor sets are correlated, so the pair that separates
+    a trait does not straddle R=0: treating R=0 as neutral systematically
+    pushes that axis up or down for every prompt. This is the observed root
+    cause of the "same six-value pattern" in the emulation board.
+    """
+    pos = [r for r, y in pairs if y]
+    neg = [r for r, y in pairs if not y]
+    if not pos or not neg:
+        return 0.0
+    return (_mean(pos) + _mean(neg)) / 2.0
+
+
+def fit_baselines(backend, anchor_vectors: dict | None = None,
+                  **kw) -> dict[str, float]:
+    """Per-dimension neutral contrast mid_d from LABELLED_FIXTURE."""
+    vectors = anchor_vectors if anchor_vectors is not None else \
+        get_anchor_vectors(backend, **kw)
+    pairs: dict[str, list[tuple[float, bool]]] = {d: [] for d in DIMENSIONS}
+    for text, labels in LABELLED_FIXTURE:
+        scores = resemblance_for_text(text, backend, anchor_vectors=vectors)
+        for dim, label in labels.items():
+            pairs[dim].append((scores[dim]["R"], label))
+    return {d: baseline_from_pairs(ps) for d, ps in pairs.items()}
+
+
 def confidence_profile(scores: dict[str, dict], calibration: Calibration | None = None) -> dict[str, float]:
     cal = calibration or DEFAULT_CALIBRATION
     return {dim: cal.confidence(scores[dim]["R"]) for dim in DIMENSIONS}

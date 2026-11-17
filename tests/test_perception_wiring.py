@@ -312,3 +312,18 @@ def test_c6_ordering_raw_available_during_engine_feed_then_purged(
         assert rows and all(r[0] is None and r[1] is None for r in rows)
     finally:
         conn.close()
+
+
+def test_engine_fits_per_dim_portrait_thresholds():
+    """The engine must fit per-dim r_d from the fixture, not a global knob."""
+    import engine
+    e = engine.Engine()
+    e.on_events([{"type": "turn", "ts": time.time(),
+                  "user_message": "Give me the short answer, no preamble."}])
+    fitted = e.portrait.strong_r
+    assert set(fitted) == set(anchors.DIMENSIONS)
+    values = [round(v, 5) for v in fitted.values()]
+    assert len(set(values)) > 1, values  # never forced-uniform
+    assert all(0.0 < v < 0.5 for v in values), values
+    assert set(e.portrait.baselines) == set(anchors.DIMENSIONS)
+    assert any(abs(v) > 0.01 for v in e.portrait.baselines.values())

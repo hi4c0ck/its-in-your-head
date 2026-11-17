@@ -102,7 +102,9 @@ def test_migration_v2_to_v3_idempotent_and_preserves_events(_tmp_db):
         assert migration.migrate(conn) is True
         assert migration.get_schema_version(conn) == migration.CURRENT_SCHEMA_VERSION
         cols = [r[1] for r in conn.execute("PRAGMA table_info(portrait_history)")]
-        assert cols == ["id", "ts", *migration.PORTRAIT_HISTORY_DIMS]
+        assert cols == ["id", "ts", *migration.PORTRAIT_HISTORY_DIMS, *[
+            f"{d}_{suffix}" for d in migration.PORTRAIT_HISTORY_DIMS
+            for suffix in ("target", "confidence")]]
         assert conn.execute("SELECT COUNT(*) FROM portrait_history").fetchone()[0] == 0
         # §8: the legacy row survives migration (not dropped) but its raw
         # user_message text is scrubbed to NULL on the v9 privacy step.

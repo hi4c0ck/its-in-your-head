@@ -1996,7 +1996,18 @@ const IYH_J = {
   tint: 0.10,             // gamma: pow(v.c, 1 + 1.5*tint)
   soft: 1.0,             // alpha ceiling raised (solid bricks so the pixelized structure reads)
   grout: 0.28,            // grout gap as a FRACTION of brick width (0=none, .28=28% gap) -> visible discrete cells
-  pool: 3,               // coarsen: draw a 3x3 sub-cell as ONE brick (214x240 field -> ~72x80 visible bricks)
+  pool: 3,               // L0: draw a 3x3 sub-cell as ONE brick (214x240 field -> ~72x80 visible bricks)
+  lodBrickPx: 2,         // LOD: coarsen only when a brick would be smaller than this many px
+
+  // PIXEL-ART STEP SEQUENCER (owner-locked): DISCRETE bitwise shifts on three
+  // independent tempos — no sine waves, no sub-cell sway, no smeared face.
+  // Bricks stay on the grid; only their brightness steps between 4 hard levels.
+  beatMs: 295,           // grain-tile step period (16th note at 120 BPM)
+  wobbleGain: 1.6,       // per-brick pixel wobble from the drifting grain value
+  grainStep: 1,          // grain-cell columns shifted per beat
+  levelDepth: 0.25,       // how strongly grain drives brick level (1 = full)
+  exprPulse: 0.08,          // EXTRA: slow 8-beat breathing pulse depth (0 = off)
+  exprDiag: 0.3,           // EXTRA: matching Y wobble in px (0 = off)
 }
 const IYH_BRICK_FPS = 12   // pane drift cadence: the field sways at 12fps, not the 0.85s poll
 // Baked face line-coverage: 214x240 alpha field (0..255) at the REAL J60 brick
@@ -2254,11 +2265,32 @@ function iiyhIngestUpset(upset) {
 }
 // Per-frame CANVAS renderer. `cov` is the 214x240 coverage grid (default the baked
 // IYH_FACE_COV_BYTES; a template-rasterized grid when a drawing template is selected).
+// PORTRAIT-ONLY DRIFT — exactly the reference's model: the J grain tile slides
+// one brick-cell per beat, and only FACE bricks sample it. Brightness flows
+// through the portrait; the void/ground is never touched. No thresholds (no
+// voids eating the face), no Math.sin wave, no sub-cell offset. Deterministic.
+function iiyhJFaceDrift(pc, prr, secs) {
+  const base = Math.max(40, IYH_J.beatMs || 125)
+  const step = Math.floor(secs * 1000 / base) * (IYH_J.grainStep || 1)
+  const bw = IYH_J_SPEC.bw, bh = IYH_J_SPEC.bh
+  const bi = ((pc + step) % bw + bw) % bw          // grain tile drifts in X
+  const bj = prr % bh
+  return iiyhJShim(bi + bj * bw, 7)                // 0.72..1.0 from the tile
+}
+// LINE-BY-LINE DRIFT: each scanline of FACE bricks shifts by WHOLE cells,
+// at its own tempo (rows run 1x/2x/3x the beat). A bounded 16-step ping-pong
+// keeps every line on-screen. No sine, no sub-cell offset, no voids — the
+// ground dither is never moved. This is the visible line-by-line drift.
 function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   ctx.clearRect(0, 0, W, H)                                  // transparent bg
   cov = cov || IYH_FACE_COV_BYTES
   const cn = IYH_FACE_COV.cn, rn = IYH_FACE_COV.rn
-  const pool = IYH_J.pool || 1                                // coarsen: P x P sub-cells -> one brick
+  // LOD: L0 (pool 3) at full view; coarsen ONLY when a brick would fall below
+  // ~2 px (the 48px compact instrument at DPR2). Capped at L3 (pool 6).
+  const fitScale = Math.min(W / 720, H / 760)
+  const basePool = IYH_J.pool || 1
+  const pool = Math.max(basePool, Math.min(6, Math.ceil((IYH_J.lodBrickPx || 2) / ((3.375 * fitScale) || 1))))
+
   const p = IYH_J.grout || 0                                   // grout gap as a fraction of brick width
   const bw = IYH_J.bw * pool, bh = IYH_J.bh * pool             // pooled brick footprint (viewBox units)
   const pn = Math.ceil(cn / pool), pm = Math.ceil(rn / pool)   // pooled grid dims
@@ -2391,6 +2423,21 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     // sub-threshold values become VOID bricks — no silent strikes, even a +Infinity (which
     // `!(a>0.004)` alone would not catch).
     if (!Number.isFinite(a) || a <= 0.004) continue
+    // PORTRAIT-ONLY drift: the grain tile slides through FACE bricks;
+    // ground dither keeps its original brightness (no voids, no mess).
+    const wSecs = frame / (IYH_BRICK_FPS || 12)
+    const base = Math.max(40, IYH_J.beatMs || 125)
+    // Drifting grain moves EACH face brick a tiny sub-cell amount; the
+    // portrait as a whole stays anchored (no uniform slide).
+    const grain = isLit ? iiyhJFaceDrift(pc, prr, wSecs) : 0.86
+    if (isLit) {
+      a *= 1 - (IYH_J.levelDepth ?? 1) * (1 - grain)
+      if (IYH_J.exprPulse > 0) {
+        const per = 8 * base / 1000, ph = (wSecs % per) / per
+        const pulse = ph < 0.5 ? ph * 2 : (1 - ph) * 2
+        a *= 1 - IYH_J.exprPulse * (1 - pulse)
+      }
+    }
     // v19: the glitch band - shift the row sideways + scramble + take the glitch color (RGB-split).
     // v42: the band stays ON THE FACE LINES ONLY (the sample's semantics: "the magenta glitch band
     // stays on the face lines"). Production was missing `isLit`, so every ~8.3s the band piled a
@@ -2398,14 +2445,15 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
     // with its sin jitter — a hard glare on the ground texture. Ground bricks keep their own dither
     // value; only lit face bricks take the rip.
     const inBand = gActive && isLit && prr >= gBand && prr < gBand + gH
-    let gx = offX + pc * bwS + drift + gapX / 2, ga = a
+    // Per-brick grain drift: individual bricks wobble, picture stays put.
+    let gx = offX + pc * bwS + drift + gapX / 2 + (isLit ? Math.round((grain - 0.86) * bwS * (IYH_J.wobbleGain ?? 1.5)) : 0), ga = a
     if (inBand) {
       gx += gShift + Math.sin(frame * 0.9 + prr * 1.3) * bwS * 0.3   // the sideways rip + a little jitter
       ga = Math.min(1, Math.max(a, 0.85) * (0.6 + 0.4 * iihyJHash(pc * 7 + frame, gIdx, IYH_J.ditherSeed + 90)) * gGain)  // the band BRIGHT magenta (the RGB-split pop); gGain < 1 only on the D4 SUSTAINED band (intensity proportional to F')
     }
     ctx.fillStyle = inBand ? gColor : accentColor   // the magenta stays IN the band; everything else is the accent
     ctx.globalAlpha = ga
-    ctx.fillRect(gx, offY + prr * bhS + gapY / 2, Math.max(0.5, bwS - gapX), Math.max(0.5, bhS - gapY))
+    ctx.fillRect(gx, offY + prr * bhS + gapY / 2 + (isLit && IYH_J.exprDiag ? Math.round((grain - 0.86) * bhS * IYH_J.exprDiag * 2) : 0), Math.max(0.5, bwS - gapX), Math.max(0.5, bhS - gapY))
   }
   ctx.globalAlpha = 1
 }
@@ -3555,8 +3603,8 @@ function adaptPulseToLanes(pulse) {
 // constants. Surface coordinates are relative to the measured box
 // supplied by the Stage 4 composition layer (no hardcoded dims).
 const PULSE_HYSTERESIS = 1e-6; // mirrors pulse/matrix.py HYSTERESIS
-const BUBBLE_TRAVEL_MS = 450; // tuning: 350-550ms travel
-const BUBBLE_ARRIVAL_MS = 150; // tuning: 120-180ms arrival flash
+const BUBBLE_TRAVEL_MS = 650; // was 450: a 4px column crossing ~70px in 450ms was imperceptible in the compact strip
+const BUBBLE_ARRIVAL_MS = 200; // was 150: keep the discrete stamp readable after the longer climb
 const MAX_CONCURRENT_BUBBLES = 4; // bounded concurrent bubbles
 const BUBBLE_STAGGER_MS = 60; // stagger for simultaneous changes
 const PULSE_LANE_ORDER = ['live', 'goal', 'good', 'friction'];
@@ -3845,7 +3893,7 @@ var PULSE_BOARD_BORDER = 1; // 1px box border (defines each lane box)
 var PULSE_BOARD_PAD = 3;    // internal box padding (tiny margins)
 var PULSE_BOARD_CHROME = PULSE_BOARD_BORDER + PULSE_BOARD_PAD; // 4px inner inset
 var PULSE_BOARD_GAP = 6;    // margin BETWEEN boxes (normal); 3 when narrow
-var PULSE_SPAWN_SPACE = 12; // reserved bottom strip the sprite flies up through
+var PULSE_SPAWN_SPACE = 16; // reserved bottom strip the 16px sprite flies up through
 // v0.1.12 (sharper good eval): value->dots steepness. A power curve makes
 // weak values collapse toward the 1-dot presence floor and strong values
 // expand toward the full meter, so weak vs strong read with more contrast
@@ -3972,7 +4020,7 @@ function pulseBubblePath(box, metric, slotIndex, capacity, narrow) {
 function pulseBubbleFlight(box, metric, slotIndex, capacity, narrow) {
   var path = pulseBubblePath(box, metric, slotIndex, capacity, narrow);
   var left = Math.round(path.dotLeft); // align the 4px column on the tool's first-dot column
-  var top = Math.round(path.spawn.y) - 12; // bottom flush at the surface edge
+  var top = Math.round(path.spawn.y) - 16; // bottom flush at the surface edge (4 dot cells)
   var dy = Math.round(path.rowCenter - 6 - top); // end: column centered on the tool's row
   var dist = Math.abs(dy);
   var n = pulseTravelSteps(dist);
@@ -4774,9 +4822,10 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
         'data-reason': t.reason,
         title: t.tool + ' · ' + t.reason,
         style: {
-          position: 'absolute', width: 4, height: 12, pointerEvents: 'none',
+          position: 'absolute', width: 4, height: 16, pointerEvents: 'none',
           // Whole-pixel spawn: bottom-flush on the measured surface
-          // edge, aligned on the destination lane's dot column.
+          // edge, aligned on the destination lane's dot column. 4px wide
+          // x 16px tall (four dot cells) so the climb reads in the strip.
           left: f.left + 'px', top: f.top + 'px',
           // Stable per-transition delay (coordinator-assigned): re-
           // renders of the active list can never rewrite this string,
@@ -4784,10 +4833,10 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
           animation: f.animationName + ' ' + BUBBLE_TRAVEL_MS + 'ms linear '
             + (t.staggerMs != null ? t.staggerMs : 0) + 'ms 1 both',
         },
-        // The signal sprite: three 4px cells (the instrument's
+        // The signal sprite: four 4px cells (the instrument's
         // dot-matrix unit) — bright head, stepped tail. Sharp edges,
         // stepped opacity, no gradient, no blur, no rounded corners.
-        children: [0.95, 0.55, 0.25].map(function (o, i) {
+        children: [0.95, 0.65, 0.4, 0.2].map(function (o, i) {
           return jsx('span', {
             key: i,
             style: {

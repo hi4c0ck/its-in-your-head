@@ -33,6 +33,7 @@ try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from .pulse import upset as _pulse_upset
     from .perception import encoder as _encoder
     from .perception import anchors as _anchors
+    from .perception import resemblance as _resemblance
     from .perception import portrait as _portrait_mod
     from .perception import patterns as _patterns
     from .core import settings as _settings
@@ -44,6 +45,7 @@ except ImportError:
     from pulse import upset as _pulse_upset
     from perception import encoder as _encoder
     from perception import anchors as _anchors
+    from perception import resemblance as _resemblance
     from perception import portrait as _portrait_mod
     from perception import patterns as _patterns
     from core import settings as _settings
@@ -150,6 +152,9 @@ class Engine:
         # the pulse read path (never at construction — the lazy-DB
         # rule).
         self.upset = _pulse_upset.UpsetAccumulator()
+        # (a) attribution: the tool active when a reasoning segment lands.
+        # Session-keyed so a cross-session boundary cannot bleed tools.
+        self._last_tool_by_session: dict[str, str] = {}
         self._anchor_backend = None
         # Rolling reference (dynamic reassembly): lazily created + seeded from
         # the bank on the first backend-available turn, then reassembled by
@@ -197,6 +202,9 @@ class Engine:
         self._backend = None
         self._backend_name = str(
             s.get("perception.encoder") or _encoder.DEFAULT_BACKEND)
+        # Per-dim portrait r_d is fitted from the labeled fixture once per
+        # active backend (never a forced-uniform global knob). None = not yet.
+        self._portrait_r_backend = None
         self._settings = dict(s)
         # Live-settings provider (wired by the register hook): a callable
         # -> {key: value} that re-reads the PERSISTED settings, so a live
@@ -205,6 +213,31 @@ class Engine:
         self._settings_provider = None
 
     # -- backend (lazy) --------------------------------------------------- #
+    def _ensure_portrait_thresholds(self, backend) -> None:
+        """Fit the portrait's per-dimension r_d from the labeled fixture.
+
+        The spec forbids a forced-uniform threshold: each dimension gets its
+        own strong-contrast scale from the repo's own pairs, under the SAME
+        active backend used for the live encode. Fit once per backend; faults
+        degrade to the spec default instead of crashing the observation path.
+        """
+        if getattr(self, "_portrait_r_backend", None) is backend:
+            return
+        try:
+            fitted = _resemblance.fit_strong_thresholds(
+                backend, anchor_vectors=self._anchor_vectors_for(backend))
+            baselines = _resemblance.fit_baselines(
+                backend, anchor_vectors=self._anchor_vectors_for(backend))
+        except Exception:
+            logger.exception("its-in-your-head: portrait r_d fit failed")
+            fitted, baselines = {}, {}
+        if fitted:
+            self.portrait.strong_r = _portrait_mod.strong_thresholds(fitted)
+        if baselines:
+            self.portrait.baselines = {
+                d: float(baselines.get(d, 0.0)) for d in _portrait_mod.DIMENSIONS}
+        self._portrait_r_backend = backend
+
     def set_settings_provider(self, provider) -> None:
         """Store a live-settings callable (``-> {key: value}``). When set,
         ``_get_backend`` re-reads ``perception.encoder`` on each call and
@@ -347,6 +380,10 @@ class Engine:
                 except Exception:
                     logger.exception(
                         "its-in-your-head: engine tool_start feed failed")
+                tool_name = ev.get("tool_name")
+                if isinstance(tool_name, str) and tool_name:
+                    self._last_tool_by_session[
+                        str(ev.get("session_id") or "local")] = tool_name
             elif etype == "tool_end":
                 self._on_tool_end(ev)
             elif etype in ("user_turn", "turn"):
@@ -834,7 +871,9 @@ class Engine:
             space = self._pulse_vector_space()
             stepped = self.upset.on_reasoning_seg(
                 ev, self._get_backend(),
-                str(space.get("id") or self._backend_name))
+                str(space.get("id") or self._backend_name),
+                last_tool=self._last_tool_by_session.get(
+                    str(ev.get("session_id") or "local")))
             if stepped:
                 # D1 finalized a turn — mirror F' so the pane tracks the
                 # accumulator's reasoning-narrated friction (once per LLM
@@ -981,6 +1020,9 @@ class Engine:
                 logger.exception(
                     "its-in-your-head: goal vector persist failed")
             backend = self._get_backend()
+            # Per-dim r_d fitted from the labeled fixture before ANY observed
+            # update, so target/confidence use the real contrast scale.
+            self._ensure_portrait_thresholds(backend)
             prompt_vector = None
             try:
                 (prompt_vector,) = backend.encode([text])
@@ -1026,6 +1068,16 @@ class Engine:
                 "values": {
                     d: float(v)
                     for d, v in dict(norm.get("values") or {}).items()
+                    if v is not None
+                },
+                "targets": {
+                    d: float(v)
+                    for d, v in dict(norm.get("targets") or {}).items()
+                    if v is not None
+                },
+                "confidences": {
+                    d: float(v)
+                    for d, v in dict(norm.get("confidences") or {}).items()
                     if v is not None
                 },
             }
@@ -1318,17 +1370,27 @@ class Engine:
         _db, _mig = self._storage()
         dims = _dims()
         vals = entry.get("values") or {}
-        row = [float(entry["ts"])] + [
-            float(vals[d]) if vals.get(d) is not None else None
-            for d in dims
-        ]
+        targets = entry.get("targets") or {}
+        confidences = entry.get("confidences") or {}
+        evidence = [f"{d}_{suffix}" for d in dims
+                    for suffix in ("target", "confidence")]
+        cols = list(dims) + evidence
+        row = [float(entry["ts"])]
+        row += [float(vals[d]) if vals.get(d) is not None else None
+                for d in dims]
+        # Column order is INTERLEAVED: d_target, d_confidence, next dim...
+        for d in dims:
+            row.append(float(targets[d]) if targets.get(d) is not None
+                       else None)
+            row.append(float(confidences[d]) if confidences.get(d) is not None
+                       else None)
         conn = _db.connect()
         try:
             _mig.schema_bootstrap(conn)
             conn.execute(
                 "INSERT INTO portrait_history (ts, "
-                + ", ".join(dims) + ") VALUES ("
-                + ", ".join(["?"] * (len(dims) + 1)) + ")",
+                + ", ".join(cols) + ") VALUES ("
+                + ", ".join(["?"] * len(row)) + ")",
                 row)
             conn.execute(
                 "DELETE FROM portrait_history WHERE id NOT IN "
@@ -1370,7 +1432,14 @@ class Engine:
             space["dim"] = len(self._goal_vector)
         return space
 
-    def pulse_view(self) -> dict:
+    def pulse_view(self, now: float | None = None) -> dict:
+        """Authoritative PULSE projection.
+
+        ``now`` is an OPTIONAL data clock for deterministic replay / speedrun
+        emulation: it drives capsule decay, event-rate velocity and the lane
+        accumulation at a caller-chosen instant. ``None`` (the production
+        path) keeps using wall time, byte-identical to before.
+        """
         self.ensure_pulse_hydrated()
         self._hydrate_upset_mood()
         thr = {k: v for k, v in self._thresholds.items() if v is not None}
@@ -1391,7 +1460,8 @@ class Engine:
             try:
                 _mig.schema_bootstrap(vconn)
                 event_rates = _pulse_velocity.event_velocity(
-                    vconn, window_s=_pulse_velocity.PULSE_VELOCITY_WINDOW_S)
+                    vconn, now_ts=now,
+                    window_s=_pulse_velocity.PULSE_VELOCITY_WINDOW_S)
             finally:
                 vconn.close()
         except Exception:
@@ -1420,7 +1490,7 @@ class Engine:
         # comes from the SAME inputs (one scoring path — the
         # dashboard's rows->lanes mirror stays a compatibility
         # fallback for pre-v0.1.10 engine responses only).
-        lanes = _pulse_matrix.build_lanes(**common)
+        lanes = _pulse_matrix.build_lanes(**common, now=now)
         return {"rows": list(rows),
                 "columns": ["goal", "good", "friction", "unlabeled"],
                 "available": bool(rows),
@@ -1639,6 +1709,7 @@ class Engine:
                     "pulse.objective_friction_min_samples"))
             self.portrait = _portrait_mod.Portrait(
                 retain_days=int(merged.get("observation.retain_days", 90)))
+            self._portrait_r_backend = None
 
 
 # -- process singleton ------------------------------------------------------

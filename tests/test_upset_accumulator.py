@@ -169,6 +169,27 @@ def test_turn_boundary_steps_previous_turn():
     assert p["upset_turns"] == 2
 
 
+def test_reasoning_tool_attribution_roundtrip():
+    acc = _acc()
+    be = _enc()
+    # The attribution belongs to the PRIOR turn, which is finalized when
+    # the next turn key arrives (D1 tick semantics).
+    acc.on_reasoning_seg(_reasoning("t1", "The user is upset."), be,
+                         last_tool="vision_analyze")
+    acc.on_reasoning_seg(_reasoning("t2", "ok"), be,
+                         last_tool="terminal")
+    p = acc.payload("s1")
+    assert p["last_tool"] == "vision_analyze"
+    assert p["value"] > 0.0
+
+    conn = _meta_conn()
+    st = acc._sessions["s1"]
+    acc.persist_state(conn, ts=200.0, session_id="s1")
+    block = UpsetAccumulator.read_state(conn, now=201.0)
+    assert block is not None
+    assert block["last_tool"] == "vision_analyze"
+
+
 def test_session_switch_finalizes_previous():
     acc = _acc()
     be = _enc()
@@ -456,7 +477,7 @@ def test_engine_pulse_view_carries_upset_block(tmp_path, monkeypatch):
     assert "upset" in view
     assert view["upset"]["tier"] in (0, 1, 2)
     assert set(view["upset"].keys()) == {
-        "value", "tier", "upset_turns", "mood", "prognosis"}
+        "value", "tier", "upset_turns", "mood", "prognosis", "last_tool"}
 
 
 def test_engine_session_end_persists_mood(tmp_path, monkeypatch):

@@ -60,6 +60,18 @@ def test_friction_lane_user_entry_at_tier():
     assert e["objective"]["value"] is None   # an honest absence, never invented
 
 
+def test_friction_lane_tool_attribution_at_tier():
+    lanes = build_lanes(
+        _reg(), _Protos(),
+        upset={**_upset(), "last_tool": "vision_analyze"})
+    attributed = [e for e in lanes["friction"] if e.get("upset")]
+    assert len(attributed) == 1
+    e = attributed[0]
+    assert e["tool_name"] == "vision_analyze"
+    assert e["value"] == 0.8
+    assert e["tool_id"] == -1   # derived pseudo-row, not a registry tool
+
+
 def test_friction_lane_no_user_entry_below_tier():
     lanes = build_lanes(
         _reg(), _Protos(),

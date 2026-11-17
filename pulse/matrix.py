@@ -45,19 +45,19 @@ from .velocity import PULSE_VELOCITY_WINDOW_S
 DEFAULT_THRESHOLDS = {"goal": 0.8, "good": 0.6, "friction": 0.4}
 
 # P2 accumulate model: GOOD/FRICTION value is a 0-baseline call-accumulation,
-# now TIME-DECAYED. Each channel-matched recent capsule contributes a recency
-# weight exp(-ln2 * age / PULSE_VALUE_HALF_LIFE_S) that HALVES every
-# PULSE_VALUE_HALF_LIFE_S seconds; the value is the MEAN of those weights over
-# the matching capsules (0 when there is no bank or no matching call). So the
-# value decays on its own as capsules age: a tool that was active but is no
-# longer called fades toward 0 after a few half-lives. The count-based FIFO
-# deque alone would NOT decay (no new calls -> the matching capsules stay in
-# the deque -> the count is static), so recency (the capsules' own ts) is the
-# structural driver. This is a DATA decay clock (the capsules' ts + the
-# request's now), not a per-tool stateful clock: the pattern layer stays pure
-# + stateless. CONCRETE METRIC: a tool's value halves every
+# now TIME-DECAYED and SMOOTH. Each channel-matched capsule contributes a
+# continuous evidence weight (linear gate from the lane threshold up to
+# similarity 1) times a recency weight exp(-ln2 * age / PULSE_VALUE_HALF_LIFE_S)
+# that halves every half-life; the value is a SATURATING sum over the count
+# half-life ``1 - exp(-weighted / PULSE_ACCUM_HALF_LIFE)`` (3 effective calls
+# -> 0.31, 6 -> 0.53, 12 -> 0.78). Both gates are continuous, so the value
+# moves in bounded steps instead of jumping when one capsule crosses a hard
+# similarity threshold ("EMA movement preserved, no jumps" in the plan).
+# No bank / no channel evidence -> 0.0. This is a DATA decay clock (capsule
+# ts + request now), not a per-tool stateful clock: the pattern layer stays
+# pure + stateless. CONCRETE METRIC: an evidence weight halves every
 # PULSE_VALUE_HALF_LIFE_S -- 1h means 0.98 -> 0.49 after an hour, 0.25 after
-# two, ~0 after five.
+# two, ~0 after five. VALUE and CONFIDENCE stay decoupled.
 PULSE_VALUE_HALF_LIFE_S = 3600
 # Kept for the legacy saturation shape / call sites that still read a count
 # half-life (n=3 -> 0.31, n=6 -> 0.53 at 8). The time-decay above supersedes
@@ -119,46 +119,64 @@ def _required(prototypes, attr: str, legacy: int) -> int:
         return max(1, int(legacy))
 
 
-def _lane_accumulation(capsules, bank, threshold: float, half_life: int,
-                       now: float | None = None) -> float:
-    """P2 channel-gated call-accumulation (0-baseline), TIME-DECAYED.
+def _channel_gate(sim: float | None, threshold: float) -> float:
+    """Continuous channel gate in [0, 1].
 
-    Each channel-matched recent capsule contributes a recency weight
-    ``exp(-ln2 * age / PULSE_VALUE_HALF_LIFE_S)`` that halves every half-life;
-    the value is the MEAN of those weights over the matching capsules (0 when
-    there is no labeled bank or no matching call). So the value decays on its
-    own as the capsules age: a tool that was active but is no longer called
-    fades toward 0 after a few half-lives. This is a DATA decay clock (the
-    capsules' ts + the request's ``now``), not a per-tool stateful clock --
-    the pattern layer stays pure + stateless. Falls back to the legacy
-    count-saturated shape when ``now`` is None.
+    0 at/below the lane threshold (absence of channel evidence), rising
+    linearly to 1 at similarity 1. A HARD `sim >= threshold` include/exclude
+    made the old accumulation jump by a whole capsule the moment one crossed
+    the gate; this keeps the value continuous in the evidence itself.
+    """
+    if sim is None:
+        return 0.0
+    headroom = max(1e-6, 1.0 - float(threshold))
+    return max(0.0, min(1.0, (float(sim) - float(threshold)) / headroom))
+
+
+def _lane_weights(capsules, bank, threshold: float,
+                  now: float | None = None) -> float:
+    """Raw evidence weight for one channel (the input to saturation).
+
+    Continuous channel gate (0 at/below threshold -> 1 at similarity 1)
+    times the capsule's recency weight. Shared by the single-channel
+    accumulation and by the GOOD/FRICTION budget split so both use the exact
+    same evidence calculation.
     """
     if not bank:
         return 0.0
-    matching = []
+    weighted = 0.0
     for capsule in capsules:
         vector = capsule.get("vector") if isinstance(capsule, dict) else None
         if not vector:
             continue
-        sim = strongest_similarity(vector, bank)
-        if sim is not None and sim >= threshold:
-            matching.append(capsule)
-    if not matching:
-        return 0.0
-    if now is None:
-        # Legacy count-saturated shape (no time-decay).
-        n = len(matching)
-        return round(1.0 - math.exp(-n / max(1, int(half_life))), 4)
-    # Time-decay: mean recency weight over the matching capsules.
-    hl = max(1.0, float(PULSE_VALUE_HALF_LIFE_S))
-    ln2 = math.log(2.0)
-    weighted = 0.0
-    for capsule in matching:
-        ts = capsule.get("ts")
-        age = max(0.0, float(now) - float(ts)) if ts is not None else 0.0
-        weighted += math.exp(-ln2 * age / hl)
-    return round(min(1.0, weighted / len(matching)), 4)
+        gate = _channel_gate(strongest_similarity(vector, bank), threshold)
+        if gate <= 0.0:
+            continue
+        if now is None:
+            weighted += gate
+        else:
+            ts = capsule.get("ts")
+            age = max(0.0, float(now) - float(ts)) if ts is not None else 0.0
+            hl = max(1.0, float(PULSE_VALUE_HALF_LIFE_S))
+            weighted += gate * math.exp(-math.log(2.0) * age / hl)
+    return weighted
 
+
+def _lane_accumulation(capsules, bank, threshold: float, half_life: int,
+                       now: float | None = None) -> float:
+    """P2 channel-gated call-accumulation: SMOOTH, time-decayed, 0-baseline.
+
+    Saturating accumulation ``1 - exp(-weight / half_life)`` of the evidence
+    from :func:`_lane_weights` — 3 effective calls -> 0.31, 6 -> 0.53,
+    12 -> 0.78, matching the documented P2 metric. Kept as the single-channel
+    helper (used by the objective hint); GOOD/USER-FRICTION share a budget in
+    build_lanes and derive their values from the same weights.
+    """
+    weighted = _lane_weights(capsules, bank, threshold, now)
+    if weighted <= 0.0:
+        return 0.0
+    return round(min(1.0, 1.0 - math.exp(
+        -weighted / max(1.0, float(half_life)))), 4)
 
 # -- v8 vector-space compatibility gate (single authoritative path) ---- #
 # Two embedding spaces never compare: a goal vector from encoder A
@@ -589,18 +607,35 @@ def build_lanes(registry, prototypes, session_state=None,
         })
         good_scored, good_supported = _gated_bank(tool, prototypes, "good",
                                                    vector_space)
+        # P2 contra-verse: GOOD and USER-FRICTION are computed from the SAME
+        # capsule window and share one evidence budget (below). Both banks
+        # must be in scope before either value is derived.
+        user_scored, user_supported = _gated_bank(
+            tool, prototypes, "friction", vector_space)
+        obj_scored, obj_supported = _gated_bank(
+            tool, prototypes, "objective_friction", vector_space)
         good_count = len(bank["good"])  # raw evidence fact
+        user_count = len(user_supported)
+        obj_count = len(obj_supported)
         good_similarity = _floor(strongest_similarity(goal_vector, good_scored))
-        # P2: display value = channel-gated accumulation (recent calls that
-        # resemble this tool's own labeled good bank). VALUE (how valuable the
-        # tool's activity is) and CONFIDENCE (how much evidence supports it --
-        # the bank's support below) are DECOUPLED: a few calls above the floor
-        # reach a valuable score even on a thin bank; the confidence is a
-        # separate field, never multiplied into the value. The single-prompt
-        # similarity stays the `similarity` field.
-        good_value = round(
-            _lane_accumulation(capsules, good_scored, thr["good"],
-                               PULSE_ACCUM_HALF_LIFE, now_ts), 4)
+        # P2 contra-verse: each lane's value is its SHARE of the total
+        # good+friction evidence, scaled by an absolute activation from that
+        # total. A capsule can match both banks (tier-0 vectors are similar),
+        # so independent saturating sums let one tool read 0.9+ in BOTH lanes.
+        # Sharing the budget keeps them opposed and leaves headroom for the
+        # share to move as real feedback lands. With one channel empty this
+        # reduces exactly to the documented 1-exp(-n/half_life) accumulation.
+        good_w = _lane_weights(capsules, good_scored, thr["good"], now_ts)
+        fric_w = _lane_weights(capsules, user_scored, thr["friction"], now_ts)
+        total_w = good_w + fric_w
+        if total_w > 0.0:
+            activation = 1.0 - math.exp(
+                -total_w / max(1.0, float(PULSE_ACCUM_HALF_LIFE)))
+            good_value = round(activation * (good_w / total_w), 4)
+            user_hint = round(activation * (fric_w / total_w), 4)
+        else:
+            good_value = 0.0
+            user_hint = 0.0
         good.append({
             "tool_id": tid, "tool_name": tool, "rank": 0,
             "value": good_value, "threshold": thr["good"],
@@ -610,12 +645,6 @@ def build_lanes(registry, prototypes, session_state=None,
             "similarity": good_similarity,
             "evidence_source": "good_prototypes" if good_count else "none",
         })
-        user_scored, user_supported = _gated_bank(
-            tool, prototypes, "friction", vector_space)
-        obj_scored, obj_supported = _gated_bank(
-            tool, prototypes, "objective_friction", vector_space)
-        user_count = len(user_supported)
-        obj_count = len(obj_supported)
         user_value = _floor(strongest_similarity(goal_vector,
                                                  user_scored))
         obj_value = _floor(strongest_similarity(
@@ -637,17 +666,10 @@ def build_lanes(registry, prototypes, session_state=None,
                 has_goal,
                 user_count if dominant == "user" else obj_count,
                 user_fric_req if dominant == "user" else obj_fric_req)
-        # P2 balancer: the friction DISPLAY value is the USER-labeled friction
-        # accumulation only. Objective friction (a thin system-detected signal)
-        # is a SEPARATE capped hint that can never read "strong" and is never
-        # summed into the value -- honoring the module invariant ("never
-        # conflated"). VALUE and CONFIDENCE are DECOUPLED: the bank's support
-        # is a separate field, never multiplied into value, so a few calls
-        # above the floor still reach a valuable score on a thin bank. Without
-        # user labels the value is 0.0.
-        user_acc = _lane_accumulation(
-            capsules, user_scored, thr["friction"], PULSE_ACCUM_HALF_LIFE, now_ts)
-        user_hint = round(user_acc, 4)
+        # P2 balancer: OBJECTIVE friction stays a SEPARATE capped hint that
+        # can never read 'strong' and is never summed into the user-friction
+        # display value -- the module invariant ("never conflated").
+        # user_hint was derived from the shared good/friction budget above.
         obj_acc = _lane_accumulation(
             capsules, obj_scored, thr["friction"], PULSE_ACCUM_HALF_LIFE, now_ts)
         obj_hint = round(min(obj_acc, PULSE_OBJ_HINT_CAP), 4)
@@ -712,8 +734,15 @@ def build_lanes(registry, prototypes, session_state=None,
         up_value = round(
             min(1.0, max(0.0, float(upset.get("value") or 0.0))), 4)
         up_turns = int(upset.get("upset_turns") or 0)
+        # (a) attribution: land the reasoning-narrated friction on the tool
+        # that was active when the reasoning arrived. Legacy mirrors have
+        # no last_tool -> keep the global "user" pseudo-row (c).
+        attributed = upset.get("last_tool")
+        up_tool = (str(attributed)
+                   if isinstance(attributed, str) and attributed
+                   and attributed != "user" else "user")
         friction.append({
-            "tool_id": -1, "tool_name": "user", "rank": 0,
+            "tool_id": -1, "tool_name": up_tool, "rank": 0,
             "value": up_value, "threshold": thr["friction"],
             "level": _level(up_value, thr["friction"]),
             "state": _state(True, up_turns, 1),

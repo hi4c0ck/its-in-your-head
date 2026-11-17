@@ -255,6 +255,8 @@ class UpsetAccumulator:
         if st is None:
             st = {"window": deque(maxlen=UPSET_WINDOW),
                   "reasoning": {},
+                  "tool_by_turn": {},
+                  "last_tool": None,
                   "last_turn": None,
                   "last_ts": now,
                   "upset_turns": 0}
@@ -300,7 +302,8 @@ class UpsetAccumulator:
     # -- event feeds (engine call sites; each fault-isolated upstream) ------ #
     def on_reasoning_seg(self, ev: dict, backend,
                          backend_name: str | None = None,
-                         now: float | None = None) -> bool:
+                         now: float | None = None,
+                         last_tool: str | None = None) -> bool:
         """Buffer one reasoning segment for its turn; finalize the
         PREVIOUS turn when the turn key advances (D1: the accumulator
         ticks once per LLM response, not per stream chunk).
@@ -319,7 +322,11 @@ class UpsetAccumulator:
         stepped = False
         if last is not None and key != last:
             # Turn boundary: score the previous response now (its text
-            # is complete), then start the new turn's buffer.
+            # is complete), then start the new turn's buffer. Attribution
+            # is to the tool that was active when that reasoning arrived.
+            st.setdefault("tool_by_turn", {})
+            st["last_tool"] = (st["tool_by_turn"].get(last)
+                               or st.get("last_tool"))
             self._step(st, self.score_reasoning(
                 st["reasoning"].get(last) or "", backend, backend_name))
             st["reasoning"] = {}
@@ -328,6 +335,8 @@ class UpsetAccumulator:
             st["reasoning"][key] = (
                 st["reasoning"].get(key, "") + " " + text)[:REASONING_CAP_CHARS]
         st["reasoning"].setdefault(key, "")
+        if isinstance(last_tool, str) and last_tool:
+            st.setdefault("tool_by_turn", {})[key] = last_tool
         st["last_turn"] = key
         return stepped
 
@@ -538,6 +547,7 @@ class UpsetAccumulator:
                 "upset_turns": turns,
                 "ts": ts if ts is not None else _time.time(),
                 "session_id": sid,
+                "last_tool": (st.get("last_tool") if st else None),
             }
             conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -574,12 +584,17 @@ class UpsetAccumulator:
         now_ts = float(now) if now is not None else _time.time()
         window: list[float] = []
         turns = 0
+        last_tool = None
         if frow and frow[0]:
             try:
                 fs = json.loads(frow[0])
                 if now_ts - float(fs.get("ts") or 0.0) <= SESSION_TTL_S:
                     window = [float(s) for s in (fs.get("window") or [])]
                     turns = int(fs.get("upset_turns") or 0)
+                    raw_tool = fs.get("last_tool")
+                    last_tool = (str(raw_tool)
+                                 if isinstance(raw_tool, str) and raw_tool
+                                 else None)
             except Exception:
                 window, turns = [], 0
         mood = MOOD_NEUTRAL
@@ -603,6 +618,7 @@ class UpsetAccumulator:
             "upset_turns": turns,
             "mood": round(mood, 4),
             "prognosis": prognosis_from_history(history),
+            "last_tool": last_tool,
         }
 
     # -- read-time prognosis (D6: the forecast, computed on demand) --------- #
@@ -629,6 +645,7 @@ class UpsetAccumulator:
             "upset_turns": st["upset_turns"] if st is not None else 0,
             "mood": round(self.M, 4),
             "prognosis": self.prognosis(),
+            "last_tool": (st.get("last_tool") if st is not None else None),
         }
 
     def view(self, session_id: str | None = None,
