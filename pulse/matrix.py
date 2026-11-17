@@ -45,19 +45,19 @@ from .velocity import PULSE_VELOCITY_WINDOW_S
 DEFAULT_THRESHOLDS = {"goal": 0.8, "good": 0.6, "friction": 0.4}
 
 # P2 accumulate model: GOOD/FRICTION value is a 0-baseline call-accumulation,
-# now TIME-DECAYED. Each channel-matched recent capsule contributes a recency
-# weight exp(-ln2 * age / PULSE_VALUE_HALF_LIFE_S) that HALVES every
-# PULSE_VALUE_HALF_LIFE_S seconds; the value is the MEAN of those weights over
-# the matching capsules (0 when there is no bank or no matching call). So the
-# value decays on its own as capsules age: a tool that was active but is no
-# longer called fades toward 0 after a few half-lives. The count-based FIFO
-# deque alone would NOT decay (no new calls -> the matching capsules stay in
-# the deque -> the count is static), so recency (the capsules' own ts) is the
-# structural driver. This is a DATA decay clock (the capsules' ts + the
-# request's now), not a per-tool stateful clock: the pattern layer stays pure
-# + stateless. CONCRETE METRIC: a tool's value halves every
+# now TIME-DECAYED and SMOOTH. Each channel-matched capsule contributes a
+# continuous evidence weight (linear gate from the lane threshold up to
+# similarity 1) times a recency weight exp(-ln2 * age / PULSE_VALUE_HALF_LIFE_S)
+# that halves every half-life; the value is a SATURATING sum over the count
+# half-life ``1 - exp(-weighted / PULSE_ACCUM_HALF_LIFE)`` (3 effective calls
+# -> 0.31, 6 -> 0.53, 12 -> 0.78). Both gates are continuous, so the value
+# moves in bounded steps instead of jumping when one capsule crosses a hard
+# similarity threshold ("EMA movement preserved, no jumps" in the plan).
+# No bank / no channel evidence -> 0.0. This is a DATA decay clock (capsule
+# ts + request now), not a per-tool stateful clock: the pattern layer stays
+# pure + stateless. CONCRETE METRIC: an evidence weight halves every
 # PULSE_VALUE_HALF_LIFE_S -- 1h means 0.98 -> 0.49 after an hour, 0.25 after
-# two, ~0 after five.
+# two, ~0 after five. VALUE and CONFIDENCE stay decoupled.
 PULSE_VALUE_HALF_LIFE_S = 3600
 # Kept for the legacy saturation shape / call sites that still read a count
 # half-life (n=3 -> 0.31, n=6 -> 0.53 at 8). The time-decay above supersedes
@@ -119,46 +119,63 @@ def _required(prototypes, attr: str, legacy: int) -> int:
         return max(1, int(legacy))
 
 
+def _channel_gate(sim: float | None, threshold: float) -> float:
+    """Continuous channel gate in [0, 1].
+
+    0 at/below the lane threshold (absence of channel evidence), rising
+    linearly to 1 at similarity 1. A HARD `sim >= threshold` include/exclude
+    made the old accumulation jump by a whole capsule the moment one crossed
+    the gate; this keeps the value continuous in the evidence itself.
+    """
+    if sim is None:
+        return 0.0
+    headroom = max(1e-6, 1.0 - float(threshold))
+    return max(0.0, min(1.0, (float(sim) - float(threshold)) / headroom))
+
+
 def _lane_accumulation(capsules, bank, threshold: float, half_life: int,
                        now: float | None = None) -> float:
-    """P2 channel-gated call-accumulation (0-baseline), TIME-DECAYED.
+    """P2 channel-gated call-accumulation: SMOOTH, time-decayed, 0-baseline.
 
-    Each channel-matched recent capsule contributes a recency weight
-    ``exp(-ln2 * age / PULSE_VALUE_HALF_LIFE_S)`` that halves every half-life;
-    the value is the MEAN of those weights over the matching capsules (0 when
-    there is no labeled bank or no matching call). So the value decays on its
-    own as the capsules age: a tool that was active but is no longer called
-    fades toward 0 after a few half-lives. This is a DATA decay clock (the
-    capsules' ts + the request's ``now``), not a per-tool stateful clock --
-    the pattern layer stays pure + stateless. Falls back to the legacy
-    count-saturated shape when ``now`` is None.
+    Each channel-matched capsule contributes a continuous evidence weight
+    ``_channel_gate(similarity, threshold)`` multiplied by a recency weight
+    ``exp(-ln2 * age / PULSE_VALUE_HALF_LIFE_S)`` (halves every half-life).
+    The value is a SATURATING accumulation of those weights over the count
+    scale ``1 - exp(-weighted / PULSE_ACCUM_HALF_LIFE)`` — 3 effective calls
+    -> 0.31, 6 -> 0.53, 12 -> 0.78, matching the documented P2 metric.
+
+    Both the evidence gate and the decay are CONTINUOUS, so the value moves
+    in bounded steps as similarity or time changes instead of jumping when a
+    capsule crosses a hard threshold. This is the "EMA movement preserved,
+    no jumps" requirement from the accumulate model. It stays pure/stateless:
+    only capsule ts + the request's `now` drive decay.
+
+    VALUE and CONFIDENCE remain decoupled: bank support is reported
+    separately and never multiplies into this value. No matching bank or no
+    channel evidence -> 0.0 (the 0-baseline).
     """
     if not bank:
         return 0.0
-    matching = []
+    weighted = 0.0
     for capsule in capsules:
         vector = capsule.get("vector") if isinstance(capsule, dict) else None
         if not vector:
             continue
-        sim = strongest_similarity(vector, bank)
-        if sim is not None and sim >= threshold:
-            matching.append(capsule)
-    if not matching:
+        gate = _channel_gate(strongest_similarity(vector, bank), threshold)
+        if gate <= 0.0:
+            continue
+        if now is None:
+            weighted += gate  # legacy count shape, now continuous in sim
+        else:
+            ts = capsule.get("ts")
+            age = max(0.0, float(now) - float(ts)) if ts is not None else 0.0
+            hl = max(1.0, float(PULSE_VALUE_HALF_LIFE_S))
+            weighted += gate * math.exp(
+                -math.log(2.0) * age / hl)
+    if weighted <= 0.0:
         return 0.0
-    if now is None:
-        # Legacy count-saturated shape (no time-decay).
-        n = len(matching)
-        return round(1.0 - math.exp(-n / max(1, int(half_life))), 4)
-    # Time-decay: mean recency weight over the matching capsules.
-    hl = max(1.0, float(PULSE_VALUE_HALF_LIFE_S))
-    ln2 = math.log(2.0)
-    weighted = 0.0
-    for capsule in matching:
-        ts = capsule.get("ts")
-        age = max(0.0, float(now) - float(ts)) if ts is not None else 0.0
-        weighted += math.exp(-ln2 * age / hl)
-    return round(min(1.0, weighted / len(matching)), 4)
-
+    return round(min(1.0, 1.0 - math.exp(
+        -weighted / max(1.0, float(half_life)))), 4)
 
 # -- v8 vector-space compatibility gate (single authoritative path) ---- #
 # Two embedding spaces never compare: a goal vector from encoder A

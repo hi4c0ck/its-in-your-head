@@ -30,8 +30,37 @@ values and real drift — it does not invent larger swings.
    those same real functions in the same order (after enqueue, before the
    worker feed), so explicit "thanks" / "still broken" cores label the real
    prototype banks. With a realistic 40 s/turn cadence ending at "now", the
-   1 h accumulation half-life yields graded lane values (0.5–0.8), not 0/1.
+   1 h accumulation half-life yields graded lane values (0.5–0.9), not 0/1.
    Gate: `test_explicit_feedback_drives_good_and_friction_lanes`.
+3. **ENGINE FIX — gapped GOOD/FRICTION values.** `_lane_accumulation` used a
+   HARD `similarity >= threshold` include/exclude plus a MEAN over the matching
+   capsules, so one capsule crossing the gate moved the lane by a whole step
+   (the "0.6–0.7 gaps"), while GOAL's cosine similarity moved smoothly.
+   It now uses a continuous channel gate (0 at threshold → 1 at sim 1) times
+   the recency weight, accumulated as `1 - exp(-weighted / half_life)` —
+   the smooth saturating model the accumulate plan specified ("EMA movement
+   preserved, no jumps"). 3/6/12 effective calls → 0.31/0.53/0.78. Value and
+   confidence remain decoupled; objective hint stays capped and separate.
+   Gates: updated `test_pulse_lanes.py` expectations + new
+   `test_good_friction_values_are_continuous_no_jumps` (similarity and age
+   sweeps, monotone with bounded steps).
+
+## Speedrun mode (forced engine poll times)
+
+`Engine.pulse_view(now=...)` is an optional data clock (production path keeps
+wall time). The harness uses it to force real engine polls at chosen virtual
+times after each turn:
+
+```bash
+$PY -m tests.metrics_emulation.cli --all --turns 80 --speedrun
+$PY -m tests.metrics_emulation.cli --story friction-recovery --speedrun \
+    --poll-offsets 0,0.6,0.85,2,1800,3600
+```
+
+`0,0.6,0.85,2` mirror the pane's poll/reducer/travel/arrival timing; larger
+offsets (1800/3600) expose half-life decay deterministically. Each turn's
+`polls` array in the JSON records `goal/good/friction/upset` at every forced
+poll. Gate: `test_speedrun_forces_engine_polls_at_chosen_times`.
 
 ## Run
 

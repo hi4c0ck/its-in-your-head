@@ -1370,7 +1370,14 @@ class Engine:
             space["dim"] = len(self._goal_vector)
         return space
 
-    def pulse_view(self) -> dict:
+    def pulse_view(self, now: float | None = None) -> dict:
+        """Authoritative PULSE projection.
+
+        ``now`` is an OPTIONAL data clock for deterministic replay / speedrun
+        emulation: it drives capsule decay, event-rate velocity and the lane
+        accumulation at a caller-chosen instant. ``None`` (the production
+        path) keeps using wall time, byte-identical to before.
+        """
         self.ensure_pulse_hydrated()
         self._hydrate_upset_mood()
         thr = {k: v for k, v in self._thresholds.items() if v is not None}
@@ -1391,7 +1398,8 @@ class Engine:
             try:
                 _mig.schema_bootstrap(vconn)
                 event_rates = _pulse_velocity.event_velocity(
-                    vconn, window_s=_pulse_velocity.PULSE_VELOCITY_WINDOW_S)
+                    vconn, now_ts=now,
+                    window_s=_pulse_velocity.PULSE_VELOCITY_WINDOW_S)
             finally:
                 vconn.close()
         except Exception:
@@ -1420,7 +1428,7 @@ class Engine:
         # comes from the SAME inputs (one scoring path — the
         # dashboard's rows->lanes mirror stays a compatibility
         # fallback for pre-v0.1.10 engine responses only).
-        lanes = _pulse_matrix.build_lanes(**common)
+        lanes = _pulse_matrix.build_lanes(**common, now=now)
         return {"rows": list(rows),
                 "columns": ["goal", "good", "friction", "unlabeled"],
                 "available": bool(rows),

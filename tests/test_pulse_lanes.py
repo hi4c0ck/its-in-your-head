@@ -229,28 +229,29 @@ def test_good_friction_value_is_channel_gated_accumulation():
     hl = float(PULSE_VALUE_HALF_LIFE_S)
     ln2 = math.log(2.0)
 
-    # A matching capsule's recency weight = exp(-ln2 * age / half_life); the
-    # lane value = the MEAN of the matching capsules' weights (capped at 1.0).
+    # A matching capsule contributes a continuous evidence weight (sim=1.0
+    # -> gate 1.0 for both lanes) times a recency weight; the value is a
+    # SATURATING accumulation over the count half-life (3 -> 0.31, 6 -> 0.53).
     # No matching calls -> 0.0 (the 0-baseline).
-    def _val(age_s, matching):
+    def _val(age_s, matching, n=3, gate=1.0):
         if not matching:
             return 0.0
-        return round(min(1.0, math.exp(-ln2 * max(0.0, age_s) / hl)), 4)
+        weight = gate * math.exp(-ln2 * max(0.0, age_s) / hl)
+        return round(1.0 - math.exp(-(n * weight) / 8.0), 4)
 
-    # 3 FRESH calls matching the good bank (cos 1.0 >= 0.6, ts == now): the
-    # value is the mean recency weight = 1.0 (no decay, the "valuable score").
+    # 3 FRESH calls matching the good bank (cos 1.0): value ~0.31.
     good_caps = [{"vector": [1.0, 0.0], "ts": now} for _ in range(3)]
     lanes = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
                         capsules_by_tool={"browser": good_caps}, now=now)
     good = next(e for e in lanes["good"] if e["tool_name"] == "browser")
-    assert good["value"] == _val(0.0, True)          # 1.0 (fresh)
+    assert good["value"] == _val(0.0, True)          # 0.3133 (3 fresh calls)
     assert good["similarity"] == 1.0                 # preserved sub-field
-    # Aged (ts = now - 2*half_life): the value decays (weight = 0.25).
+    # Aged (ts = now - 2*half_life): the value decays smoothly.
     aged_caps = [{"vector": [1.0, 0.0], "ts": now - 2 * hl} for _ in range(3)]
     lanes_a = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
                           capsules_by_tool={"browser": aged_caps}, now=now)
     good_a = next(e for e in lanes_a["good"] if e["tool_name"] == "browser")
-    assert good_a["value"] == _val(2 * hl, True)     # 0.25 (decayed)
+    assert good_a["value"] == _val(2 * hl, True)     # decayed, below fresh
     assert good_a["value"] < good["value"]            # structural decay
 
     # Quality gate: no labeled good bank -> nothing accumulates (0.0).
@@ -269,14 +270,14 @@ def test_good_friction_value_is_channel_gated_accumulation():
                          now=now)
     assert dissim["good"][0]["value"] == 0.0
     # ...but DO accumulate for FRICTION (match the friction bank, 0.4 gate).
-    assert dissim["friction"][0]["value"] == _val(0.0, True)  # 1.0 (fresh)
+    assert dissim["friction"][0]["value"] == _val(0.0, True)  # 3 fresh calls
 
     # Friction accumulation: 4 FRESH calls matching the friction bank.
     fric_caps = [{"vector": [0.0, 1.0], "ts": now} for _ in range(4)]
     lanesf = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
                          capsules_by_tool={"browser": fric_caps}, now=now)
     fr = next(e for e in lanesf["friction"] if e["tool_name"] == "browser")
-    assert fr["value"] == _val(0.0, True)            # 1.0 (fresh)
+    assert fr["value"] == _val(0.0, True, n=4)        # saturating, 4 calls
     assert fr["similarity"] is not None  # objective/user sim sub-field kept
 
 
@@ -296,23 +297,24 @@ def test_value_decoupled_from_confidence():
     ln2 = math.log(2.0)
 
     # Thin GOOD bank (1 sample -> confidence 1/3) + 8 matching FRESH capsules
-    # (ts == now): the value is the mean recency weight = 1.0. It is NOT
+    # (ts == now): SMOOTH saturation 1-exp(-8/8) = 0.6321. It is NOT
     # capped by the thin confidence -- value != confidence.
     thin = _FakeProtos({"browser": {"good": [[1.0, 0.0]], "friction": [],
                                     "objective_friction": []}})
     fresh = [{"vector": [1.0, 0.0], "ts": now} for _ in range(8)]
     g = build_lanes(reg, thin, goal_vector=[1.0, 0.0],
                     capsules_by_tool={"browser": fresh}, now=now)["good"][0]
-    assert g["value"] == 1.0                        # fresh -> full score
+    assert abs(g["value"] - round(1.0 - math.exp(-1.0), 4)) < 1e-3  # 0.6321
     assert g["level"] == "strong"
     assert g["support"]["count"] == 1
     assert abs(g["support"]["ratio"] - 1.0 / 3.0) < 1e-3  # confidence, separate
 
-    # Aged capsules (ts = now - half_life): each weight halves -> mean 0.5.
+    # Aged capsules (ts = now - half_life): each weight halves -> weighted 4
+    # -> value 1-exp(-4/8) = 0.3935 (smooth decay below fresh).
     aged = [{"vector": [1.0, 0.0], "ts": now - hl} for _ in range(8)]
     ga = build_lanes(reg, thin, goal_vector=[1.0, 0.0],
                      capsules_by_tool={"browser": aged}, now=now)["good"][0]
-    assert ga["value"] == round(min(1.0, math.exp(-ln2 * hl / hl)), 4)  # 0.5
+    assert abs(ga["value"] - round(1.0 - math.exp(-0.5), 4)) < 1e-3  # 0.3935
     assert ga["value"] < g["value"]                 # decay: aged < fresh
 
     # No matching calls -> 0.0 (the 0-baseline), decoupled from confidence.
@@ -335,6 +337,41 @@ def test_value_decoupled_from_confidence():
     assert f["user_accumulation"] == 0.0
     assert 0.0 < f["objective_hint"] <= 0.30            # capped hint
     assert f["objective_hint"] < 0.4                     # never 'strong'
+
+
+def test_good_friction_values_are_continuous_no_jumps():
+    """ENGINE regression: the lane value must move smoothly with evidence.
+
+    The old hard-gated MEAN jumped a full capsule the moment similarity
+    crossed the threshold. The smooth saturating accumulation must change in
+    bounded increments as similarity or age changes continuously.
+    """
+    reg = _FakeRegistry([_row("browser", 7)])
+    protos = _FakeProtos({
+        "browser": {"good": [[1.0, 0.0]] * 3, "friction": [],
+                    "objective_friction": []}})
+    now = 1_000_000.0
+
+    def value(sim, age):
+        caps = [{"vector": [1.0, 0.0], "ts": now},
+                {"vector": [1.0, 0.0], "ts": now},
+                {"vector": [sim, max(0.0, 1.0 - sim)], "ts": now - age}]
+        lanes = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
+                            capsules_by_tool={"browser": caps}, now=now)
+        return next(e for e in lanes["good"] if e["tool_name"] == "browser")["value"]
+
+    # Similarity sweep 0.61 -> 1.0 (just above the 0.6 gate to full match).
+    sims = [0.61 + i * 0.05 for i in range(9)]
+    vals = [value(s, 0.0) for s in sims]
+    assert all(b >= a for a, b in zip(vals, vals[1:])), vals  # monotone
+    assert max(b - a for a, b in zip(vals, vals[1:])) < 0.05, vals  # bounded
+
+    # Age sweep 0 -> 2 half-lives in 15 steps: smooth decay, no step jump.
+    from pulse.matrix import PULSE_VALUE_HALF_LIFE_S
+    ages = [i * 2.0 * PULSE_VALUE_HALF_LIFE_S / 15 for i in range(16)]
+    aged = [value(1.0, a) for a in ages]
+    assert all(b <= a for a, b in zip(aged, aged[1:])), aged
+    assert max(a - b for a, b in zip(aged, aged[1:])) < 0.05, aged
 
 
 def test_goal_and_good_reach_ready_independently():

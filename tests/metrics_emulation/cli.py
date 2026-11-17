@@ -25,6 +25,10 @@ def main(argv=None):
     p.add_argument("--seed", type=int, default=8117, help="deterministic seed")
     p.add_argument("--out", type=Path, default=DEFAULT_OUT, help="output directory")
     p.add_argument("--purge", action="store_true", help="delete generated run JSON files")
+    p.add_argument("--speedrun", action="store_true",
+                   help="force engine polls at the given virtual offsets")
+    p.add_argument("--poll-offsets", default="0,0.6,0.85,2",
+                   help="comma-separated seconds after each turn for speedrun polls")
     a = p.parse_args(argv)
 
     if a.purge:
@@ -38,10 +42,13 @@ def main(argv=None):
         print("purged %d run file(s) from %s" % (removed, a.out))
         return 0
 
+    offsets = tuple(float(x) for x in a.poll_offsets.split(",") if x.strip()) \
+        if a.speedrun else ()
     ids = stories.STORY_ORDER if a.all else [a.story or stories.STORY_ORDER[0]]
     for sid in ids:
         t0 = time.perf_counter()
-        run = harness.run_story(sid, turns=a.turns, seed=a.seed)
+        run = harness.run_story(sid, turns=a.turns, seed=a.seed,
+                                poll_offsets=offsets)
         path = harness.write_run(run, a.out)
         s = run["summary"]
         print("%-24s %3d turns  %2d corners  %s  span=%.3f  drift=%.3f  Fpeak=%.4f  %.1fs -> %s"

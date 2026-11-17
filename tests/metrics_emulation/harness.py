@@ -44,8 +44,14 @@ def _engine_block_sha() -> str:
 
 
 def run_story(story_id: str, turns: int = 80, seed: int = 8117,
-              include_provenance: bool = True, clock_base: float | None = None) -> dict:
-    """Run one story through the real engine and return the run dict."""
+              include_provenance: bool = True, clock_base: float | None = None,
+              poll_offsets: tuple[float, ...] = ()) -> dict:
+    """Run one story through the real engine and return the run dict.
+
+    ``poll_offsets`` enables speedrun mode: at each virtual turn the real
+    ``Engine.pulse_view(now=...)`` is forced at those offsets, so poll/decay
+    can be replayed at chosen times instead of following wall time.
+    """
     if story_id not in stories.STORIES:
         raise ValueError("unknown story: " + story_id)
     turns = max(1, min(100, int(turns)))
@@ -76,6 +82,8 @@ def run_story(story_id: str, turns: int = 80, seed: int = 8117,
                    for p in story["phases"]],
         "corners": [],
         "turns": [],
+        "speedrun": {"enabled": bool(poll_offsets),
+                     "poll_offsets": [float(o) for o in poll_offsets]},
     }
 
     with tempfile.TemporaryDirectory(prefix="iyyh-emul-") as td:
@@ -122,11 +130,30 @@ def run_story(story_id: str, turns: int = 80, seed: int = 8117,
 
                 eng.on_events(batch)
 
+                # Speedrun: force the REAL engine poll at chosen virtual times.
+                # This is the engine-side clock seam (Engine.pulse_view(now=)),
+                # so decay/velocity/arrival are replayed deterministically.
+                polls = []
+                for offset in poll_offsets:
+                    pv = eng.pulse_view(now=ts + float(offset))
+                    def top(lane):
+                        vals = [e.get("value") for e in (pv["lanes"].get(lane) or [])
+                                if isinstance(e.get("value"), (int, float))]
+                        return max(vals) if vals else None
+                    polls.append({
+                        "at": float(offset),
+                        "goal": top("goal"), "good": top("good"),
+                        "friction": top("friction"),
+                        "upset": (pv.get("upset") or {}).get("value"),
+                    })
+
                 portrait = schema.extract_portrait(eng.portrait_view())
                 drift = schema.extract_drift(eng.drift_view())
-                pulse = schema.extract_pulse(eng.pulse_view())
+                pulse = schema.extract_pulse(
+                    eng.pulse_view(now=ts) if poll_offsets else eng.pulse_view())
                 turn_rec = {
                     "i": i,
+                    "polls": polls,
                     "phase": phase["id"],
                     "event_summary": {"tools": [tool], "status": status,
                                       "prompt_core": prompt},

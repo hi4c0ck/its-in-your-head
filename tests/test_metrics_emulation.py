@@ -74,6 +74,18 @@ def test_explicit_feedback_drives_good_and_friction_lanes():
     assert "detect_feedback(prompt)" in src
 
 
+def test_speedrun_forces_engine_polls_at_chosen_times():
+    r = harness.run_story("friction-recovery", turns=12, seed=5,
+                          poll_offsets=(0.0, 0.6, 0.85, 2.0))
+    assert r["speedrun"]["enabled"] is True
+    assert r["speedrun"]["poll_offsets"] == [0.0, 0.6, 0.85, 2.0]
+    assert len(r["turns"][0]["polls"]) == 4
+    assert [p["at"] for p in r["turns"][0]["polls"]] == [0.0, 0.6, 0.85, 2.0]
+    engine_src = (ROOT / "engine.py").read_text(encoding="utf-8")
+    assert "def pulse_view(self, now: float | None = None)" in engine_src
+    assert "build_lanes(**common, now=now)" in engine_src
+
+
 def test_story_prompts_come_from_repo_vocabulary():
     import sys
     if str(ROOT) not in sys.path:
