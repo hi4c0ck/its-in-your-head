@@ -51,7 +51,16 @@ DEFAULT_RETAIN_DAYS = 90  # mirrors core/settings.py DEFAULTS; read via C4 key
 ALPHA_MAX = 0.55         # alpha_{d,t} = ALPHA_MAX * Q_{d,t}  (confidence-gated speed)
 DELTA_MAX = 0.18         # hard per-observation step cap per dimension
 CONF_BETA = 0.25         # displayed (session) confidence EMA: Qs=(1-b)*Qs+b*Q
-STRONG_R_DEFAULT = 0.5   # default per-dimension strong-contrast threshold r_d
+# Calibration note (2026-11-17): r_d is the per-dimension STRONG-contrast
+# threshold on the S2 contrast R_d = S_d - C_d. Measured live/emulated
+# |R_d| is ~0.005-0.09 (the anchors are correlated, so the difference is
+# small). With r_d = 0.5 almost every observation read as weak: Q = |R|/r
+# ~0.01-0.18 and T = 0.5 + R/(2r) stayed within ~0.47-0.59, so alpha *
+# (T-V) was ~0.002 per turn and the portrait barely moved. r_d = 0.15
+# (~2x the observed scale) makes a strong contrast reachable: a realistic
+# |R|=0.06 now gives Q~0.4, T~0.70, a ~0.05/step; R=0 still gives Q=0 and
+# NO movement (the "absence is not evidence of absence" invariant holds).
+STRONG_R_DEFAULT = 0.15  # was 0.5 -- unreachable for the real R scale
 
 
 def _clip01(x: float) -> float:

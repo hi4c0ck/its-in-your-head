@@ -178,10 +178,11 @@ def test_retain_days_drives_window():
 
 # ---------------- adaptive observed model (spec §1-5) ----------------
 def test_target_full_range_monotone():
-    p = portrait.Portrait()  # strong_r default 0.5 -> T = 0.5 + R/(2*0.5)
-    for r, want in [(0.5, 1.0), (0.25, 0.75), (0.0, 0.5),
-                    (-0.25, 0.25), (-0.5, 0.0)]:
-        assert p._target(r, "directness") == pytest.approx(want)
+    p = portrait.Portrait()  # strong_r default 0.15 -> T = 0.5 + R/(2*0.15)
+    r = portrait.STRONG_R_DEFAULT
+    for contrast, want in [(r, 1.0), (r / 2, 0.75), (0.0, 0.5),
+                           (-r / 2, 0.25), (-r, 0.0)]:
+        assert p._target(contrast, "directness") == pytest.approx(want)
     # beyond the strong threshold it saturates at both range ends
     assert p._target(1.0, "directness") == pytest.approx(1.0)
     assert p._target(-1.0, "directness") == pytest.approx(0.0)
@@ -189,15 +190,16 @@ def test_target_full_range_monotone():
 
 def test_confidence_symmetric_in_abs_r():
     p = portrait.Portrait()
+    r = portrait.STRONG_R_DEFAULT
     # a strong NEGATIVE earns as much confidence as a strong POSITIVE
-    assert p._confidence(-0.5, "directness") == pytest.approx(
-        p._confidence(0.5, "directness"))
-    assert p._confidence(0.5, "directness") == pytest.approx(1.0)
-    assert p._confidence(0.25, "directness") == pytest.approx(0.5)
+    assert p._confidence(-r, "directness") == pytest.approx(
+        p._confidence(r, "directness"))
+    assert p._confidence(r, "directness") == pytest.approx(1.0)
+    assert p._confidence(r / 2, "directness") == pytest.approx(0.5)
     assert p._confidence(1.0, "directness") == pytest.approx(1.0)
     # optional multipliers only cut, never invent a boost (absent -> 1.0)
-    assert p._confidence(0.5, "directness", agreement=0.5) == pytest.approx(0.5)
-    assert p._confidence(0.5, "directness", support=0.0) == pytest.approx(0.0)
+    assert p._confidence(r, "directness", agreement=0.5) == pytest.approx(0.5)
+    assert p._confidence(r, "directness", support=0.0) == pytest.approx(0.0)
 
 
 def test_two_sided_full_range_dynamics():
@@ -219,6 +221,25 @@ def test_two_sided_full_range_dynamics():
     assert lo[0] == pytest.approx(0.340, abs=1e-3)
     assert lo[4] == pytest.approx(0.014, abs=1e-3)
     assert all(a >= b - 1e-12 for a, b in zip(lo, lo[1:]))
+
+
+def test_volatile_weak_contrast_moves_portrait():
+    """ENGINE: realistic weak contrasts must visibly follow story volatility.
+
+    With the old unreachable r_d=0.5 these |R|=0.06 observations gave
+    alpha~0.006 and the value barely left 0.5. Recalibrated r_d must produce
+    a visible swing while still respecting the per-step cap.
+    """
+    p = portrait.Portrait()
+    seq = []
+    for i in range(24):
+        r = 0.06 if (i // 4) % 2 == 0 else -0.06
+        p.update_observed({d: {"S": r, "C": 0.0, "R": r}
+                           for d in anchors.DIMENSIONS})
+        seq.append(p.snapshot()["values"]["directness"])
+    assert max(seq) - min(seq) > 0.10, seq
+    assert all(abs(b - a) <= portrait.DELTA_MAX + 1e-9
+               for a, b in zip(seq, seq[1:]))
 
 
 def test_absence_of_positive_does_not_drive_to_zero():

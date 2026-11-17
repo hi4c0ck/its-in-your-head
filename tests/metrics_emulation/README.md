@@ -14,16 +14,21 @@ no real user text is used, no server is needed.
 The engine moves portrait values smoothly; the board shows the real per-turn
 values and real drift — it does not invent larger swings.
 
-### Two real findings (2026-11-17)
+### Engine fixes (2026-11-17)
 
-1. **Volatility lives in the target/confidence channels, not the value.**
-   `perception/portrait.py` uses `alpha = ALPHA_MAX(0.55) * Q` with
-   `Q = |R| / strong_r`; measured Q on these runs is only 0.01–0.26, while the
-   target–value gap `|T−V|` reaches 0.21 (exploration, volatile story). The
-   six-dimension **value** is intentionally a stable identity layer. Keep it;
-   expose `targets`, `confidence` and `|T−V|` as the volatility readout. If the
-   value itself must follow volatility, the honest knobs are `ALPHA_MAX`,
-   per-dimension `strong_r`, and `CONF_BETA` — not removing the layer.
+1. **ENGINE FIX — portrait followed volatility poorly.** The driver is
+   `r_d` (the strong-contrast threshold): `T = 0.5 + R/(2r_d)` and
+   `Q = |R|/r_d`, so `alpha = ALPHA_MAX·Q`. Measured |R| is only 0.005–0.09,
+   but `STRONG_R_DEFAULT` was 0.5 — unreachable. Targets stayed in 0.47–0.59
+   and the step was ~0.002/turn. `r_d` is now **0.15** (~2x the observed
+   scale): realistic |R|=0.06 gives Q~0.4, T~0.70, a ~0.05/step. Neutral
+   evidence (R=0) still gives Q=0 and **no movement** — the "absence is not
+   evidence of absence" invariant is preserved, and the per-step cap
+   (DELTA_MAX=0.18) still binds. Measured 80-turn portrait span:
+   volatile 0.142 → **0.573**, friction-recovery 0.278 → 0.611,
+   friction-to-good 0.263 → 0.558; max adjacent step exactly 0.18 (the cap).
+   Gate: `test_volatile_weak_contrast_moves_portrait`. The six-dimension layer
+   stays — it is the stable identity layer; volatility now reaches it.
 2. **GOOD/FRICTION were flat because feedback association was missing.**
    `core/collector.py::_on_pre_llm_call` calls `_apply_explicit_feedback()` →
    `pulse.feedback.apply_feedback()` on every user turn. The harness now calls

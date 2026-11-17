@@ -171,20 +171,25 @@ verification section. Commit.
 
 - `pytest tests/test_metrics_emulation.py -q` — **6 passed, 1 warning in 17.15s** (added the GOOD/FRICTION feedback-path regression)
 - `python -m tests.metrics_emulation.cli --all --turns 80 --seed 8117` (after feedback + cadence fix):
-  - `friction-recovery`: 80 turns, 9 corners, portrait span 0.278, Fpeak 0.3148, 19.2 s
-  - `friction-to-good`: 80 turns, 7 corners, span 0.263, Fpeak 0.3245, 19.6 s
-  - `volatile-amplification`: 80 turns, 7 corners, span 0.142, Fpeak 0.3148, 31.4 s
+  - `friction-recovery`: 80 turns, 9 corners, portrait span **0.611**, Fpeak 0.3148, 48.8 s
+  - `friction-to-good`: 80 turns, 7 corners, span **0.558**, Fpeak 0.3245, 57.5 s
+  - `volatile-amplification`: 80 turns, 7 corners, span **0.573**, Fpeak 0.3148, 46.1 s
   - GOOD/FRICTION lanes now graded (9–25 distinct values per lane) instead of 0 / 0.3.
-- `build_board.py` → `board.html` 2,657,662 bytes; board browser: 3 runs, 9 corners,
+- `build_board.py` → `board.html` 2,656,775 bytes; board browser: 3 runs, 9 corners,
   corners wrapped (no horizontal scroll), 1 real SVG with 50 paths, 6 axes, 4 lanes,
   zero JS errors; run switch / step / seek / star / hide all verified.
-- Full suite: **658 passed, 8 skipped, 1 warning in 69.48s** (includes the engine
-  no-jumps + contra-verse regressions + speedrun gate; no regressions)
+- Full suite: **659 passed, 8 skipped, 1 warning in 84.63s** (includes the engine
+  no-jumps + contra-verse + volatility regressions and speedrun gate)
 - `tools/check_contracts.py`: `G5: CLEAN` · temp budget `1.8 MB` · plugin ESM check OK
 - `test_desktop_bubble.mjs` 142, `test_desktop_pulse.mjs` 113,
   `test_pulse_tick_reducer.mjs` 71, calibration/encoder/petstate suites all pass.
 
 ### Engine fix verified 2026-11-17 (the actual product changes)
+- `perception/portrait.py::STRONG_R_DEFAULT` 0.5 → **0.15**: measured |R| is
+  0.005–0.09, so the old threshold was unreachable (T 0.47–0.59, step ~0.002).
+  Now realistic |R|=0.06 gives Q~0.4 / T~0.70 / ~0.05 step; R=0 still gives
+  Q=0 and NO movement; DELTA_MAX=0.18 still caps each step. Volatile story
+  span 0.142 → 0.573. Gate: `test_volatile_weak_contrast_moves_portrait`.
 - `pulse/matrix.py::_channel_gate` + `_lane_weights` + `_lane_accumulation`:
   hard-gated MEAN → continuous gate × recency weight with saturating sum.
   Good/friction per-tool values move in bounded steps (max adjacent step 0.034).
@@ -196,12 +201,13 @@ verification section. Commit.
   `build_lanes`, so `--speedrun` forces real engine polls at chosen times.
 - New gates: `test_good_friction_values_are_continuous_no_jumps` (similarity +
   age sweeps), `test_good_and_friction_share_one_budget_contra_verse`,
-  `test_speedrun_forces_engine_polls_at_chosen_times`.
-- Full suite **658 passed, 8 skipped, 1 warning in 69.48s**.
+  `test_speedrun_forces_engine_polls_at_chosen_times`,
+  `test_volatile_weak_contrast_moves_portrait`.
+- Full suite **659 passed, 8 skipped, 1 warning in 84.63s**.
 
-Observed honest result: the real engine smooths portrait movement (max adjacent
-axis step ≈0.05 even under alternating prompts). The volatile story therefore
-shows repeated moderate drift, not fabricated large jumps; this is the real
+Observed honest result: with the recalibrated r_d the engine now follows the
+alternating prompts with a per-step cap of 0.18 (mean step 0.027–0.046); the
+volatile story shows real, visible drift, not fabricated jumps; this is the real
 engine's capacity, which is what the suite is meant to reveal.
 
 ## Out of scope
