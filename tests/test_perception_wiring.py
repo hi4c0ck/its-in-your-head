@@ -325,3 +325,5 @@ def test_engine_fits_per_dim_portrait_thresholds():
     values = [round(v, 5) for v in fitted.values()]
     assert len(set(values)) > 1, values  # never forced-uniform
     assert all(0.0 < v < 0.5 for v in values), values
+    assert set(e.portrait.baselines) == set(anchors.DIMENSIONS)
+    assert any(abs(v) > 0.01 for v in e.portrait.baselines.values())

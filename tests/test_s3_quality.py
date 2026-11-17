@@ -252,6 +252,26 @@ def test_mismatch_gain_calibration_cases():
     assert p.snapshot()["values"]["directness"] == pytest.approx(0.987, abs=1e-3)
 
 
+def test_fitted_baseline_is_neutral_not_a_constant_bias():
+    """R = mid_d must give Q=0 and no movement; centered signal drives both ways."""
+    r = 0.5
+    mid = {"directness": 0.2}
+
+    def step(raw):
+        p = portrait.Portrait(strong_r=r, baselines=mid)
+        p._observed.values["directness"] = 0.5
+        p.update_observed({d: {"S": raw, "C": 0.0, "R": raw}
+                           for d in anchors.DIMENSIONS})
+        return p.snapshot()
+
+    neutral = step(0.2)
+    assert neutral["values"]["directness"] == 0.5
+    assert neutral["confidences"]["directness"] == 0.0
+    assert neutral["targets"]["directness"] == 0.5
+    assert step(0.65)["targets"]["directness"] > 0.9
+    assert step(-0.25)["targets"]["directness"] < 0.1
+
+
 def test_volatile_weak_contrast_moves_portrait():
     """ENGINE: realistic weak contrasts must visibly follow story volatility.
 

@@ -223,11 +223,16 @@ class Engine:
         try:
             fitted = _resemblance.fit_strong_thresholds(
                 backend, anchor_vectors=self._anchor_vectors_for(backend))
+            baselines = _resemblance.fit_baselines(
+                backend, anchor_vectors=self._anchor_vectors_for(backend))
         except Exception:
             logger.exception("its-in-your-head: portrait r_d fit failed")
-            fitted = {}
+            fitted, baselines = {}, {}
         if fitted:
             self.portrait.strong_r = _portrait_mod.strong_thresholds(fitted)
+        if baselines:
+            self.portrait.baselines = {
+                d: float(baselines.get(d, 0.0)) for d in _portrait_mod.DIMENSIONS}
         self._portrait_r_backend = backend
 
     def set_settings_provider(self, provider) -> None:

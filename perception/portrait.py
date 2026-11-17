@@ -113,6 +113,7 @@ class Portrait:
                  alpha_max: float = ALPHA_MAX, delta_max: float = DELTA_MAX,
                  conf_beta: float = CONF_BETA, gap_gain: float = GAP_GAIN,
                  strong_r: dict | float | None = None,
+                 baselines: dict[str, float] | None = None,
                  calibration: Calibration | None = None) -> None:
         self.retain_days = DEFAULT_RETAIN_DAYS if retain_days is None else int(retain_days)
         self.window = evidence_window_for(retain_days, max_evidence=max_evidence)
@@ -124,6 +125,11 @@ class Portrait:
         self.conf_beta = float(conf_beta)        # displayed-confidence EMA beta
         self.gap_gain = float(gap_gain)          # mismatch amplification (0 = pure spec EMA)
         self.strong_r = strong_thresholds(strong_r)  # per-dim strong-contrast r_d
+        # Per-dim neutral contrast mid_d from the labeled fixture. Default 0
+        # keeps the spec's R=0 neutral for direct unit tests; the engine
+        # passes fitted baselines so correlated anchors stop biasing the axes.
+        self.baselines = {d: float(baselines.get(d, 0.0)) if baselines else 0.0
+                          for d in DIMENSIONS}
         self.calibration = calibration or DEFAULT_CALIBRATION
         self._observed = _Track()
         self._interpreted = _Track()
@@ -212,8 +218,12 @@ class Portrait:
             else:
                 s = float(entry)
                 r = s  # legacy plain-S shape: no negative anchor -> R = S - 0
-            target = self._target(r, dim)
-            conf = self._confidence(r, dim, agreement=agreement,
+            # Center on the per-dimension neutral contrast mid_d fitted from
+            # the labeled fixture. Correlated anchors make mid_d != 0; using
+            # raw R would push the same axes up/down for every prompt.
+            centered = r - self.baselines[dim]
+            target = self._target(centered, dim)
+            conf = self._confidence(centered, dim, agreement=agreement,
                                     support=support, provenance=provenance)
             old = track.values[dim]
             alpha = self.alpha_max * conf                       # alpha_{d,t}

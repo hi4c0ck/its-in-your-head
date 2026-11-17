@@ -25,11 +25,22 @@ values and real drift — it does not invent larger swings.
    their separation) under the active backend, and
    `engine._ensure_portrait_thresholds()` applies it once per backend, reset
    on `/reset`. `STRONG_R_DEFAULT` stays 0.5 as the documented fallback — no
-   global magic knob. R=0 still gives Q=0 and **no movement**; DELTA_MAX=0.18
-   still caps each step. Spans: 0.585 / 0.667 / 0.667 (volatile directness
-   range 0.667). Gates: `test_strong_thresholds_fitted_per_dimension`,
+   global magic knob. `DELTA_MAX=0.18` still caps each step (the neutral
+   point is now the per-dim baseline, see below). Spans: 0.807 / 0.762 / 0.729 (volatile directness
+   range 0.446). Gates: `test_strong_thresholds_fitted_per_dimension`,
    `test_engine_fits_per_dim_portrait_thresholds`,
    `test_volatile_weak_contrast_moves_portrait`.
+   - **Per-dimension baseline centering (root cause of the repeated vector).**
+     The anchor sets are correlated, so the fixture midpoints are NOT zero
+     (context +0.112, analysis +0.074, exploration −0.061). Raw R=0 therefore
+     pushed the same axes up/down for every prompt, producing the same
+     six-value pattern in every story (friction-recovery t60: 0.514/0.912/
+     0.370/0.925/0.939/0.763). `resemblance.fit_baselines()` now fits `mid_d`
+     from the same fixture and `Portrait(baselines=...)` centers R before
+     target/confidence. R=mid_d is now the neutral point: Q=0, no movement.
+     After the fix the exact vector is gone; rank orders per story are
+     37/42/33 distinct and span rises 0.585→0.807, 0.667→0.762, 0.667→0.729.
+     Gate: `test_fitted_baseline_is_neutral_not_a_constant_bias`.
    - **Nonlinear mismatch response.** `GAP_GAIN = 1.0` multiplies the
      step by `1 + GAP_GAIN·|T−V|·(1−Q)`: a big gap at low confidence gets a
      hard correction (0.9 with a 0.1 signal moves decisively), a near-value

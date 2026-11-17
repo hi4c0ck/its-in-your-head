@@ -83,6 +83,19 @@ def test_strong_thresholds_fitted_per_dimension(vecs):
         [(0.3, True), (0.1, False)]) == pytest.approx(0.1)
 
 
+def test_baselines_are_per_dimension_midpoints(vecs):
+    """Neutral contrast mid_d is fitted, not assumed to be zero."""
+    b = encoder.Tier0SketchBackend()
+    base = resemblance.fit_baselines(b, anchor_vectors=vecs)
+    assert set(base) == set(anchors.DIMENSIONS)
+    assert len(set(round(v, 4) for v in base.values())) > 1
+    assert any(abs(v) > 0.01 for v in base.values())
+    assert resemblance.baseline_from_pairs([]) == 0.0
+    assert resemblance.baseline_from_pairs([(0.3, True)]) == 0.0
+    assert resemblance.baseline_from_pairs(
+        [(0.5, True), (0.1, False)]) == pytest.approx(0.3)
+
+
 def test_calibration_is_monotonic_and_separates_fixture():
     cal = resemblance.fit_calibration([(-0.5, False), (-0.2, False), (0.2, True), (0.5, True)])
     rs = [-1.0, -0.5, 0.0, 0.5, 1.0]

@@ -171,20 +171,28 @@ verification section. Commit.
 
 - `pytest tests/test_metrics_emulation.py -q` — **6 passed, 1 warning in 17.15s** (added the GOOD/FRICTION feedback-path regression)
 - `python -m tests.metrics_emulation.cli --all --turns 80 --seed 8117` (after feedback + cadence fix):
-  - `friction-recovery`: 80 turns, 9 corners, portrait span **0.585**, Fpeak 0.3148, 30.1 s
-  - `friction-to-good`: 80 turns, 7 corners, span **0.667**, Fpeak 0.3245, 44.0 s
-  - `volatile-amplification`: 80 turns, 7 corners, span **0.667**, Fpeak 0.3148, 36.6 s
+  - `friction-recovery`: 80 turns, 9 corners, portrait span **0.807**, Fpeak 0.3148, 43.4 s
+  - `friction-to-good`: 80 turns, 7 corners, span **0.762**, Fpeak 0.3245, 35.4 s
+  - `volatile-amplification`: 80 turns, 7 corners, span **0.729**, Fpeak 0.3148, 34.3 s
   - GOOD/FRICTION lanes now graded (9–25 distinct values per lane) instead of 0 / 0.3.
-- `build_board.py` → `board.html` 2,656,712 bytes; board browser: 3 runs, 9 corners,
+- `build_board.py` → `board.html` 2,655,435 bytes; board browser: 3 runs, 9 corners,
   corners wrapped (no horizontal scroll), 1 real SVG with 50 paths, 6 axes, 4 lanes,
   zero JS errors; run switch / step / seek / star / hide all verified.
-- Full suite: **663 passed, 8 skipped, 1 warning in 107.05s** (includes the engine
-  no-jumps + contra-verse + volatility + fitted-r + mismatch-gain regressions)
-- `tools/check_contracts.py`: `G5: CLEAN` · temp budget `1.8 MB` · plugin ESM check OK
+- Full suite: **665 passed, 8 skipped, 1 warning in 127.69s** (includes the engine
+  no-jumps + contra-verse + volatility + fitted-r + mismatch-gain + baseline
+  regressions)
+- `tools/check_contracts.py`: `G5: CLEAN` · temp budget `1.9 MB` · plugin ESM check OK
 - `test_desktop_bubble.mjs` 142, `test_desktop_pulse.mjs` 113,
   `test_pulse_tick_reducer.mjs` 71, calibration/encoder/petstate suites all pass.
 
 ### Engine fix verified 2026-11-17 (the actual product changes)
+- `resemblance.fit_baselines` + `Portrait(baselines=...)` + engine wiring:
+  fitted per-dim neutral contrast mid_d from the fixture. Correlated anchors
+  made raw R=0 non-neutral (context +0.112, analysis +0.074, exploration
+  -0.061), so EVERY prompt pushed the same axes up/down — the repeated vector
+  0.514/0.912/0.370/0.925/0.939/0.763 at friction-recovery t60. R is now
+  centered before target/confidence; R=mid_d -> Q=0 -> no movement. Gate:
+  `test_fitted_baseline_is_neutral_not_a_constant_bias`.
 - `perception/portrait.py::GAP_GAIN = 1.0`: step amplified by
   `1 + GAP_GAIN*|T-V|*(1-Q)` — hard correction for a far target at low
   confidence, linear near the value, no free upward lift when already below
@@ -215,11 +223,12 @@ verification section. Commit.
 - 600-turn real-engine check: STRONG per turn max 3 (bounded by registry),
   distinct tools ever STRONG 3, counts decay after feedback stops (71 -> 42 ->
   30), portrait values/confidences never hit 0/1; no unbounded pile-up.
-- Full suite **663 passed, 8 skipped, 1 warning in 107.05s** (was 662 before the
-  mismatch-gain gate; targeted s3 suite 30 passed).
+- Full suite **665 passed, 8 skipped, 1 warning in 127.69s** (was 663 before the
+  baseline-centering gates; s2/s3/wiring targeted 51 passed).
 
-Observed honest result: with per-dimension fitted r_d the engine now follows the
-alternating prompts with a per-step cap of 0.18 (mean step 0.038–0.055); the
+Observed honest result: with per-dimension fitted r_d and centered baselines the
+engine now follows the alternating prompts with a per-step cap of 0.18 (mean
+step 0.046–0.056); the
 volatile story shows real, visible drift, not fabricated jumps; this is the real
 engine's capacity, which is what the suite is meant to reveal.
 
