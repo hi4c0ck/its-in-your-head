@@ -734,8 +734,15 @@ def build_lanes(registry, prototypes, session_state=None,
         up_value = round(
             min(1.0, max(0.0, float(upset.get("value") or 0.0))), 4)
         up_turns = int(upset.get("upset_turns") or 0)
+        # (a) attribution: land the reasoning-narrated friction on the tool
+        # that was active when the reasoning arrived. Legacy mirrors have
+        # no last_tool -> keep the global "user" pseudo-row (c).
+        attributed = upset.get("last_tool")
+        up_tool = (str(attributed)
+                   if isinstance(attributed, str) and attributed
+                   and attributed != "user" else "user")
         friction.append({
-            "tool_id": -1, "tool_name": "user", "rank": 0,
+            "tool_id": -1, "tool_name": up_tool, "rank": 0,
             "value": up_value, "threshold": thr["friction"],
             "level": _level(up_value, thr["friction"]),
             "state": _state(True, up_turns, 1),

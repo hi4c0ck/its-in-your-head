@@ -152,6 +152,9 @@ class Engine:
         # the pulse read path (never at construction — the lazy-DB
         # rule).
         self.upset = _pulse_upset.UpsetAccumulator()
+        # (a) attribution: the tool active when a reasoning segment lands.
+        # Session-keyed so a cross-session boundary cannot bleed tools.
+        self._last_tool_by_session: dict[str, str] = {}
         self._anchor_backend = None
         # Rolling reference (dynamic reassembly): lazily created + seeded from
         # the bank on the first backend-available turn, then reassembled by
@@ -377,6 +380,10 @@ class Engine:
                 except Exception:
                     logger.exception(
                         "its-in-your-head: engine tool_start feed failed")
+                tool_name = ev.get("tool_name")
+                if isinstance(tool_name, str) and tool_name:
+                    self._last_tool_by_session[
+                        str(ev.get("session_id") or "local")] = tool_name
             elif etype == "tool_end":
                 self._on_tool_end(ev)
             elif etype in ("user_turn", "turn"):
@@ -864,7 +871,9 @@ class Engine:
             space = self._pulse_vector_space()
             stepped = self.upset.on_reasoning_seg(
                 ev, self._get_backend(),
-                str(space.get("id") or self._backend_name))
+                str(space.get("id") or self._backend_name),
+                last_tool=self._last_tool_by_session.get(
+                    str(ev.get("session_id") or "local")))
             if stepped:
                 # D1 finalized a turn — mirror F' so the pane tracks the
                 # accumulator's reasoning-narrated friction (once per LLM
@@ -1059,6 +1068,16 @@ class Engine:
                 "values": {
                     d: float(v)
                     for d, v in dict(norm.get("values") or {}).items()
+                    if v is not None
+                },
+                "targets": {
+                    d: float(v)
+                    for d, v in dict(norm.get("targets") or {}).items()
+                    if v is not None
+                },
+                "confidences": {
+                    d: float(v)
+                    for d, v in dict(norm.get("confidences") or {}).items()
                     if v is not None
                 },
             }
@@ -1351,17 +1370,27 @@ class Engine:
         _db, _mig = self._storage()
         dims = _dims()
         vals = entry.get("values") or {}
-        row = [float(entry["ts"])] + [
-            float(vals[d]) if vals.get(d) is not None else None
-            for d in dims
-        ]
+        targets = entry.get("targets") or {}
+        confidences = entry.get("confidences") or {}
+        evidence = [f"{d}_{suffix}" for d in dims
+                    for suffix in ("target", "confidence")]
+        cols = list(dims) + evidence
+        row = [float(entry["ts"])]
+        row += [float(vals[d]) if vals.get(d) is not None else None
+                for d in dims]
+        # Column order is INTERLEAVED: d_target, d_confidence, next dim...
+        for d in dims:
+            row.append(float(targets[d]) if targets.get(d) is not None
+                       else None)
+            row.append(float(confidences[d]) if confidences.get(d) is not None
+                       else None)
         conn = _db.connect()
         try:
             _mig.schema_bootstrap(conn)
             conn.execute(
                 "INSERT INTO portrait_history (ts, "
-                + ", ".join(dims) + ") VALUES ("
-                + ", ".join(["?"] * (len(dims) + 1)) + ")",
+                + ", ".join(cols) + ") VALUES ("
+                + ", ".join(["?"] * len(row)) + ")",
                 row)
             conn.execute(
                 "DELETE FROM portrait_history WHERE id NOT IN "

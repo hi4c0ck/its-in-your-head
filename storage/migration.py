@@ -56,7 +56,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION  # alias
 # v9 (§8, privacy hardening v0.1.28): one-time legacy scrub that NULLs the
 # raw-text event columns (events.user_message / events.error_message) on any
@@ -440,6 +440,17 @@ def _create_portrait_history(conn: sqlite3.Connection) -> None:
         if dim not in existing:
             conn.execute(
                 f"ALTER TABLE portrait_history ADD COLUMN {dim} REAL")
+    # Additive evidence columns: the isolated dashboard half cannot see the
+    # live Portrait object, so the fallback needs the recomputed target and
+    # confidence from the turn that produced each observed value. Old rows
+    # keep NULL and must never be back-filled with invented evidence.
+    existing = _table_columns(conn, "portrait_history")
+    for dim in PORTRAIT_HISTORY_DIMS:
+        for suffix in ("target", "confidence"):
+            col = f"{dim}_{suffix}"
+            if col not in existing:
+                conn.execute(
+                    f"ALTER TABLE portrait_history ADD COLUMN {col} REAL")
     conn.execute(_CREATE_PORTRAIT_HISTORY_INDEX)
 
 

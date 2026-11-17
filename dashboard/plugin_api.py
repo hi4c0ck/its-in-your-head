@@ -1172,7 +1172,7 @@ _NEUTRAL_MORPHOLOGY: dict = {
 # reads as an honest absence (None), never an invented value.
 _NEUTRAL_UPSET: dict = {
     "value": 0.0, "tier": 0, "upset_turns": 0,
-    "mood": None, "prognosis": None,
+    "mood": None, "prognosis": None, "last_tool": None,
 }
 
 
@@ -1381,16 +1381,28 @@ def _portrait_db_fallback(shape: dict, dims) -> dict:
         present = [d for d in dims if d in cols]
         if not present:
             return shape
+        evidence = [f"{d}_{s}" for d in present
+                    for s in ("target", "confidence")
+                    if f"{d}_{s}" in cols]
         latest = conn.execute(
-            f"SELECT {', '.join(present)} FROM portrait_history "
+            f"SELECT {', '.join(present + evidence)} FROM portrait_history "
             "ORDER BY ts DESC, id DESC LIMIT 1").fetchone()
         if latest is None:
             return shape
-        for i, d in enumerate(present):
-            v = latest[i]
-            if v is not None:
-                shape["dimensions"][d] = v
-                shape["user"][d] = v
+        for name, v in zip(present + evidence, latest):
+            if v is None:
+                continue
+            if name in dims:
+                shape["dimensions"][name] = v
+                shape["user"][name] = v
+            elif name.endswith("_target"):
+                d = name[:-len("_target")]
+                if d in dims:
+                    shape["targets"][d] = v
+            elif name.endswith("_confidence"):
+                d = name[:-len("_confidence")]
+                if d in dims:
+                    shape["confidence"][d] = v
         # Availability gate mirrors the live route: at least one
         # observed value (an all-NULL row carries no data).
         shape["available"] = any(v is not None for v in

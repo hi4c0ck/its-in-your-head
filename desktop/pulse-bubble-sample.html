@@ -13,7 +13,7 @@
   Copied-verbatim units (must stay in sync with desktop/plugin.js):
     pulseBubblePath / pulseBubbleFlight / pulseTravelSteps /
     pulseTravelKeyframes / PULSE_GLOW_CSS (iyh-bubble-stamp)
-    sprite cells [0.95, 0.55, 0.25] / travel 450ms / arrival 150ms /
+    sprite cells [0.95, 0.65, 0.4, 0.2] / travel 650ms / arrival 200ms /
     cap 4 / stagger 60ms.
   Run: open the file directly (no server needed).
 -->
@@ -87,7 +87,7 @@
 // ------------------------------------------------------------------
 // Verbatim units from desktop/plugin.js (animation pass)
 // ------------------------------------------------------------------
-const PULSE_TRAVEL_MS = 450, BUBBLE_ARRIVAL_MS = 150,
+const PULSE_TRAVEL_MS = 650, BUBBLE_ARRIVAL_MS = 200,
       MAX_CONCURRENT_BUBBLES = 4, BUBBLE_STAGGER_MS = 60;
 const PULSE_LANE_ORDER = ['live', 'goal', 'good', 'friction'];
 const PULSE_TRAVEL_STEP_PX = 4;
@@ -150,7 +150,7 @@ function pulseBubblePathOld(box, metric, slotIndex, capacity) {
 function pulseBubbleFlight(box, metric, slotIndex, capacity, narrow) {
   var path = pulseBubblePath(box, metric, slotIndex, capacity, narrow);
   var left = Math.round(path.dotLeft); // 4px column on the tool's first-dot column
-  var top = Math.round(path.spawn.y) - 12; // bottom flush at the surface edge
+  var top = Math.round(path.spawn.y) - 16; // bottom flush at the surface edge (4 dot cells)
   var dy = Math.round(path.rowCenter - 6 - top); // end: column centered on the tool's row
   var dist = Math.abs(dy);
   var n = pulseTravelSteps(dist);
@@ -221,11 +221,11 @@ function launch(surf, metric, slot, staggerMs, opts) {
   const f = pulseBubbleFlight(surf.box, metric, slot, surf.cap, surf.narrow);
   const el = document.createElement('span');
   el.dataset.kind = 'bubble';
-  el.style.cssText = 'position:absolute;width:4px;height:12px;pointer-events:none;'
+  el.style.cssText = 'position:absolute;width:4px;height:16px;pointer-events:none;'
     + 'left:' + f.left + 'px;top:' + f.top + 'px;'
     + 'animation:' + f.animationName + ' ' + PULSE_TRAVEL_MS + 'ms linear '
     + (staggerMs || 0) + 'ms 1 both;';
-  [0.95, 0.55, 0.25].forEach(function (o) {
+  [0.95, 0.65, 0.4, 0.2].forEach(function (o) {
     const c = document.createElement('span');
     c.style.cssText = 'display:block;width:4px;height:4px;background:var(--ui-accent);opacity:' + o + ';';
     el.appendChild(c);
