@@ -169,15 +169,16 @@ verification section. Commit.
 
 ## Verification (2026-11-17 — real results)
 
-- `pytest tests/test_metrics_emulation.py -q` — **5 passed, 1 warning in 10.87s**
-- `python -m tests.metrics_emulation.cli --all --turns 80 --seed 8117`:
-  - `friction-recovery`: 80 turns, 9 corners, portrait span 0.278, Fpeak 0.3148, 12.3 s
-  - `friction-to-good`: 80 turns, 7 corners, span 0.263, Fpeak 0.3245, 10.7 s
-  - `volatile-amplification`: 80 turns, 7 corners, span 0.160, Fpeak 0.3148, 34.0 s
-- `build_board.py` → `board.html` 2,563,452 bytes; board browser: 3 runs, 9 corners,
+- `pytest tests/test_metrics_emulation.py -q` — **6 passed, 1 warning in 17.15s** (added the GOOD/FRICTION feedback-path regression)
+- `python -m tests.metrics_emulation.cli --all --turns 80 --seed 8117` (after feedback + cadence fix):
+  - `friction-recovery`: 80 turns, 9 corners, portrait span 0.278, Fpeak 0.3148, 19.2 s
+  - `friction-to-good`: 80 turns, 7 corners, span 0.263, Fpeak 0.3245, 19.6 s
+  - `volatile-amplification`: 80 turns, 7 corners, span 0.142, Fpeak 0.3148, 31.4 s
+  - GOOD/FRICTION lanes now graded (9–25 distinct values per lane) instead of 0 / 0.3.
+- `build_board.py` → `board.html` 2,577,054 bytes; board browser: 3 runs, 9 corners,
   corners wrapped (no horizontal scroll), 1 real SVG with 50 paths, 6 axes, 4 lanes,
   zero JS errors; run switch / step / seek / star / hide all verified.
-- Full suite: **654 passed, 8 skipped, 1 warning in 59.40s** (was 649 passed + 5 new)
+- Full suite: **655 passed, 8 skipped, 1 warning in 99.27s** (was 654 before the feedback regression gate)
 - `tools/check_contracts.py`: `G5: CLEAN` · temp budget `1.8 MB` · plugin ESM check OK
 - `test_desktop_bubble.mjs` 142, `test_desktop_pulse.mjs` 113,
   `test_pulse_tick_reducer.mjs` 71, calibration/encoder/petstate suites all pass.

@@ -14,6 +14,25 @@ no real user text is used, no server is needed.
 The engine moves portrait values smoothly; the board shows the real per-turn
 values and real drift — it does not invent larger swings.
 
+### Two real findings (2026-11-17)
+
+1. **Volatility lives in the target/confidence channels, not the value.**
+   `perception/portrait.py` uses `alpha = ALPHA_MAX(0.55) * Q` with
+   `Q = |R| / strong_r`; measured Q on these runs is only 0.01–0.26, while the
+   target–value gap `|T−V|` reaches 0.21 (exploration, volatile story). The
+   six-dimension **value** is intentionally a stable identity layer. Keep it;
+   expose `targets`, `confidence` and `|T−V|` as the volatility readout. If the
+   value itself must follow volatility, the honest knobs are `ALPHA_MAX`,
+   per-dimension `strong_r`, and `CONF_BETA` — not removing the layer.
+2. **GOOD/FRICTION were flat because feedback association was missing.**
+   `core/collector.py::_on_pre_llm_call` calls `_apply_explicit_feedback()` →
+   `pulse.feedback.apply_feedback()` on every user turn. The harness now calls
+   those same real functions in the same order (after enqueue, before the
+   worker feed), so explicit "thanks" / "still broken" cores label the real
+   prototype banks. With a realistic 40 s/turn cadence ending at "now", the
+   1 h accumulation half-life yields graded lane values (0.5–0.8), not 0/1.
+   Gate: `test_explicit_feedback_drives_good_and_friction_lanes`.
+
 ## Run
 
 ```bash

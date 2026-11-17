@@ -53,6 +53,27 @@ def test_all_three_stories_valid():
         assert run["summary"]["friction_peak"] is not None
 
 
+def test_explicit_feedback_drives_good_and_friction_lanes():
+    """Regression: feedback association must reach the real prototype banks.
+
+    Before the collector-path fix, GOOD was 100% 0.0 and FRICTION was 0.0
+    except the ~0.3 upset pseudo-entry. Both lanes must carry graded values.
+    """
+    run = harness.run_story("friction-recovery", turns=24, seed=3,
+                            include_provenance=False)
+
+    def values(lane):
+        return {round(e["value"], 3) for t in run["turns"]
+                for e in t["pulse"]["lanes"][lane]
+                if isinstance(e.get("value"), (int, float))}
+
+    assert len(values("good")) > 1, values("good")
+    assert len(values("friction")) > 1, values("friction")
+    src = (ROOT / "tests" / "metrics_emulation" / "harness.py").read_text(encoding="utf-8")
+    assert "pulse_feedback.apply_feedback" in src
+    assert "detect_feedback(prompt)" in src
+
+
 def test_story_prompts_come_from_repo_vocabulary():
     import sys
     if str(ROOT) not in sys.path:

@@ -27,8 +27,8 @@ GOOD = ("thanks", "that worked", "good job")
 
 STEADY = (DIRECT, NARROW, QUICK, TIGHT, "fix the login")
 GUIDANCE = (CONTEXT, TIGHT, ITERATE, ANALYTIC)
-SWING_A = (DIRECT, ONESHOT, QUICK, NARROW)
-SWING_B = (WALK, BROAD, OVERHAUL, ITERATE)
+SWING_A = (DIRECT, ONESHOT, QUICK, NARROW, "thanks")
+SWING_B = (WALK, BROAD, OVERHAUL, ITERATE, "still broken")
 
 
 def _phase(pid, label, start, end, prompts, tools, statuses=("ok",),
