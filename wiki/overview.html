@@ -49,6 +49,19 @@ img{max-width:100%}
 .intro{color:var(--soft);margin:0 0 22px;max-width:70ch}
 .note{font-size:14px;color:var(--soft);margin:16px 0 0}
 
+/* hermes / plugin context */
+.context{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:26px}
+@media(max-width:640px){.context{grid-template-columns:1fr}}
+.ctx{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:14px 16px}
+.ctx .k{font-size:12px;font-weight:750;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);margin-bottom:4px}
+.ctx p{margin:0;color:var(--soft);font-size:13.5px;line-height:1.55}
+.install{margin-top:12px;background:var(--accent-wash);border:1px solid var(--line);
+  border-left:3px solid var(--accent);border-radius:0 12px 12px 0;padding:14px 16px}
+.install .k{font-size:12px;font-weight:750;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);margin-bottom:6px}
+.install ul{margin:0;padding-left:18px;color:var(--soft);font-size:13.5px;line-height:1.6}
+.install li+li{margin-top:4px}
+code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.92em;color:var(--ink)}
+
 /* portrait cards: fixed inner inset, equal caption block, consistent row */
 .gallery{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}
 @media(max-width:700px){.gallery{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -138,6 +151,31 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
     <h1>It's in Your Head</h1>
     <p class="lead">A 96px strip docked at the bottom of the desktop app shows how a work session is going. It watches <strong>tools, turns and friction</strong> through derived signals. It does not store prompts, and it does not claim to know what you think.</p>
     <p class="meta">Local by default · derived features only · no network unless you enable the optional model</p>
+  </div>
+
+  <div class="context">
+    <div class="ctx">
+      <div class="k">Hermes Agent</div>
+      <p>An open-source agent by Nous Research. It runs in a terminal, the desktop app and chat platforms, and uses tools to do the work.</p>
+    </div>
+    <div class="ctx">
+      <div class="k">Plugins</div>
+      <p>Optional add-ons installed into your Hermes plugins folder. They subscribe to agent events and can add commands, tools or a desktop pane.</p>
+    </div>
+    <div class="ctx">
+      <div class="k">This plugin</div>
+      <p>Two independent halves: agent hooks with /mirror commands, and a 96px desktop pane. Both are switched on in Settings → Plugins.</p>
+    </div>
+  </div>
+
+  <div class="install">
+    <div class="k">Install and enable</div>
+    <ul>
+      <li>Catalog link: <code>hermes://plugin/install?repo=hi4c0ck/its-in-your-head&amp;enable=1</code></li>
+      <li>Manual: copy this folder into <code>~/.hermes/profiles/&lt;profile&gt;/plugins/</code><br>then run <code>hermes -p &lt;profile&gt; plugins enable its-in-your-head</code></li>
+      <li>Turn on the backend and desktop toggles separately in Settings → Plugins.</li>
+      <li>Check the install: <code>hermes -p &lt;profile&gt; plugins doctor its-in-your-head --ci</code></li>
+    </ul>
   </div>
 
   <section class="section">
