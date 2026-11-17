@@ -10,7 +10,12 @@ proves all three failure modes are closed:
       prior generations are reaped via generation-keyed registry entries.
   T2  untracked orphans: a live worker with NO registry entry is swept by the
       process-table sweep (the exact case that leaked 12 workers).
-  T3  hard-killed owner: the detached watchdog reaps the worker in real time.
+  T3  process-table collection over repeated spawn/shutdown cycles: the live
+      worker count stays flat (the direct regression for "lots of processes").
+  T4  registry keys are per-worker, not per-owner (no overwrite of N gens).
+
+The real hard-killed-owner watchdog test lives in tests/test_s8_onnx_worker.py
+(`test_watchdog_terminates_on_owner_death`) and is also prerelease-marked.
 
 All tests are @pytest.mark.prerelease: skipped in normal feature runs, opt in
 with ``IYH_RUN_PRERELEASE=1 pytest -m prerelease``. They spawn/kill real OS

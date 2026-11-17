@@ -1,6 +1,7 @@
 # ONNX worker leak guard — generation-aware redesign (2026-11-17)
 
-Status: implemented on branch `fix/onnx-worker-leak`; commit `TBD`.
+Status: implemented + pushed on branch `fix/onnx-worker-leak`, commit `249cf4b`
+(local and `origin/fix/onnx-worker-leak` both at `249cf4b`).
 Gate results and the live process-table evidence are recorded at the bottom.
 
 ## Symptom (owner-reported)
@@ -72,6 +73,10 @@ crash-restart cannot mistake a recycled pid for our worker.
   release gate: `IYH_RUN_PRERELEASE=1 pytest -m prerelease`.
 
 ## Gate results (verbatim, this branch)
+Re-run fresh this session on venv `.../89d4e6bd.../venv` (Python 3.14.9, pytest 9.2.0):
+`IYH_RUN_PRERELEASE=1 pytest -q -m prerelease -rs` -> `5 passed, 652 deselected, 1 warning in 5.53s`;
+`pytest -q -rs` -> `649 passed, 8 skipped, 1 warning in 51.04s` (the 5 prerelease tests skipped
+by default: 1 in test_s8 + 4 in test_s9). Both reproduce the numbers below exactly.
 - Normal suite: `649 passed, 8 skipped, 1 warning in 53.48s`
 - Pre-release suite: `IYH_RUN_PRERELEASE=1 pytest -q -m prerelease` ->
   `5 passed, 652 deselected, 1 warning in 5.19s`
@@ -81,13 +86,18 @@ crash-restart cannot mistake a recycled pid for our worker.
 - `hermes -p plugin-studio plugins doctor its-in-your-head --ci`: exit 0, 9 hooks
 - private-import validator: NONE / NONE
 
-## Live convergence evidence (2026-11-17)
+## Live convergence evidence (2026-11-17, re-verified read-only)
 Before fix: 40 ONNX-family processes (13 generations).
 After the gateway hot-reloaded the patched plugin and next encoded: 4 —
 one worker + its ONNX child + one live watchdog (+ one stale watchdog from a
 transient test kernel that self-exits). Registry:
 `worker-20664.json` -> `{worker_pid:20664, owner_pid:380, token:...}`.
-No manual `taskkill` was used.
+
+Re-verified this session via a read-only `Get-CimInstance Win32_Process`
+collection (no kills, no reload): exactly ONE generation remains live —
+worker `9012` (`worker.py`, parent gateway `380`), its ONNX-runtime child
+`19980` (parent `9012`), and one watchdog `worker_watchdog.py 380 9012`.
+No stacked generations. No manual `taskkill` was used at any point.
 
 ## Out of scope / notes
 - The ONNX-runtime child per worker is expected (the runtime's own process);
