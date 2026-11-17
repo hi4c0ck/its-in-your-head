@@ -21,7 +21,9 @@ def main(argv=None):
     p.add_argument("--story", choices=stories.STORY_ORDER,
                    help="one story id (default: friction-recovery)")
     p.add_argument("--all", action="store_true", help="run all three stories")
-    p.add_argument("--turns", type=int, default=80, help="turns per story (40-100)")
+    p.add_argument("--turns", type=int, default=80, help="turns per story (max 100 by default)")
+    p.add_argument("--max-turns", type=int, default=100,
+                   help="raise the per-run turn cap for long-session checks")
     p.add_argument("--seed", type=int, default=8117, help="deterministic seed")
     p.add_argument("--out", type=Path, default=DEFAULT_OUT, help="output directory")
     p.add_argument("--purge", action="store_true", help="delete generated run JSON files")
@@ -48,7 +50,7 @@ def main(argv=None):
     for sid in ids:
         t0 = time.perf_counter()
         run = harness.run_story(sid, turns=a.turns, seed=a.seed,
-                                poll_offsets=offsets)
+                                poll_offsets=offsets, max_turns=a.max_turns)
         path = harness.write_run(run, a.out)
         s = run["summary"]
         print("%-24s %3d turns  %2d corners  %s  span=%.3f  drift=%.3f  Fpeak=%.4f  %.1fs -> %s"

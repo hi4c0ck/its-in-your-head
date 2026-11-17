@@ -202,8 +202,13 @@ verification section. Commit.
 - New gates: `test_good_friction_values_are_continuous_no_jumps` (similarity +
   age sweeps), `test_good_and_friction_share_one_budget_contra_verse`,
   `test_speedrun_forces_engine_polls_at_chosen_times`,
-  `test_volatile_weak_contrast_moves_portrait`.
-- Full suite **659 passed, 8 skipped, 1 warning in 84.63s**.
+  `test_volatile_weak_contrast_moves_portrait`,
+  `test_long_session_strong_points_bounded`.
+- 600-turn real-engine check: STRONG per turn max 3 (bounded by registry),
+  distinct tools ever STRONG 3, counts decay after feedback stops (71 -> 42 ->
+  30), portrait values/confidences never hit 0/1; no unbounded pile-up.
+- Full suite **660 passed, 8 skipped, 1 warning in 190.20s** (was 659 before the
+  long-session gate; targeted metrics suite 8 passed in 74.86s).
 
 Observed honest result: with the recalibrated r_d the engine now follows the
 alternating prompts with a per-step cap of 0.18 (mean step 0.027–0.046); the

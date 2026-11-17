@@ -53,6 +53,23 @@ values and real drift — it does not invent larger swings.
    Objective friction stays a separate capped hint, never summed.
    Gate: `test_good_and_friction_share_one_budget_contra_verse`.
 
+## Long-session STRONG check (600 real turns)
+
+Ran the volatile story for **600 turns** (~6.7 h virtual time) through the real
+engine (`--turns 600 --max-turns 600`):
+- STRONG entries per turn: goal 0, good 0, friction max **3** — the tool registry
+  has 3 lanes, so the count is bounded by registry size, not session length.
+- Distinct tools ever STRONG: **3** (never grows beyond the registry).
+- Appearance is a phase transition, not accumulation: 0 in turns 0–400, then
+  3/turn once feedback labels land. When feedback stops (friction-recovery
+  phases) STRONG counts **decline 71 → 42 → 30**, so the 1 h half-life clears them.
+- Portrait saturation across 3600 dimension-slots: value hit 0 or 1 **0 times**;
+  confidence hit 1 **0 times**; target hit an extreme 290 times (8%, expected
+  under alternating extreme prompts). No enormous STRONG pile-up.
+
+Gate: `test_long_session_strong_points_bounded` (bounded per-turn STRONG, no
+portrait value saturation, `--max-turns` cap override).
+
 ## Speedrun mode (forced engine poll times)
 
 `Engine.pulse_view(now=...)` is an optional data clock (production path keeps

@@ -86,6 +86,32 @@ def test_speedrun_forces_engine_polls_at_chosen_times():
     assert "build_lanes(**common, now=now)" in engine_src
 
 
+def test_long_session_strong_points_bounded():
+    """STRONG designations must be bounded by the tool registry, not grow."""
+    r = harness.run_story("volatile-amplification", turns=80, seed=11)
+    all_tools = set()
+    strong_per_turn = []
+    strong_tools = set()
+    for t in r["turns"]:
+        s = 0
+        for lane in ("goal", "good", "friction"):
+            for e in (t["pulse"]["lanes"].get(lane) or []):
+                all_tools.add(e.get("tool_name"))
+                if e.get("level") == "strong":
+                    s += 1
+                    strong_tools.add(e.get("tool_name"))
+        strong_per_turn.append(s)
+    assert max(strong_per_turn) <= len(all_tools)
+    assert len(strong_tools) <= len(all_tools)
+    # A long session must not drive portrait values to hard extremes.
+    for t in r["turns"]:
+        for v in (t["portrait"].get("dimensions") or {}).values():
+            assert 0.0 < v < 1.0
+    # The turn-cap override exists for long-session probes.
+    assert len(harness.run_story("friction-recovery", turns=150,
+                                 seed=1, max_turns=8)["turns"]) == 8
+
+
 def test_story_prompts_come_from_repo_vocabulary():
     import sys
     if str(ROOT) not in sys.path:

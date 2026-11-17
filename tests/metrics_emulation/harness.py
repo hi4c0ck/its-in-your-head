@@ -45,7 +45,8 @@ def _engine_block_sha() -> str:
 
 def run_story(story_id: str, turns: int = 80, seed: int = 8117,
               include_provenance: bool = True, clock_base: float | None = None,
-              poll_offsets: tuple[float, ...] = ()) -> dict:
+              poll_offsets: tuple[float, ...] = (),
+              max_turns: int = 100) -> dict:
     """Run one story through the real engine and return the run dict.
 
     ``poll_offsets`` enables speedrun mode: at each virtual turn the real
@@ -54,7 +55,7 @@ def run_story(story_id: str, turns: int = 80, seed: int = 8117,
     """
     if story_id not in stories.STORIES:
         raise ValueError("unknown story: " + story_id)
-    turns = max(1, min(100, int(turns)))
+    turns = max(1, min(max(1, int(max_turns)), int(turns)))
 
     # The repo root is importable when run via `python -m tests.metrics_emulation.cli`.
     if str(ROOT) not in sys.path:
