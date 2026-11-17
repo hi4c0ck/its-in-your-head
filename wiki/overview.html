@@ -52,8 +52,6 @@ a{color:var(--accent)}
 .hero h1{font-size:clamp(2.2rem,6vw,3.1rem);line-height:1.12;letter-spacing:-.03em;margin:0 0 18px}
 .lead{font-size:18px;line-height:1.65;max-width:70ch;color:var(--soft);margin:0}
 .lead strong{color:var(--ink);font-weight:700}
-.tags{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}
-.tag{font-size:12.5px;font-weight:650;color:var(--accent);background:var(--accent-wash);border-radius:999px;padding:5px 12px}
 
 /* generic sections */
 .section{margin-top:52px}
@@ -117,7 +115,6 @@ a{color:var(--accent)}
 .trust{background:var(--accent-wash);border-left:3px solid var(--accent);border-radius:0 14px 14px 0;padding:20px 24px}
 .trust p{margin:0}
 footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;color:var(--soft)}
-.closer{font-size:17px;font-weight:650;line-height:1.6;color:var(--ink);max-width:62ch;margin:0 0 8px}
 .fine{font-size:13px;margin:0}
 
 /* expand dialog */
@@ -162,106 +159,100 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
 <main id="content" class="wrap">
 
   <div class="hero">
-    <p class="eyebrow">What it is, in plain words</p>
+    <p class="eyebrow">Short guide</p>
     <h1>It's in Your Head</h1>
-    <p class="lead">A small tool that sits along the bottom of your screen. It quietly notices <strong>how you work</strong> — which tools you reach for, how fast you move, and when you get stuck — and shows you that in a glance. Over time it helps your AI assistant work the way you do, instead of the other way around.</p>
-    <div class="tags">
-      <span class="tag">Runs locally</span>
-      <span class="tag">No account</span>
-      <span class="tag">Nothing sent anywhere</span>
-      <span class="tag">You can turn it off</span>
-    </div>
+    <p class="lead">A strip at the bottom of your screen shows what is happening in a session. It follows your tool calls, shows when you are stuck, and draws a portrait of your working style at the end. The assistant can use that portrait to adjust to you.</p>
   </div>
 
   <!-- PORTRAITS FIRST -->
   <section class="section">
-    <p class="eyebrow">Start here</p>
-    <h2>What the portrait actually looks like</h2>
-    <p class="intro">The portrait is a pencil sketch that changes with your working style. These are the five states you'll see most often. Click any one to open it larger and read what it means.</p>
+    <p class="eyebrow">Portrait</p>
+    <h2>What the portrait draws</h2>
+    <p class="intro">The portrait is a pencil sketch that changes with your working style. These are five states it draws. Click one to open it larger.</p>
 
     <div class="gallery">
       <button class="card" type="button" data-portrait="0" aria-label="Open the Rest portrait larger">
         <span class="art"><img src="images/rest.svg" alt="Pencil portrait in a calm, neutral state" width="720" height="760"><span class="zoom">Enlarge ↗</span></span>
-        <span class="card-body"><span class="card-name">Rest</span><span class="card-desc">A calm face. No clear pattern yet.</span></span>
+        <span class="card-body"><span class="card-name">Rest</span><span class="card-desc">No clear reading yet.</span></span>
       </button>
       <button class="card" type="button" data-portrait="1" aria-label="Open the Open portrait larger">
         <span class="art"><img src="images/open.svg" alt="Pencil portrait in an open, exploring state" width="720" height="760"><span class="zoom">Enlarge ↗</span></span>
-        <span class="card-body"><span class="card-name">Open</span><span class="card-desc">Exploring. Many paths, none chosen.</span></span>
+        <span class="card-body"><span class="card-name">Open</span><span class="card-desc">Several paths, none chosen.</span></span>
       </button>
       <button class="card" type="button" data-portrait="2" aria-label="Open the Locked portrait larger">
         <span class="art"><img src="images/locked.svg" alt="Pencil portrait in a focused, locked-in state" width="720" height="760"><span class="zoom">Enlarge ↗</span></span>
-        <span class="card-body"><span class="card-name">Locked</span><span class="card-desc">Focused. One direction, pursued hard.</span></span>
+        <span class="card-body"><span class="card-name">Locked</span><span class="card-desc">One path, held to.</span></span>
       </button>
       <button class="card" type="button" data-portrait="3" aria-label="Open the Aligned portrait larger">
         <span class="art"><img src="images/aligned.svg" alt="Pencil portrait in a relaxed, aligned state" width="720" height="760"><span class="zoom">Enlarge ↗</span></span>
-        <span class="card-body"><span class="card-name">Aligned</span><span class="card-desc">At ease. Exploring and progressing.</span></span>
+        <span class="card-body"><span class="card-name">Aligned</span><span class="card-desc">Options open, progress steady.</span></span>
       </button>
       <button class="card" type="button" data-portrait="4" aria-label="Open the Tense portrait larger">
         <span class="art"><img src="images/tense.svg" alt="Pencil portrait in a tense, uncertain state" width="720" height="760"><span class="zoom">Enlarge ↗</span></span>
-        <span class="card-body"><span class="card-name">Tense</span><span class="card-desc">Uncertain. Working hard, going nowhere.</span></span>
+        <span class="card-body"><span class="card-name">Tense</span><span class="card-desc">High activity, little progress.</span></span>
       </button>
     </div>
 
-    <p class="note">In the strip itself you see a much smaller version: just the bold lines, so it still reads at a glance. The face is an expressive metaphor, not a picture of a real person — and it makes no guesses about who you are.</p>
+    <p class="note">The strip shows the same sketches in fewer lines. The faces are drawings, not pictures of a person.</p>
   </section>
 
   <section class="section">
-    <p class="eyebrow">Concrete example</p>
-    <h2>A normal session</h2>
-    <p class="intro">Nothing here needs to be started or checked. This is what it looks like when you simply get on with your work.</p>
+    <p class="eyebrow">Session</p>
+    <h2>What happens during an hour of work</h2>
+    <p class="intro">The strip is there from the start. You do not have to open it or check it.</p>
     <ol class="timeline">
       <li>
         <div class="when">09:14 · you begin</div>
-        <div class="what">You don't have to open anything.</div>
-        <p>The strip is already there along the bottom of the screen. You don't click it, read it, or configure it. You start work the way you always do.</p>
+        <div class="what">You start work.</div>
+        <p>The strip is already there. You work as you normally do.</p>
       </li>
       <li>
         <div class="when">09:16 · work is moving</div>
-        <div class="what">The strip shows things are going well.</div>
-        <p>Your tool calls are landing and your turns are short. The pulse shows a calm <em>good</em> state. There's nothing to check — you just keep going.</p>
+        <div class="what">Tool calls land.</div>
+        <p>Your turns are short. The pulse shows <em>good</em>.</p>
       </li>
       <li>
         <div class="when">09:32 · you start going in circles</div>
-        <div class="what">Now the problem has a name.</div>
-        <p>You've opened the same file three times in ten minutes. The pulse switches to <em>friction</em>. Instead of wondering vaguely whether something is wrong, you have a clear sign that it is — and you go look at what's stuck.</p>
+        <div class="what">You reopen the same file.</div>
+        <p>Three times in ten minutes. The pulse switches to <em>friction</em>. You stop and look at what is stuck.</p>
       </li>
       <li>
         <div class="when">09:40 · you check what the assistant saw</div>
-        <div class="what">One look, one fix.</div>
-        <p>You run <em>/mirror context</em>. It turns out the assistant couldn't see the file you meant to attach. You correct that in one line and carry on. No more guessing whether it read the right thing.</p>
+        <div class="what">You check what the assistant saw.</div>
+        <p>You run <em>/mirror context</em>. The assistant had not seen the file. You attach it and continue.</p>
       </li>
       <li>
         <div class="when">10:05 · the session ends</div>
-        <div class="what">The portrait sums up how you worked.</div>
-        <p>Direct, focused, thorough — that's the style it read from what you actually did, not from what you said about yourself. Next time, the assistant starts from that instead of asking you to explain again.</p>
+        <div class="what">The session ends.</div>
+        <p>The portrait shows direct, focused, thorough. It is measured from your actions. The next session starts from that reading.</p>
       </li>
     </ol>
   </section>
 
   <section class="section">
-    <p class="eyebrow">The moving parts</p>
-    <h2>What each piece does</h2>
-    <p class="intro">Four small features, plus the portrait. Each one answers one simple question.</p>
+    <p class="eyebrow">Views</p>
+    <h2>What each view shows</h2>
+    <p class="intro">The strip, the drift, the context audit, and the portrait. Adaptation is a setting.</p>
     <div class="grid2">
       <div class="feature">
-        <div class="part">The pulse</div>
-        <h3>Is this going well?</h3>
-        <p>Shows the state of the assistant's current work: going well, locked onto a goal, or hitting friction. It's a status light, not a score or a grade.</p>
+        <div class="part">Pulse</div>
+        <h3>State of the current work</h3>
+        <p>One of three states: good, goal, or friction.</p>
       </div>
       <div class="feature">
         <div class="part">Drift</div>
-        <h3>How did my style change?</h3>
-        <p>The portrait is one moment; drift is the whole session. It shows how the six axes move over time — when you widen your search and when you narrow it down.</p>
+        <h3>Change across the session</h3>
+        <p>A line for each of the six axes. It shows where you widened your search and where you narrowed it.</p>
       </div>
       <div class="feature">
         <div class="part">Context audit</div>
-        <h3>What could the assistant see?</h3>
-        <p>Before you trust an answer, you can check what information the model had this turn, what it didn't have, and what the answer was built on. No more guessing.</p>
+        <h3>What the assistant could see</h3>
+        <p>Lists what the model had this turn, what it did not have, and what the answer used.</p>
       </div>
       <div class="feature">
         <div class="part">Adaptation</div>
-        <h3>Can it adjust to me?</h3>
-        <p>Optional. When switched on, the plugin gives the assistant one small instruction per turn so it works more like you do. It's off by default, and yours to switch off again.</p>
+        <h3>Adjusting the assistant</h3>
+        <p>Off by default. When on, the plugin adds one short instruction per turn based on your portrait.</p>
       </div>
     </div>
 
@@ -293,18 +284,18 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
         </svg>
       </div>
       <div>
-        <div class="part">The portrait</div>
-        <h3 style="margin:0 0 6px;font-size:16px">Six dimensions of your style</h3>
-        <p style="margin:0;color:var(--soft)">Every session it measures how direct you are, how much context you share, whether you explore or stay focused, how deeply you reason, how much you iterate, and how wide you set your scope. It also shows how sure it is. All of it comes from what you did — the sketch only watches how you work.</p>
+        <div class="part">Portrait</div>
+        <h3 style="margin:0 0 6px;font-size:16px">Six axes</h3>
+        <p style="margin:0;color:var(--soft)">Directness, context, exploration, depth, iteration, and scope. Each session also has a confidence value. The values come from your actions.</p>
       </div>
     </div>
   </section>
 
   <section class="section">
-    <p class="eyebrow">Trust</p>
-    <h2>Why it can just keep watching</h2>
+    <p class="eyebrow">Data</p>
+    <h2>Where the data goes</h2>
     <div class="trust">
-      <p>Everything on this page works for one reason: <strong>nothing leaves your machine.</strong> No telemetry, no stored prompts, no credentials, no shell commands. It lives in your own profile's storage, and you can wipe it with one command. You own this data — you aren't the product of it. That isn't a privacy checkbox; it's what lets the rest stay this quiet.</p>
+      <p>The plugin writes to your active profile's storage. It does not send prompts, credentials, or shell commands anywhere. One command deletes the stored data.</p>
     </div>
   </section>
 
@@ -312,8 +303,7 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
 
 <footer>
   <div class="wrap">
-    <p class="closer">The point was never to watch you. It's that the tool finally works the way you do — quietly, locally, and on your terms.</p>
-    <p class="fine">Under the hood: 9 hooks · a background worker · a six-axis portrait · optional local model · everything local · standard-library first.</p>
+    <p class="fine">9 hooks · a background worker · a six-axis portrait · an optional local model · local storage · standard library first.</p>
   </div>
 </footer>
 
@@ -342,20 +332,20 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
   'use strict';
   var P = [
     { name: 'Rest', img: 'images/rest.svg',
-      short: 'A calm face. Nothing to read yet.',
-      detail: 'At the start of a session there isn’t enough signal for a strong read, so the face stays neutral on purpose. It isn’t a judgement — it’s a blank slate.' },
+      short: 'No clear reading yet.',
+      detail: 'At the start of a session there is not enough data for a clear reading. The face is neutral.' },
     { name: 'Open', img: 'images/open.svg',
-      short: 'Exploring. Curious, not committed.',
-      detail: 'Openness is high and focus is low. You’re trying different paths, reading around, and haven’t picked one yet. That’s a normal way to start.' },
+      short: 'Several paths, none chosen.',
+      detail: 'Exploration is high and focus is low. You are trying several paths before choosing one.' },
     { name: 'Locked', img: 'images/locked.svg',
-      short: 'Focused. One direction, pursued hard.',
-      detail: 'Focus is high and openness is low. You know what you want and you’re pushing through. Good for finishing something; less good when you need fresh ideas.' },
+      short: 'One path, held to.',
+      detail: 'Focus is high and exploration is low. You are working on one path.' },
     { name: 'Aligned', img: 'images/aligned.svg',
-      short: 'At ease. Exploring and progressing.',
-      detail: 'Both openness and focus are high, but the face is relaxed. You’re looking around while still making progress — usually the best state to be in.' },
+      short: 'Options open, progress steady.',
+      detail: 'Exploration and focus are both high. You are trying options while making progress.' },
     { name: 'Tense', img: 'images/tense.svg',
-      short: 'Uncertain. Working hard, going nowhere.',
-      detail: 'Openness and focus are both high and the sketch reads as strained. This often means churn: reopening files, changing direction, or fighting the tool.' }
+      short: 'High activity, little progress.',
+      detail: 'Exploration and focus are both high and the reading changes often. This happens when you keep reopening files or changing direction.' }
   ];
 
   var modal = document.getElementById('modal');
