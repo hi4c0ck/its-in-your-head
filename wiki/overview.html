@@ -58,18 +58,18 @@ img{max-width:100%}
   border-radius:14px;overflow:hidden;padding:0;box-shadow:var(--shadow);
   transition:transform .18s ease,border-color .18s ease}
 .card:hover{transform:translateY(-3px);border-color:var(--accent)}
-.art{display:block;position:relative;background:var(--mirror);padding:10px}
-.art img{display:block;width:100%;aspect-ratio:720/760;object-fit:contain;border-radius:8px}
+.art{display:block;position:relative;background:var(--mirror);padding:8px}
+.art img{display:block;width:100%;height:auto;aspect-ratio:5/4;object-fit:cover;object-position:center 40%;border-radius:8px}
 .zoom{position:absolute;right:18px;bottom:18px;font-size:11px;font-weight:700;
   color:var(--mirror-ink);background:rgba(8,12,18,.72);border:1px solid rgba(255,255,255,.18);
   border-radius:999px;padding:3px 9px;opacity:0;transition:opacity .18s ease}
 .card:hover .zoom,.card:focus-visible .zoom{opacity:1}
-.card-body{padding:12px 14px 15px}
-.card-name{display:block;font-weight:750;font-size:15px;margin-bottom:3px}
-.card-desc{display:block;color:var(--soft);font-size:13px;line-height:1.5;min-height:3em}
+.card-body{padding:10px 12px 12px}
+.card-name{display:block;font-weight:750;font-size:14px;margin-bottom:0}
+.card-desc{display:block;color:var(--soft);font-size:12px;line-height:1.5;min-height:1.5em}
 .strip-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px}
 .strip-row .mini{background:var(--mirror);border-radius:10px;padding:8px;width:120px}
-.strip-row .mini img{display:block;width:100%;aspect-ratio:570/570;object-fit:contain}
+.strip-row .mini img{display:block;width:100%;height:auto;aspect-ratio:570/570;object-fit:contain}
 .strip-row .cap{font-size:13px;color:var(--soft)}
 
 .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
@@ -107,7 +107,7 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
   display:grid;grid-template-columns:minmax(0,270px) 1fr;gap:26px;box-shadow:0 24px 80px rgba(0,0,0,.45)}
 @media(max-width:640px){.dialog{grid-template-columns:1fr}}
 .dialog-art{background:var(--mirror);border-radius:12px;display:grid;place-items:center;padding:8px}
-.dialog-art img{display:block;width:100%;max-height:62vh;object-fit:contain}
+.dialog-art img{display:block;width:100%;height:auto;max-height:62vh;object-fit:contain}
 .dialog h3{margin:0 0 8px;font-size:1.3rem;letter-spacing:-.015em}
 .dialog .short{font-weight:650;margin:0 0 10px}
 .dialog .detail{color:var(--soft);margin:0}
@@ -148,23 +148,23 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
     <div class="gallery">
       <button class="card" type="button" data-portrait="0" aria-label="Open the rest portrait larger">
         <span class="art"><img src="images/rest.svg" alt="Neutral portrait sketch" width="720" height="760"><span class="zoom">Enlarge ↗</span></span>
-        <span class="card-body"><span class="card-name">Rest</span><span class="card-desc">Nothing to read yet</span></span>
+        <span class="card-body"><span class="card-name">Rest</span><span class="card-desc">No reading yet</span></span>
       </button>
       <button class="card" type="button" data-portrait="1" aria-label="Open the open portrait larger">
         <span class="art"><img src="images/open.svg" alt="Open, exploring portrait sketch" width="720" height="760"><span class="zoom">Enlarge ↗</span></span>
-        <span class="card-body"><span class="card-name">Open</span><span class="card-desc">Curious, exploring</span></span>
+        <span class="card-body"><span class="card-name">Open</span><span class="card-desc">Open, exploring</span></span>
       </button>
       <button class="card" type="button" data-portrait="2" aria-label="Open the locked portrait larger">
         <span class="art"><img src="images/locked.svg" alt="Locked in portrait sketch" width="720" height="760"><span class="zoom">Enlarge ↗</span></span>
-        <span class="card-body"><span class="card-name">Locked</span><span class="card-desc">Analytical, locked in</span></span>
+        <span class="card-body"><span class="card-name">Locked</span><span class="card-desc">Locked in</span></span>
       </button>
       <button class="card" type="button" data-portrait="3" aria-label="Open the aligned portrait larger">
         <span class="art"><img src="images/aligned.svg" alt="Aligned portrait sketch" width="720" height="760"><span class="zoom">Enlarge ↗</span></span>
-        <span class="card-body"><span class="card-name">Aligned</span><span class="card-desc">Warm, in resonance</span></span>
+        <span class="card-body"><span class="card-name">Aligned</span><span class="card-desc">Warm, aligned</span></span>
       </button>
       <button class="card" type="button" data-portrait="4" aria-label="Open the tense portrait larger">
         <span class="art"><img src="images/tense.svg" alt="Tense portrait sketch" width="720" height="760"><span class="zoom">Enlarge ↗</span></span>
-        <span class="card-body"><span class="card-name">Tense</span><span class="card-desc">Diverging, uncertain</span></span>
+        <span class="card-body"><span class="card-name">Tense</span><span class="card-desc">Tense, uncertain</span></span>
       </button>
     </div>
 
