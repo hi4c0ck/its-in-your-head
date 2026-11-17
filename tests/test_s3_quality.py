@@ -230,11 +230,15 @@ def test_volatile_weak_contrast_moves_portrait():
     alpha~0.006 and the value barely left 0.5. Recalibrated r_d must produce
     a visible swing while still respecting the per-step cap.
     """
-    p = portrait.Portrait()
+    from perception import encoder, resemblance
+    b = encoder.Tier0SketchBackend()
+    fitted = resemblance.fit_strong_thresholds(b)
+    p = portrait.Portrait(strong_r=fitted)
+    r = fitted["directness"]  # per-dim, fitted from the labeled fixture
     seq = []
     for i in range(24):
-        r = 0.06 if (i // 4) % 2 == 0 else -0.06
-        p.update_observed({d: {"S": r, "C": 0.0, "R": r}
+        contrast = 0.6 * r if (i // 4) % 2 == 0 else -0.6 * r
+        p.update_observed({d: {"S": contrast, "C": 0.0, "R": contrast}
                            for d in anchors.DIMENSIONS})
         seq.append(p.snapshot()["values"]["directness"])
     assert max(seq) - min(seq) > 0.10, seq

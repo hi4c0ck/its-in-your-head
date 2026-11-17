@@ -68,6 +68,21 @@ def test_resemblance_and_confidence_are_separate_numbers(vecs):
     assert p["confidence"]["directness"] != pytest.approx(p["resemblance"]["directness"])
 
 
+def test_strong_thresholds_fitted_per_dimension(vecs):
+    """r_d is per-dimension and fitted from the repo's labeled fixture."""
+    b = encoder.Tier0SketchBackend()
+    fitted = resemblance.fit_strong_thresholds(b, anchor_vectors=vecs)
+    assert set(fitted) == set(anchors.DIMENSIONS)
+    assert all(0.0 < v < 1.0 for v in fitted.values())
+    assert len(set(round(v, 4) for v in fitted.values())) > 1  # not uniform
+    assert fitted == resemblance.fit_strong_thresholds(
+        b, anchor_vectors=vecs)  # deterministic
+    assert resemblance.strong_threshold_from_pairs([]) is None
+    assert resemblance.strong_threshold_from_pairs([(0.2, True)]) is None
+    assert resemblance.strong_threshold_from_pairs(
+        [(0.3, True), (0.1, False)]) == pytest.approx(0.1)
+
+
 def test_calibration_is_monotonic_and_separates_fixture():
     cal = resemblance.fit_calibration([(-0.5, False), (-0.2, False), (0.2, True), (0.5, True)])
     rs = [-1.0, -0.5, 0.0, 0.5, 1.0]

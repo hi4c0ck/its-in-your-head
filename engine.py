@@ -33,6 +33,7 @@ try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from .pulse import upset as _pulse_upset
     from .perception import encoder as _encoder
     from .perception import anchors as _anchors
+    from .perception import resemblance as _resemblance
     from .perception import portrait as _portrait_mod
     from .perception import patterns as _patterns
     from .core import settings as _settings
@@ -44,6 +45,7 @@ except ImportError:
     from pulse import upset as _pulse_upset
     from perception import encoder as _encoder
     from perception import anchors as _anchors
+    from perception import resemblance as _resemblance
     from perception import portrait as _portrait_mod
     from perception import patterns as _patterns
     from core import settings as _settings
@@ -197,6 +199,9 @@ class Engine:
         self._backend = None
         self._backend_name = str(
             s.get("perception.encoder") or _encoder.DEFAULT_BACKEND)
+        # Per-dim portrait r_d is fitted from the labeled fixture once per
+        # active backend (never a forced-uniform global knob). None = not yet.
+        self._portrait_r_backend = None
         self._settings = dict(s)
         # Live-settings provider (wired by the register hook): a callable
         # -> {key: value} that re-reads the PERSISTED settings, so a live
@@ -205,6 +210,26 @@ class Engine:
         self._settings_provider = None
 
     # -- backend (lazy) --------------------------------------------------- #
+    def _ensure_portrait_thresholds(self, backend) -> None:
+        """Fit the portrait's per-dimension r_d from the labeled fixture.
+
+        The spec forbids a forced-uniform threshold: each dimension gets its
+        own strong-contrast scale from the repo's own pairs, under the SAME
+        active backend used for the live encode. Fit once per backend; faults
+        degrade to the spec default instead of crashing the observation path.
+        """
+        if getattr(self, "_portrait_r_backend", None) is backend:
+            return
+        try:
+            fitted = _resemblance.fit_strong_thresholds(
+                backend, anchor_vectors=self._anchor_vectors_for(backend))
+        except Exception:
+            logger.exception("its-in-your-head: portrait r_d fit failed")
+            fitted = {}
+        if fitted:
+            self.portrait.strong_r = _portrait_mod.strong_thresholds(fitted)
+        self._portrait_r_backend = backend
+
     def set_settings_provider(self, provider) -> None:
         """Store a live-settings callable (``-> {key: value}``). When set,
         ``_get_backend`` re-reads ``perception.encoder`` on each call and
@@ -981,6 +1006,9 @@ class Engine:
                 logger.exception(
                     "its-in-your-head: goal vector persist failed")
             backend = self._get_backend()
+            # Per-dim r_d fitted from the labeled fixture before ANY observed
+            # update, so target/confidence use the real contrast scale.
+            self._ensure_portrait_thresholds(backend)
             prompt_vector = None
             try:
                 (prompt_vector,) = backend.encode([text])
@@ -1647,6 +1675,7 @@ class Engine:
                     "pulse.objective_friction_min_samples"))
             self.portrait = _portrait_mod.Portrait(
                 retain_days=int(merged.get("observation.retain_days", 90)))
+            self._portrait_r_backend = None
 
 
 # -- process singleton ------------------------------------------------------
