@@ -60,7 +60,11 @@ img{max-width:100%}
 .install .k{font-size:12px;font-weight:750;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);margin-bottom:6px}
 .install ul{margin:0;padding-left:18px;color:var(--soft);font-size:13.5px;line-height:1.6}
 .install li+li{margin-top:4px}
+.install details{margin-top:6px;font-size:13px;color:var(--soft)}
+.install summary{cursor:pointer;font-size:12.5px;font-weight:650;color:var(--accent)}
+.install details ul{margin:6px 0 0}
 code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.92em;color:var(--ink)}
+a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
 
 /* portrait cards: fixed inner inset, equal caption block, consistent row */
 .gallery{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}
@@ -147,41 +151,46 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
 <main id="content" class="wrap">
 
   <div class="hero">
-    <p class="eyebrow">Hermes plugin · v0.1.29</p>
+    <p class="eyebrow">Hermes plugin</p>
     <h1>It's in Your Head</h1>
-    <p class="lead">A 96px strip docked at the bottom of the desktop app shows how a work session is going. It watches <strong>tools, turns and friction</strong> through derived signals. It does not store prompts, and it does not claim to know what you think.</p>
-    <p class="meta">Local by default · derived features only · no network unless you enable the optional model</p>
+    <p class="lead">A small strip at the bottom of the desktop app. <strong>Tools, turns, friction</strong> — shown while you work. No prompts stored. No claims about your thoughts.</p>
+    <p class="meta">Local · derived data only · no network by default</p>
   </div>
 
   <div class="context">
     <div class="ctx">
-      <div class="k">Hermes Agent</div>
-      <p>An open-source agent by Nous Research. It runs in a terminal, the desktop app and chat platforms, and uses tools to do the work.</p>
+      <div class="k"><a href="https://hermes-agent.nousresearch.com/docs/" target="_blank" rel="noopener">Hermes Agent ↗</a></div>
+      <p>Open-source agent by Nous Research. Terminal, desktop app, chat platforms. Runs tools.</p>
     </div>
     <div class="ctx">
-      <div class="k">Plugins</div>
-      <p>Optional add-ons installed into your Hermes plugins folder. They subscribe to agent events and can add commands, tools or a desktop pane.</p>
+      <div class="k"><a href="https://hermes-agent.nousresearch.com/docs/developer-guide/plugins" target="_blank" rel="noopener">Plugins ↗</a></div>
+      <p>Optional add-ons in your Hermes plugins folder. Subscribe to agent events. Add commands, tools or a desktop pane.</p>
     </div>
     <div class="ctx">
-      <div class="k">This plugin</div>
-      <p>Two independent halves: agent hooks with /mirror commands, and a 96px desktop pane. Both are switched on in Settings → Plugins.</p>
+      <div class="k"><a href="https://github.com/hi4c0ck/its-in-your-head" target="_blank" rel="noopener">This plugin ↗</a></div>
+      <p>Agent hooks with /mirror commands and a desktop pane. Separate toggles in Settings → Plugins.</p>
     </div>
   </div>
 
   <div class="install">
     <div class="k">Install and enable</div>
     <ul>
-      <li>Catalog link: <code>hermes://plugin/install?repo=hi4c0ck/its-in-your-head&amp;enable=1</code></li>
-      <li>Manual: copy this folder into <code>~/.hermes/profiles/&lt;profile&gt;/plugins/</code><br>then run <code>hermes -p &lt;profile&gt; plugins enable its-in-your-head</code></li>
-      <li>Turn on the backend and desktop toggles separately in Settings → Plugins.</li>
-      <li>Check the install: <code>hermes -p &lt;profile&gt; plugins doctor its-in-your-head --ci</code></li>
+      <li>Catalog link: <a href="hermes://plugin/install?repo=hi4c0ck/its-in-your-head&amp;enable=1"><code>Install in Hermes ↗</code></a></li>
+      <li>Settings → Plugins: backend and desktop toggles, separate.</li>
     </ul>
+    <details>
+      <summary>Manual setup</summary>
+      <ul>
+        <li>Copy the folder into <code>~/.hermes/profiles/&lt;profile&gt;/plugins/</code><br>then run <code>hermes -p &lt;profile&gt; plugins enable its-in-your-head</code></li>
+        <li>Check: <code>hermes -p &lt;profile&gt; plugins doctor its-in-your-head --ci</code></li>
+      </ul>
+    </details>
   </div>
 
   <section class="section">
     <p class="eyebrow">Portrait</p>
     <h2>What the strip draws</h2>
-    <p class="intro">Six measured dimensions — directness, context richness, exploration, analytical depth, iteration and scope — are projected into openness, focus and warmth. These are engine renders of five states, settled at t = 0. Click one to enlarge it.</p>
+    <p class="intro">Six dimensions — directness, context richness, exploration, analytical depth, iteration, scope — project into openness, focus and warmth. Five rendered states. Click to enlarge.</p>
 
     <div class="gallery">
       <button class="card" type="button" data-portrait="0" aria-label="Open the rest portrait larger">
@@ -209,24 +218,24 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
     <div class="strip-row">
       <div class="mini"><img src="images/strip-rest.svg" alt="Rest portrait at strip size" width="570" height="570"></div>
       <div class="mini"><img src="images/strip-locked.svg" alt="Locked portrait at strip size" width="570" height="570"></div>
-      <span class="cap">At strip size the same faces keep only their bold contours.</span>
+      <span class="cap">At strip size: bold contours only.</span>
     </div>
   </section>
 
   <section class="section">
     <p class="eyebrow">Surface</p>
     <h2>Where the information appears</h2>
-    <p class="intro">Two places: the strip and the <code>/mirror</code> commands in chat.</p>
+    <p class="intro">Two places: the bottom strip and <code>/mirror</code> in chat.</p>
     <div class="grid2">
       <div class="feature">
-        <div class="part">The 96px strip</div>
-        <h3>Always docked</h3>
-        <p>A live tool-call matrix, the portrait sketch, four trend bars and a ticker. Labels shorten at that width by design.</p>
+        <div class="part">The strip</div>
+        <h3>Always visible</h3>
+        <p>Tool-call matrix, portrait sketch, trend bars, ticker. Short labels by design.</p>
       </div>
       <div class="feature">
         <div class="part">The workspace</div>
-        <h3>Expand for inspection</h3>
-        <p>The expand icon opens a wider PULSE view: a per-tool table with call volume and goal / good / friction state.</p>
+        <h3>Workspace</h3>
+        <p>Wider PULSE view. Per-tool table: call volume, goal / good / friction.</p>
       </div>
     </div>
 
@@ -234,15 +243,15 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
       <caption>/mirror — chat quick reference</caption>
       <thead><tr><th scope="col">Command</th><th scope="col">What it shows</th></tr></thead>
       <tbody>
-        <tr><td>/mirror</td><td>Dataset line: events and tokens</td></tr>
-        <tr><td>/mirror pulse</td><td>Goal / good / friction state per label</td></tr>
-        <tr><td>/mirror portrait</td><td>Six dimensions and confidence</td></tr>
-        <tr><td>/mirror portrait draw</td><td>Deterministic ASCII face and six-axis evidence strip</td></tr>
+        <tr><td>/mirror</td><td>Events and tokens</td></tr>
+        <tr><td>/mirror pulse</td><td>Goal / good / friction per label</td></tr>
+        <tr><td>/mirror portrait</td><td>Six dimensions, confidence</td></tr>
+        <tr><td>/mirror portrait draw</td><td>ASCII face, six-axis evidence</td></tr>
         <tr><td>/mirror drift</td><td>Six-dimension series, last eight points</td></tr>
-        <tr><td>/mirror context</td><td>Context-visibility audit: what the model can and cannot see</td></tr>
-        <tr><td>/mirror adaptation</td><td>Adaptation state and rules: on, off, status, rules</td></tr>
-        <tr><td>/mirror engine</td><td>Perception tier: status, enable, disable</td></tr>
-        <tr><td>/mirror reset --yes</td><td>Wipes the dataset, confirmation-gated, config untouched</td></tr>
+        <tr><td>/mirror context</td><td>Model visibility this turn</td></tr>
+        <tr><td>/mirror adaptation</td><td>State and rules: on, off, status, rules</td></tr>
+        <tr><td>/mirror engine</td><td>Perception mode: status, enable, disable</td></tr>
+        <tr><td>/mirror reset --yes</td><td>Wipe dataset, confirmation-gated</td></tr>
       </tbody>
     </table>
   </section>
@@ -250,37 +259,37 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
   <section class="section">
     <p class="eyebrow">Signals</p>
     <h2>What the plugin reads</h2>
-    <p class="intro">Every value below comes from tool and session events. Prompt text is not part of it.</p>
+    <p class="intro">From tool and session events. No prompt text.</p>
     <div class="grid2">
       <div class="feature">
         <div class="part">Pulse</div>
-        <h3>State of tool-call flow</h3>
-        <p>Goal, good or friction. It is a state, not a score.</p>
+        <h3>Tool-call flow</h3>
+        <p>Goal, good or friction. State, not score.</p>
       </div>
       <div class="feature">
         <div class="part">Portrait</div>
-        <h3>Six dimensions and confidence</h3>
-        <p>Directness, context richness, exploration, analytical depth, iteration and scope, with a confidence value.</p>
+        <h3>Six dimensions, confidence</h3>
+        <p>Directness, context richness, exploration, analytical depth, iteration, scope.</p>
       </div>
       <div class="feature">
         <div class="part">Drift</div>
         <h3>Change over a session</h3>
-        <p>A series for each dimension, last eight points. Shows how the portrait moves.</p>
+        <p>Six series, last eight points.</p>
       </div>
       <div class="feature">
         <div class="part">Context audit</div>
         <h3>What was in reach</h3>
-        <p>Lists what the model could and could not see this turn.</p>
+        <p>Model visibility for this turn.</p>
       </div>
       <div class="feature">
         <div class="part">Adaptation</div>
-        <h3>Opt-in only</h3>
-        <p>Off by default. When on, at most one bounded instruction per turn, from deterministic rules.</p>
+        <h3>Opt-in</h3>
+        <p>Off by default. One bounded instruction per turn.</p>
       </div>
       <div class="feature">
         <div class="part">Engine</div>
-        <h3>Two perception tiers</h3>
-        <p>Tier-0: dependency-free sketch embeddings. Tier-1: local ONNX MiniLM, explicitly enabled, CPU-only, with fallback to Tier-0.</p>
+        <h3>Perception</h3>
+        <p>Local sketch by default. Optional local model, on request.</p>
       </div>
     </div>
   </section>
@@ -291,23 +300,23 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
     <ol class="steps">
       <li>
         <div class="what">Capture</div>
-        <p>Nine hooks fire on tool, API, stream and session events. Each only queues a small record: which tool, how long, success or failure, turn index.</p>
+        <p>Nine hooks on tool, API, stream and session events. Queue only: tool, duration, success, turn index.</p>
       </li>
       <li>
         <div class="what">Aggregate</div>
-        <p>A separate, env-isolated worker drains the queue off the hot path and writes derived features to local WAL SQLite in the active profile. Raw prompts are never written.</p>
+        <p>Isolated worker drains the queue. Derived features to local SQLite. No prompts written.</p>
       </li>
       <li>
         <div class="what">Perceive</div>
-        <p>The features produce the six dimensions, the pulse and the drift. Tier-0 runs by default; Tier-1 is opt-in local inference.</p>
+        <p>Features become six dimensions, pulse and drift. Local sketch by default; optional model on request.</p>
       </li>
       <li>
         <div class="what">Surface</div>
-        <p>The strip and the /mirror commands read that local database.</p>
+        <p>Strip and /mirror read the local database.</p>
       </li>
       <li>
         <div class="what">Adapt</div>
-        <p>If enabled, one bounded instruction per turn is emitted. Off by default.</p>
+        <p>One bounded instruction per turn. Off by default.</p>
       </li>
     </ol>
   </section>
@@ -316,7 +325,7 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
     <p class="eyebrow">Privacy</p>
     <h2>Where the data stays</h2>
     <div class="trust">
-      <p>Everything is stored in the active profile's plugin-data directory. No prompt text, reasoning text or credentials are written. When reasoning capture is enabled, deltas are buffered in memory for the stream and discarded at its boundary. The only network call is the explicitly enabled, pinned ONNX model download. <code>/mirror reset --yes</code> wipes the dataset.</p>
+      <p>Profile-local storage. No prompt text, reasoning text or credentials written. Reasoning deltas, when enabled, are buffered in memory for the stream and discarded. One model download, only when enabled. <code>/mirror reset --yes</code> wipes the dataset.</p>
     </div>
   </section>
 
@@ -324,7 +333,7 @@ footer{border-top:1px solid var(--line);margin-top:58px;padding:26px 0 52px;colo
 
 <footer>
   <div class="wrap">
-    <p class="fine">v0.1.29 · Hermes plugin · local by default · Tier-0 stdlib perception</p>
+    <p class="fine">Hermes plugin · local by default</p>
   </div>
 </footer>
 
