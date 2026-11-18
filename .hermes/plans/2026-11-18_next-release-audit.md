@@ -31,6 +31,20 @@ side. Live canary replay passed through the real hook -> persistence path;
 the portrait-selection persistence bug was found, fixed, and live-verified
 in the same pass. No tag created (owner: not yet).
 
+**Update 2026-11-19 (trust gate, third pass): the passthrough prefix-only
+check is replaced by a strict canonical-schema parse (`c2d6d31`).** Forged
+descriptors with approved prefixes (`arg:password:hunter2`,
+`kind:alice_smith`) were accepted by the old check; the engine's trajectory
+intake also persisted `ev["operation"]` directly, bypassing the passthrough.
+Both seams now apply `core/events.py::is_canonical_operation` (closed
+action/kind/type sets, hygienic tool/arg-key fields, bounded shape, strict
+charset — reject, never clean). 27 forged-prefix canaries + persistence
+regression added; pytest 787 passed / 8 skipped; child pool restarted and
+live-smoked (canonical descriptors, 0 legacy rows). The portrait INK
+toggle was flipped by the owner in the live UI and persisted durably
+(`portrait.ink: true` in the user-data doc) — live user-driven proof of the
+persistence fix. No tag created (owner: not yet).
+
 ## Hard blockers
 
 1. **D4 glitch gate is wrong in the shipped pane.**
@@ -224,7 +238,7 @@ Release checks after this pass:
 | D4 threshold | Fixed (6f47e80) |
 | GOAL prompt-blend removal | Present |
 | Sanitizer privacy | Fixed in code + canary/persistence regression tests |
-| CI | Green on HEAD `0c8cdbe` (6/6 matrix): runs/44405009594 |
+| CI | Green on HEAD `c2d6d31` (6/6 matrix): runs/44408742840 |
 | Gateway restart + live replay | EVIDENCED 2026-11-19 via plugin_host_child restart + live canary (see below) |
 | Manifest | 0.1.31 |
 | Tag v0.1.31 | Does not exist — owner tag decision pending |
@@ -300,3 +314,43 @@ Live verification + recovery:
   later test holding an old module reference and calling importlib.reload
   fails. Natural discovery order is green (s5 runs before the mirror
   test); explicit command-line ordering mirror-before-s5 reproduces it.
+
+## Canonical-schema trust gate (third pass, c2d6d31)
+
+Owner finding: `_valid_operation_descriptor()` checked token PREFIXES only,
+so forged strings with approved prefixes (`arg:password:hunter2`,
+`kind:alice_smith`) passed the passthrough as trusted descriptors.
+
+Grammar (producer + gate share the closed sets in `core/events.py`):
+`action:<class> tool:<name> [kind:<category>] [arg:<key>:<type> ...]`
+- action: closed class set AND must equal `_action_for_tool(tool)`;
+- tool: identifier hygiene identical to the producer (`_safe_token`);
+- kind: closed set (extension classes + file + url), at most one, before
+  any arg tag;
+- arg: hygienic key, closed type-name set (exotic types -> `other`),
+  <= 6 unique keys;
+- <= 160 chars, charset alnum + `_-.:` + single spaces; a string needing
+  cleanup is REJECTED, never repaired.
+
+Sealed seams:
+1. `pulse/activity_encoder.py` passthrough — accepts only canonically-valid
+   strings, unchanged; everything else re-sanitized from raw args. Legacy
+   verb:/term:/file:/host:/dir:/path: formats are no longer valid INPUT.
+2. `engine.py` tool_start trajectory intake — persists `ev["operation"]`
+   DIRECTLY (bypasses the capsule passthrough); now applies the same gate,
+   re-deriving the identity-only descriptor for non-canonical input.
+3. Producer canonicality — whole-token 160-char budget (no mid-token
+   truncation), single kind token, deduped arg fallback keys, closed type
+   names; `is_canonical_operation(sanitize_operation(...))` is pinned for
+   the whole canary battery + exotic/mixed/oversize shapes.
+
+Evidence: 27 forged-prefix canaries x (canonical parse + passthrough
+re-sanitization) + forged-operation persistence regression through
+`engine.on_events` -> raw SQL on `pulse_operations`; pytest 787 passed /
+8 skipped; contracts CLEAN; temp budget OK; ESM OK; 19/19 mjs. Child pool
+restarted (9828/26580 at 01:09); live smoke: canonical descriptors, 0
+legacy/forged rows. CI green on c2d6d31 (6/6):
+https://github.com/hi4c0ck/its-in-your-head/actions/runs/44408742840
+Read-side note: legacy persisted ROWS remain scoreable via
+`has_operation_semantics` (scoring never re-emits their text); they age out
+via retention/reset.
