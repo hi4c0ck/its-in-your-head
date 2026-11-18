@@ -5583,7 +5583,6 @@ function ExpandedPortrait({ data, drift, preferences }) {
   const perception = data && data.perception && typeof data.perception === 'object' ? data.perception : null
   const percOn = !!(perception && perception.perception_available)
   const patterns = percOn && Array.isArray(perception.patterns) ? perception.patterns : []
-  const dimSignals = percOn && perception.dim_signals && typeof perception.dim_signals === 'object' ? perception.dim_signals : {}
   // L-DISPLAY: the rolling-reference signal (OOD drift + freshness) surfaces
   // in its own row. ood_drift: 0 = in territory, 1 = out of scope; freshness
   // shows how many dims the reference has reassembled from live use + the
@@ -5625,8 +5624,6 @@ function ExpandedPortrait({ data, drift, preferences }) {
       display: 'inline-block', flexShrink: 0, verticalAlign: 'middle',
     },
   })
-  const dimKeys = axes.filter((d) => dimSignals && Object.prototype.hasOwnProperty.call(dimSignals, d))
-  const dimRows = (dimKeys.length > 0 ? dimKeys : Object.keys(dimSignals))
   const percSection = jsxs('div', {
     style: {
       width: '100%', maxWidth: 480, fontSize: 8, fontFamily: 'var(--ui-font-mono, monospace)',
@@ -5661,10 +5658,13 @@ function ExpandedPortrait({ data, drift, preferences }) {
       // E2 (spec §6 readout): one row per persisted pattern entry
       // (payload order; at most six — the reader-side cap). Each row:
       // name (repeated mark ▪), observed tick+value (prompt_affinity),
-      // interpreted tick+value (agent_affinity), confidence in its own
+      // interpreted tick+value (agent_affinity), read reliability in its own
       // cell, signed amplification tick. A None-valued entry renders
       // '—' (num guard), never a number.
       ...(percOn && patterns.length > 0 ? [
+      // Pattern names ARE the six portrait dimensions; perception.dim_signals
+      // is intentionally NOT rendered a second time here. The separate
+      // DIMENSION inspection table below is the only other dim view.
         jsxs('div', {
           className: 'flex',
           style: { gap: 8, padding: '2px 0', borderBottom: '1px solid ' + V_STROKE, color: V_QUAT, letterSpacing: 1 },
@@ -5672,7 +5672,7 @@ function ExpandedPortrait({ data, drift, preferences }) {
             jsx('span', { style: { flex: '0 0 140px' }, children: 'PATTERNS' }),
             jsx('span', { style: { flex: 1, textAlign: 'right' }, children: 'OBSERVED' }),
             jsx('span', { style: { flex: 1, textAlign: 'right' }, children: 'INTERPRETED' }),
-            jsx('span', { style: { flex: 1, textAlign: 'right' }, children: 'CONF' }),
+            jsx('span', { style: { flex: 1, textAlign: 'right' }, title: 'reliability of this pattern read: evidence count × agreement × top-margin × recency — separate from affinity', children: 'RELIAB' }),
             jsx('span', { style: { flex: '0 0 24px', textAlign: 'right' }, children: 'AMP' }),
           ],
         }),
@@ -5702,7 +5702,7 @@ function ExpandedPortrait({ data, drift, preferences }) {
                   jsx('span', { style: { color: V_SEC }, children: num(p && p.agent_affinity) }),
                 ],
               }),
-              jsx('span', { style: { flex: 1, textAlign: 'right' }, title: 'confidence (separate channel)', children: num(p && p.confidence) }),
+              jsx('span', { style: { flex: 1, textAlign: 'right' }, title: 'pattern-read reliability (evidence × agreement × margin × recency), not an affinity score', children: num(p && p.confidence) }),
               jsx('span', {
                 style: { flex: '0 0 24px', textAlign: 'right', color: V_SEC },
                 title: 'amplification ' + (amp === null ? '—' : num(amp)),
@@ -5712,20 +5712,6 @@ function ExpandedPortrait({ data, drift, preferences }) {
           })
         }),
       ] : []),
-      ...(percOn ? dimRows.map((d) => {
-        const sig = dimSignals[d] && typeof dimSignals[d] === 'object' ? dimSignals[d] : {}
-        return jsxs('div', {
-          key: d,
-          className: 'flex',
-          style: { gap: 8, padding: '3px 0', borderBottom: '1px solid ' + V_STROKE, color: V_QUAT },
-          children: [
-            jsx('span', { style: { flex: '0 0 140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: d, children: d }),
-            jsx('span', { style: { flex: 1, textAlign: 'right', color: V_SEC }, title: 'agent signal', children: num(sig.agent) }),
-            jsx('span', { style: { flex: 1, textAlign: 'right', color: V_SEC }, title: 'prompt signal', children: num(sig.prompt) }),
-            jsx('span', { style: { flex: 1, textAlign: 'right' }, title: 'confidence (separate channel)', children: num(data && data.confidence && data.confidence[d]) }),
-          ],
-        })
-      }) : []),
       // L-DISPLAY: the rolling-reference signal row (OOD drift + freshness).
       // Shown whenever the engine has computed ood_drift or seeded the
       // reference; absent values render '—' (never fabricated).

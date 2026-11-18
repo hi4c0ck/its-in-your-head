@@ -63,7 +63,7 @@ ok(/amp !== null && amp < -HIGH_SIGNAL \? '▼' : ''/.test(ep), 'down tick when 
 // (f) confNum in its OWN cell (the P3 type fix) — never mixed into the
 // bar/affinity rendering
 ok(/num\(p && p\.confidence\)/.test(ep), 'per-pattern confidence rendered in its own cell via num()')
-ok(/title:\s*'confidence \(separate channel\)'/m.test(ep), 'confidence labelled as separate channel')
+ok(/title:\s*'pattern-read reliability/m.test(ep), 'pattern confidence labelled as read reliability')
 ok(!/prompt_affinity\s*\+\s*agent_affinity/.test(ep), 'prompt and agent affinity never blended')
 
 // (g) neutral state: perception_available false OR zero filled

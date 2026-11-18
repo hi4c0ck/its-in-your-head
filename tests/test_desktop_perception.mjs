@@ -21,7 +21,7 @@ assert.ok(ep.length > 0, 'ExpandedPortrait block found')
 ok(/data\s*&&\s*data\.perception/.test(ep), 'ExpandedPortrait reads data.perception key')
 ok(/perception_available/.test(ep), 'ExpandedPortrait gates on perception_available')
 ok(/Array\.isArray\(\s*perception\.patterns\s*\)/.test(ep), 'ExpandedPortrait reads perception.patterns as array')
-ok(/dim_signals/.test(ep), 'ExpandedPortrait reads perception.dim_signals')
+ok(!/dimSignals/.test(ep), 'ExpandedPortrait does not duplicate dim_signals rows')
 ok(/'PERCEPTION'/.test(ep), 'Perception section header rendered inside ExpandedPortrait')
 ok(/percSection/.test(ep) && count(ep, /percSection/g) >= 2, 'percSection built and mounted in ExpandedPortrait children')
 
@@ -35,11 +35,11 @@ ok(/strongP\.repeated\s*===\s*true/.test(ep), 'repeated marker gated on repeated
 ok(/strongP\.evidence/.test(ep), 'strongest row renders evidence count')
 ok(!/\(strongP\.prompt_affinity\s*\+\s*strongP\.agent_affinity|prompt_affinity\s*\+\s*agent_affinity/.test(ep), 'prompt and agent affinity never blended')
 
-// per-dimension rows: prompt/agent signal separate, confidence its own channel
-ok(/num\(sig\.agent\)/.test(ep), 'dim row renders agent signal')
-ok(/num\(sig\.prompt\)/.test(ep), 'dim row renders prompt signal')
-ok(/num\(data && data\.confidence && data\.confidence\[d\]\)/.test(ep), 'dim row renders per-dim confidence as separate channel')
-ok(/title:\s*'confidence \(separate channel\)'/.test(ep), 'confidence labelled as separate channel')
+// pattern rows: the confidence-like column is explicitly a READ RELIABILITY
+// (evidence × agreement × margin × recency), not an affinity score.
+ok(/'RELIAB'/.test(ep), 'pattern column labelled RELIAB, not bare CONF')
+ok(/pattern-read reliability/.test(ep), 'pattern confidence tooltip explains reliability inputs')
+ok(!/dimRows/.test(ep) && !/sig\.agent/.test(ep), 'no duplicate per-dim rows inside perception block')
 
 // 2) neutral path on absent key or perception_available false
 ok(/perception = data && data\.perception && typeof data\.perception === 'object'/.test(ep), 'absent key -> perception null (neutral)')
