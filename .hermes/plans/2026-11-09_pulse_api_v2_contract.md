@@ -111,7 +111,7 @@ interface PulseGoalEntry extends PulseEntryBase {
   support: PulseSupport;
   evidence: {
     source: "prototype_banks" | "recent_capsules" | "none";
-    /** Valid vectors from the prototype banks. */
+    /** Recent capsule vectors only (capsule-only per-tool GOAL). */
     prototype_count: number;
     /** Valid recent capsule vectors available for fallback. */
     capsule_count: number;
@@ -231,7 +231,7 @@ Settings: keep `pulse.min_labeled = 3`; add optional `pulse.goal_min_references`
 
 ## 5. Ranking and array behavior
 
-Each lane returns its own independently ordered array (illustration: LIVE: terminal,browser,github,filesystem / GOAL: github,filesystem,terminal,browser / GOOD: filesystem,... / FRICTION: browser,... — illustrative, not fixed). Rules: `rank` starts at 1 per lane; stable `tool_id` + canonical `tool_name`; return ALL eligible tools (backend does not guess desktop capacity — desktop picks the visible prefix from measured height); deterministic tie-breaking; no ranking jitter on negligible score changes (hysteresis); empty/learning entries remain valid entries (lack of evidence never removes a tool from the registry). The API owns semantic calculation + ranking; the desktop owns visible capacity + presentation.
+Each lane returns its own independently ordered array (illustration: LIVE: terminal,browser,github,filesystem / GOAL: github,filesystem,terminal,browser / GOOD: filesystem,... / FRICTION: browser,... — illustrative, not fixed). Rules: `rank` starts at 1 per lane; stable `tool_id` + canonical `tool_name`; return ALL eligible tools (backend does not guess desktop capacity — desktop picks the visible prefix from measured height); deterministic tie-breaking; no ranking jitter on negligible score changes (1% score quantization, not dual-threshold hysteresis); empty/learning entries remain valid entries (lack of evidence never removes a tool from the registry). The API owns semantic calculation + ranking; the desktop owns visible capacity + presentation.
 
 ## 6. Bubble transition compatibility
 

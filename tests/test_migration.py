@@ -424,3 +424,43 @@ def test_events_prune_age_based_on_retain_days(tmp_path):
         conn.close()
         metrics.set_retain_days(metrics.RETAIN_DAYS_DEFAULT)
         database.set_override(None)
+
+
+def test_v11_to_v12_operation_columns_upgrade(tmp_path):
+    """v11 operation rows gain v12 evidence columns without losing data."""
+    db = tmp_path / "v11_to_v12.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('schema_version', '11')")
+        conn.execute("""CREATE TABLE pulse_operations (
+            id INTEGER PRIMARY KEY,
+            call_id TEXT NOT NULL UNIQUE,
+            tool_name TEXT NOT NULL,
+            turn_id TEXT,
+            operation TEXT,
+            vector BLOB,
+            status TEXT,
+            ts REAL NOT NULL,
+            objective_version INTEGER,
+            historical_assessment REAL,
+            current_assessment REAL,
+            category TEXT
+        )""")
+        conn.execute(
+            "INSERT INTO pulse_operations (call_id, tool_name, ts,"
+            " current_assessment, category) VALUES (?, ?, ?, ?, ?)",
+            ("legacy-call", "terminal", 1.0, 0.75, "aligned"))
+        conn.commit()
+        assert migration.migrate(conn) is True
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(pulse_operations)")}
+        assert {"ended_ts", "result_assessment", "historical_category"} <= cols
+        row = conn.execute(
+            "SELECT result_assessment, historical_category, category"
+            " FROM pulse_operations WHERE call_id='legacy-call'").fetchone()
+        assert row == (0.75, "aligned", "aligned")
+        assert migration.get_schema_version(conn) == 12
+    finally:
+        conn.close()

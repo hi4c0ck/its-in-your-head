@@ -1,0 +1,53 @@
+{
+  "objective": "fix the PULSE GOAL trajectory in the its-in-your-head plugin",
+  "cases": [
+    {
+      "id": "pytest-goal",
+      "operation": "action:execute tool:terminal verb:test_goal_trajectory.py verb:python verb:pytest arg:command:str",
+      "status": "ok",
+      "class": "relevant"
+    },
+    {
+      "id": "search-goal",
+      "operation": "action:search tool:search_files term:trajectory term:descriptor term:GOAL arg:query:str",
+      "status": "ok",
+      "class": "relevant"
+    },
+    {
+      "id": "read-goal-file",
+      "operation": "action:read tool:read_file file:goal_trajectory.py dir:pulse kind:code arg:path:str",
+      "status": "ok",
+      "class": "relevant"
+    },
+    {
+      "id": "patch-goal-file",
+      "operation": "action:edit tool:patch file:goal_trajectory.py dir:pulse kind:code arg:path:str",
+      "status": "ok",
+      "class": "relevant"
+    },
+    {
+      "id": "repo-browser",
+      "operation": "action:browse tool:browser_exec host:github.com path:hi4c0ck path:its-in-your-head arg:url:str",
+      "status": "ok",
+      "class": "relevant"
+    },
+    {
+      "id": "sandwich",
+      "operation": "action:execute tool:terminal verb:sandwich verb:make verb:milk arg:command:str",
+      "status": "ok",
+      "class": "unrelated"
+    },
+    {
+      "id": "pizza",
+      "operation": "action:search tool:web_search term:recipe term:pizza term:best arg:query:str",
+      "status": "ok",
+      "class": "unrelated"
+    },
+    {
+      "id": "generic-code",
+      "operation": "action:execute tool:execute_code arg:code:str",
+      "status": "ok",
+      "class": "ambiguous"
+    }
+  ]
+}

@@ -155,17 +155,59 @@ def test_trajectory_persistence_roundtrip(tmp_path: Path):
     assert loaded["operations"][0]["historical_category"] == "aligned"
 
 
-def test_unrelated_operation_not_rescued_by_prompt_blend():
-    blended = gt.blend_intention(V_ALIGN, V_ORTHOGONAL, V_ALIGN)
-    assert blended is not None
-    assert (gt.cosine(blended, V_ALIGN) or 0) < gt.ALIGN_THRESHOLD
+def test_production_descriptors_separate_relevant_from_unrelated():
+    """Sanitized production-shape traces, not synthetic `sem:` labels."""
+    import json
+
+    from core import events as core_events
+    from perception.encoder import Tier0SketchBackend
+
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures"
+         / "production_operation_descriptors.json").read_text(encoding="utf-8"))
+    backend = Tier0SketchBackend()
+    (objective_vector,) = backend.encode([fixture["objective"]])
+    scored = {}
+    for case in fixture["cases"]:
+        descriptor = case["operation"]
+        if not core_events.has_operation_semantics(descriptor):
+            scored[case["id"]] = (None, case)
+            continue
+        (vector,) = backend.encode([descriptor])
+        scored[case["id"]] = (
+            round(gt._assessment(vector, objective_vector) or 0.0, 4), case)
+    relevant = [v for v, c in scored.values()
+                if c["class"] == "relevant" and v is not None]
+    unrelated = [v for v, c in scored.values()
+                 if c["class"] == "unrelated" and v is not None]
+    assert relevant and unrelated
+    assert min(relevant) - max(unrelated) > 0.05
+    ambiguous = [v for v, c in scored.values() if c["class"] == "ambiguous"]
+    assert ambiguous == [None]
 
 
-def test_intention_blend_is_not_a_self_echo():
-    blended = gt.blend_intention(V_ALIGN, V_ORTHOGONAL)
-    assert blended is not None
-    assert 0.0 < (gt.cosine(blended, V_ALIGN) or 0) < 0.99
-    assert gt.blend_intention(V_ALIGN, None) is None
+def test_success_without_alignment_is_not_progress():
+    """A successful irrelevant operation is execution evidence only."""
+    import json
+
+    from perception.encoder import Tier0SketchBackend
+
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures"
+         / "production_operation_descriptors.json").read_text(encoding="utf-8"))
+    backend = Tier0SketchBackend()
+    (objective_vector,) = backend.encode([fixture["objective"]])
+    st = gt.ObjectiveState()
+    st.version = 1
+    st.vector = objective_vector
+    ev = gt.TrajectoryEvaluator()
+    case = next(c for c in fixture["cases"] if c["id"] == "sandwich")
+    (vector,) = backend.encode([case["operation"]])
+    ev.add_intent("real-1", "terminal", case["operation"],
+                  vector, 1.0, st)
+    rec = ev.complete("real-1", "ok", 2.0, st)
+    assert rec is not None and rec.category == "drifting"
+    assert (rec.current_assessment or 0.0) < gt.ALIGN_THRESHOLD
 
 
 def test_shared_signal_matches_evaluator():
@@ -193,8 +235,9 @@ def test_dashboard_fallback_uses_shared_evaluator(tmp_path: Path):
     gt.update_objective(st, V_ALIGN, 1.0)
     gt.update_objective(st, V_FOLLOW, 2.0)
     ev = gt.TrajectoryEvaluator()
-    ev.add_intent("c1", "read_file", "read_file(sem:goal,path:str)",
-                  V_FOLLOW, 3.0, st)
+    ev.add_intent("c1", "read_file",
+                  "action:read tool:read_file file:goal_trajectory.py "
+                  "kind:code arg:path:str", V_FOLLOW, 3.0, st)
     ev.complete("c1", "ok", 3.5, st)
     pers.persist_trajectory(st, ev.operations)
     loaded = pers.load_trajectory_state()

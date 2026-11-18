@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 # Reuse the already-declared semantic thresholds instead of inventing new
 # magic numbers: aligned >= good threshold, drift <= friction threshold.
 ALIGN_THRESHOLD = 0.6
-INTENTION_CONTEXT_WEIGHT = 0.5
 DRIFT_THRESHOLD = 0.4
 HISTORY_MAX = 32
 OPERATION_WINDOW_MAX = 32
@@ -42,30 +41,6 @@ def cosine(a, b) -> float | None:
     if a is None or b is None or len(a) != len(b):
         return None
     return max(-1.0, min(1.0, sum(x * y for x, y in zip(a, b))))
-
-
-def blend_intention(prompt_vector, operation_vector,
-                    objective_vector=None) -> list[float] | None:
-    """Pre-tool intention = prompt context BLENDED with operation semantics.
-
-    The prompt vector alone echoes the objective (cosine 1.0); the operation
-    label alone loses task context. A 0.5 blend is safe ONLY when the
-    operation itself has some relation to the objective: an unrelated
-    operation must not be promoted by prompt-context admixture alone.
-    """
-    p, o = _norm(prompt_vector), _norm(operation_vector)
-    if o is None:
-        return None
-    if p is None or len(p) != len(o):
-        return o
-    if objective_vector is not None:
-        op_sim = cosine(o, objective_vector)
-        # No measurement or a below-drift relation: keep the operation's
-        # own semantics instead of rescuing it with the prompt vector.
-        if op_sim is None or op_sim < DRIFT_THRESHOLD:
-            return o
-    weight = INTENTION_CONTEXT_WEIGHT
-    return _norm([weight * x + (1.0 - weight) * y for x, y in zip(p, o)])
 
 
 @dataclass

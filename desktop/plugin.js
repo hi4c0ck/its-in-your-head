@@ -2341,12 +2341,13 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
   // the ripple PERSISTS (a rolling band seed keeps it moving) at an
   // intensity proportional to F'. No landing window, no timer.
   const upVal = IYH_UPSET_STATE.value
-  // v0.1.28: the glitch ball is visible from the tier-1 floor (IYH_UPSET_BALL_TIER),
-  // not tier 2 only; intensity scales 0..1 over floor..1 (0.30 = gentle, 1.0 = full).
-  const upInt = upVal > IYH_UPSET_BALL_TIER
-    ? Math.min(1, (upVal - IYH_UPSET_BALL_TIER) / (1 - IYH_UPSET_BALL_TIER))
+  // D4 (locked contract): lane entry is tier 1 / 0.30; the SUSTAINED glitch
+  // is tier 2 / 0.65. Intensity scales over the glitch tier..1
+  // (0.65 = gentle, 1.0 = full). pulse/upset.py::_tier is the source of truth.
+  const upInt = upVal > IYH_UPSET_GLITCH_TIER
+    ? Math.min(1, (upVal - IYH_UPSET_GLITCH_TIER) / (1 - IYH_UPSET_GLITCH_TIER))
     : 0
-  const upSustained = IYH_UPSET_STATE.tier >= 1 && upVal >= IYH_UPSET_BALL_TIER
+  const upSustained = IYH_UPSET_STATE.tier >= 2 && upVal >= IYH_UPSET_GLITCH_TIER
   const gActive = pulseActive || upSustained
   const gIdx = (upSustained && !pulseActive)
     ? Math.floor(gNow / 250)   // rolling band seed: the ripple moves while it lasts

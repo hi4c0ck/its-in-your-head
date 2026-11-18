@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import random
-import re
 import subprocess
 import sys
 import tempfile
@@ -23,6 +22,28 @@ from . import schema, stories
 
 ROOT = Path(__file__).resolve().parents[2]
 TURN_SECONDS = 40.0  # realistic cadence; 80 turns ~53 min vs 1h value half-life
+
+
+def _story_operation(tool: str, story_id: str, phase_id: str) -> str:
+    """Production-shaped sanitized descriptor — no raw prompt token."""
+    from core import events as core_events
+
+    slug = story_id.replace("-", "_")
+    if tool in ("search_files", "web_search", "session_search"):
+        return core_events.sanitize_operation(
+            tool, {"query": "%s %s" % (slug, phase_id)})
+    if tool in ("read_file", "patch"):
+        return core_events.sanitize_operation(
+            tool, {"path": "D:/work/its-in-your-head/pulse/%s.py" % slug})
+    if tool == "terminal":
+        return core_events.sanitize_operation(
+            tool, {"command": "python -m pytest tests/test_%s.py" % slug})
+    if tool == "browser_exec":
+        return core_events.sanitize_operation(
+            tool, {"url": "https://github.com/hi4c0ck/its-in-your-head/tree/%s"
+                   % phase_id})
+    return core_events.sanitize_operation(
+        tool, {"task_id": "%s-%s" % (slug, phase_id)})
 
 
 def _repo_commit() -> str:
@@ -99,9 +120,7 @@ def run_story(story_id: str, turns: int = 80, seed: int = 8117,
                 prompt = rng.choice(phase["prompts"])
                 tool = rng.choice(phase["tools"])
                 status = rng.choice(phase["statuses"])
-                match = re.search(r"[A-Za-z][A-Za-z0-9_-]{2,31}", prompt)
-                sem = (match.group(0) if match else "task").lower()[:32]
-                operation = "%s(sem:%s)" % (tool, sem)
+                operation = _story_operation(tool, story_id, phase["id"])
                 reasoning = rng.choice(phase["reasoning"])
                 tid = "t%d" % i
                 # Realistic session cadence: ~40 s per turn (80 turns ~53 min)

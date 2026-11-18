@@ -72,11 +72,15 @@ Pure, deterministic, no clock.
 - **thresholds** recalibrated on the 0-baseline accumulate scale (goal .80 /
   good .60 / friction .40 are similarity-scale; shift for the accumulate scale).
 
-### Open knobs (confirm before coding the value formula)
-1. Driver: pure `status` slice (good=ok, friction=error) vs channel-gated
-   (only calls similar to that tool's labeled good/friction bank count)?
-2. `half_life` default (calls) — and whether GOOD should also require
-   `status=="ok"` + a labeled-good example to count (quality gate).
+### Locked decisions (resolved in code)
+1. Driver: **channel-gated**. A capsule contributes only when its similarity
+   to that tool's labeled GOOD or user-FRICTION bank crosses the lane
+   threshold; a raw status slice is not used.
+2. Time decay: `PULSE_VALUE_HALF_LIFE_S = 3600` (one hour) on capsule age.
+   GOOD and user-FRICTION share one evidence budget; objective-friction is a
+   separate capped hint. No `status=="ok"` quality gate is applied — a
+   channel match is the quality gate. `PULSE_ACCUM_HALF_LIFE = 3` effective
+   calls controls saturation.
 
 ## P1 (structural, empirical-calibration-dependent)
 - DONE (structural, safe): `score_turn` prompt-only mode now ranks by prompt

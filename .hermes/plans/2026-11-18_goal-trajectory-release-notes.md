@@ -16,6 +16,8 @@
 ## Honest limits
 - `HYSTERESIS = 0.01` is score quantization / churn damping, not a
   full hysteresis model with separate enter/exit thresholds.
+- Prompt similarity is NOT blended into operation assessment; ambiguous
+  descriptors with no semantic token are unmeasured, not drift.
 - Absent similarity stays `null` and is excluded from the global value;
   it is never rendered as zero progress.
 - A successful tool call is not progress evidence by itself; only
@@ -25,3 +27,6 @@
 - `pytest -q` green.
 - Three-story metrics board regenerated with `aligned`, `exploring`,
   `drifting`, `recovering` and `productive_detour` trajectories.
+
+## Deployment note
+- `core/events.py` is agent-side, loaded at gateway process start. After installing this release, restart the Hermes gateway/session; restarting only the plugin-host child refreshes the dashboard mirror, not the production descriptor emitter.

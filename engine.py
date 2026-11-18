@@ -38,6 +38,7 @@ try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from .perception import portrait as _portrait_mod
     from .perception import patterns as _patterns
     from .core import settings as _settings
+    from .core import events as _events
 except ImportError:
     import pulse
     from pulse import matrix as _pulse_matrix
@@ -51,6 +52,7 @@ except ImportError:
     from perception import portrait as _portrait_mod
     from perception import patterns as _patterns
     from core import settings as _settings
+    from core import events as _events
 
 logger = logging.getLogger(__name__)
 
@@ -532,19 +534,21 @@ class Engine:
                         "its-in-your-head: engine tool_start feed failed")
                 try:
                     call_id = str(ev.get("tool_call_id") or "")
-                    # Intention = prompt context BLENDED with sanitized
-                    # operation semantics. Using the prompt alone echoes the
-                    # objective (cosine 1.0); using the label alone loses the
-                    # task context and labels everything drift.
+                    # Production GOAL reads ONLY the sanitized operation
+                    # descriptor. Prompt similarity is a separate context
+                    # signal and must never manufacture an aligned score.
+                    # Descriptors without an allowlisted semantic token are
+                    # ambiguous -> no measurement, not a drift claim.
+                    descriptor = str(ev.get("operation") or
+                                     ev.get("tool_name") or "")
                     try:
-                        (op_vec,) = self._get_backend().encode(
-                            [str(ev.get("operation") or
-                                 ev.get("tool_name") or "")])
+                        if _events.has_operation_semantics(descriptor):
+                            (op_vec,) = self._get_backend().encode([descriptor])
+                        else:
+                            op_vec = None
                     except Exception:
                         op_vec = None
-                    vec = _goal_traj.blend_intention(
-                        self._lookup_prompt_vector(ev.get("turn_id")),
-                        op_vec, self._objective.vector)
+                    vec = op_vec
                     self._trajectory.add_intent(
                         call_id, str(ev.get("tool_name") or "unknown"),
                         str(ev.get("operation") or ""), vec,

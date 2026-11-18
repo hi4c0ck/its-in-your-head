@@ -97,7 +97,7 @@ html,body{margin:0;height:100%;background:var(--card);color:var(--fg);
 <div class="app">
   <aside class="rail">
     <h1>IYH · emulation runs</h1>
-    <div class="sub">Real engine · synthetic core prompts</div>
+    <div class="sub">Real engine · synthetic core prompts · GOAL board is synthetic; production replay is in tests/fixtures/production_operation_descriptors.json</div>
     <div class="list" id="list"></div>
     <div class="foot">Bookmark/hide are local to this page. Delete only hides a run; use the CLI <code>--purge</code> to remove files.</div>
   </aside>
