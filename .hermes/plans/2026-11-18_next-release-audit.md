@@ -7,7 +7,7 @@ packaging. No implementation changes were made during this audit.
 ## Verdict
 
 **Update 2026-11-18 (post-fix): code is PASS-WARN; release still BLOCK until
-CI and a gateway restart are observed.** Both semantic blockers were fixed
+a gateway restart and live production replay are observed.** Both semantic blockers were fixed
 in code and validated locally. The live profile DB still shows old-style
 descriptors because `core/events.py` is agent-side and is loaded at gateway
 process start; a gateway restart is required before live replay is valid. A
@@ -130,4 +130,5 @@ new release tag has NOT been created.
 - Added real v11 -> v12 migration fixture.
 - Local gates: pytest 689 passed / 8 skipped; all `.mjs` tests pass; ESM OK;
   doctor OK; pane hash synced; DB integrity OK; raw text columns empty.
-- CI for the new commit is still pending; do not tag until it is green.
+- CI for commit `6f47e80` is green: https://github.com/hi4c0ck/its-in-your-head/actions/runs/44369943457
+- Do not tag until a gateway restart confirms the new descriptors in live events.
