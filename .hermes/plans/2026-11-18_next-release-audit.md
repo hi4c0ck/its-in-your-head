@@ -21,6 +21,16 @@ leaked `verb:hunter2`). Value extraction is now removed outright (see
 "Sanitizer privacy hardening" below). CI is green on HEAD `ad3a5fa`. Still
 pending: gateway restart + live replay and the tag decision. No tag created.
 
+**Update 2026-11-19 (live evidence): ALL code blockers are fixed AND
+live-verified; the release is ready for the owner's tag decision.** The
+"gateway restart required" assumption was WRONG: agent-side plugin code
+(hooks, `core/events.py`) runs in the isolated `plugin_host_child`, not the
+gateway process — a child restart (gateway auto-respawns) loads the new
+code, and the warm-pool rotation had already refreshed part of the write
+side. Live canary replay passed through the real hook -> persistence path;
+the portrait-selection persistence bug was found, fixed, and live-verified
+in the same pass. No tag created (owner: not yet).
+
 ## Hard blockers
 
 1. **D4 glitch gate is wrong in the shipped pane.**
@@ -214,7 +224,79 @@ Release checks after this pass:
 | D4 threshold | Fixed (6f47e80) |
 | GOAL prompt-blend removal | Present |
 | Sanitizer privacy | Fixed in code + canary/persistence regression tests |
-| CI | Green on HEAD `ad3a5fa` (6/6 matrix): runs/44397211291 |
-| Gateway restart + live replay | Not evidenced — still pending |
+| CI | Green on HEAD `0c8cdbe` (6/6 matrix): runs/44405009594 |
+| Gateway restart + live replay | EVIDENCED 2026-11-19 via plugin_host_child restart + live canary (see below) |
 | Manifest | 0.1.31 |
-| Tag v0.1.31 | Does not exist — deliberately not tagged |
+| Tag v0.1.31 | Does not exist — owner tag decision pending |
+
+## Live restart + replay evidence (2026-11-19)
+
+Hosting-model correction: the plugin uses ISOLATED hosting — hooks and
+`core/events.py` execute in `plugin_host_child` (the child imports the
+plugin and serves callbacks to the gateway by reference). Killing the
+children refreshes the WRITE side; the gateway process itself never loads
+the plugin code, so no gateway restart is needed (and none was performed —
+the live agent session survived).
+
+- Pre-restart state: live DB `pulse_operations` already showed new-style
+  descriptors (pool rotation had spawned post-fix children); 0 legacy
+  `verb:/term:/file:/host:` rows in the 32-row window.
+- Killed children 28212/8756 (16144 had already rotated out); gateway
+  respawned 26116/3856 at 00:48:58/59 — both after every fix commit.
+- LIVE CANARY: a real `terminal` tool call carrying
+  `--password hunter2 --api-key sk-live-CANARY123` flowed through the
+  production pre/post_tool_call hooks; the persisted descriptor is
+  `action:execute tool:terminal arg:command:str arg:timeout:int` —
+  0 canary fragments, 0 legacy tokens in the whole window.
+- CI for `0c8cdbe` (portrait persistence fix) green, 6/6 matrix:
+  https://github.com/hi4c0ck/its-in-your-head/actions/runs/44405009594
+
+## Portrait selections persistence bug (owner-reported, fixed 0c8cdbe)
+
+Symptom: DRAWING template + INK selections did not survive restarts or
+session changes.
+
+Root causes (forensic):
+- INK (`iyhInvertSource`) was a module-level `let` — NO persistence door.
+- DRAWING persisted only to renderer localStorage (`ctx.storage`); the
+  desktop app QUARANTINES that store on multi-instance lock contention.
+  The user's `soft-flow-study` selection was found in
+  `Local Storage.stuck2/leveldb` while the live store held the default
+  `neutral-pencil` (two quarantine dirs: 2026-06-05, 2026-11-07).
+
+Fix (two-door persistence):
+- `portrait.template` / `portrait.ink` are settings keys; source of truth
+  = profile-DB user-data store (`meta.plugin_settings` via userstore).
+  POST /settings writes durably; GET /settings adds the raw override
+  document as `user`. Child fallback literal updated in lockstep.
+- Pane: INK persists via ctx.storage + backend mirror; template mirrors
+  every set; register() hydrates from durable overrides (backend wins)
+  and seeds the backend from local values when no override exists.
+  Feature-detected degrade for hosts without ctx.rest.
+- Tests: `tests/test_portrait_preferences_persistence.py` (roundtrip,
+  restart simulation, false-as-override, unknown-key 400, isolated-child
+  acceptance) + portrait-engine mjs section 12 (storage+mirror, full
+  module-realm reload restore, hydration adopt/seed, legacy degrade).
+- Gates: pytest 717 passed / 8 skipped (one load-flake in
+  test_reasoning_capture_fires_once_per_turn on the first run, green on
+  isolated + full re-run); contracts CLEAN; temp budget OK; ESM OK;
+  19/19 mjs; doctor OK.
+
+Live verification + recovery:
+- Recovered the lost `soft-flow-study` selection into the durable doc via
+  the plugin's own userstore.save (merge — existing settings preserved).
+- Renderer remount (kill renderer child, app respawns): the pane hydrated
+  from the LIVE child, adopted `soft-flow-study` into localStorage
+  (verified in the active LevelDB) and seeded `portrait.ink: false` via
+  POST /settings — accepted by the live isolated child (durable doc
+  verified). INK's historical value was never persisted anywhere, so it
+  starts at the honest default; the next toggle persists.
+- Known host boundary: a future multi-instance localStorage quarantine
+  can still wipe the renderer cache — the durable backend override now
+  restores the selections on the next pane register (the structural fix).
+- Pre-existing latent test-order issue (NOT introduced by this pass):
+  `test_settings_fallback_mirror.py::test_child_settings_fallback_is_stable`
+  deletes `dashboard*` sys.modules entries without restoring them; any
+  later test holding an old module reference and calling importlib.reload
+  fails. Natural discovery order is green (s5 runs before the mirror
+  test); explicit command-line ordering mirror-before-s5 reproduces it.
