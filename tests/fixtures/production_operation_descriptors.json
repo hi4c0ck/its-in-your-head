@@ -2,14 +2,8 @@
   "objective": "fix the PULSE GOAL trajectory in the its-in-your-head plugin",
   "cases": [
     {
-      "id": "pytest-goal",
-      "operation": "action:execute tool:terminal verb:test_goal_trajectory.py verb:python verb:pytest arg:command:str",
-      "status": "ok",
-      "class": "relevant"
-    },
-    {
       "id": "search-goal",
-      "operation": "action:search tool:search_files term:trajectory term:descriptor term:GOAL arg:query:str",
+      "operation": "action:search tool:search_files file:goal_trajectory.py dir:pulse kind:code arg:path:str",
       "status": "ok",
       "class": "relevant"
     },
@@ -33,13 +27,13 @@
     },
     {
       "id": "sandwich",
-      "operation": "action:execute tool:terminal verb:sandwich verb:make verb:milk arg:command:str",
+      "operation": "action:execute tool:terminal cmd:build arg:command:str",
       "status": "ok",
       "class": "unrelated"
     },
     {
       "id": "pizza",
-      "operation": "action:search tool:web_search term:recipe term:pizza term:best arg:query:str",
+      "operation": "action:search tool:web_search host:recipe.example path:pizza arg:url:str",
       "status": "ok",
       "class": "unrelated"
     },

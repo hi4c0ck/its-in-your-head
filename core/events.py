@@ -92,7 +92,7 @@ def _error_type(error) -> "str | None":
 error_type = _error_type
 
 
-# v0.1.32: production operation descriptors are deterministic, bounded and
+# v0.1.31: production operation descriptors are deterministic, bounded and
 # built ONLY from tool identity, an action class and allowlisted argument
 # semantics. No raw argument values, prompts, reasoning or results survive.
 _SEMANTIC_ARG_KEYS = frozenset({
@@ -103,6 +103,16 @@ _PATH_KEYS = frozenset({"path", "file", "file_path", "filename"})
 _COMMAND_KEYS = frozenset({"command", "cmd"})
 _URL_KEYS = frozenset({"url", "uri"})
 _TERM_KEYS = frozenset({"query", "q", "pattern"})
+# Only explicitly approved executables may contribute a semantic class.
+# The literal command text is never copied into a descriptor.
+_SAFE_COMMAND_CLASSES = {
+    "pytest": "test", "unittest": "test", "tox": "test",
+    "git": "vcs", "hg": "vcs", "svn": "vcs",
+    "python": "run", "python3": "run", "node": "run", "bash": "run",
+    "sh": "run", "make": "build", "cmake": "build", "cargo": "build",
+    "go": "build", "npm": "build", "npx": "build", "gradle": "build",
+    "mvn": "build", "pip": "build", "uv": "build",
+}
 _DENY_TOKENS = frozenset({
     "token", "secret", "password", "passwd", "api", "apikey", "bearer",
     "credential", "credentials", "authorization", "private",
@@ -212,13 +222,24 @@ def _semantic_parts(raw_key, value) -> list[str]:
         for segment in _safe_tokens(tail.replace("/", " "), 32, 2):
             out.append(f"path:{segment}")
         return out
-    if key in _COMMAND_KEYS or key in _TERM_KEYS:
-        prefix = "verb" if key in _COMMAND_KEYS else "term"
-        raw = str(value or "").replace("\\", "/").replace("/", " ")
-        # Prefer specific file-like tokens over generic path/flag words.
-        tokens = _safe_tokens(raw, 32, 6)
-        tokens.sort(key=lambda t: (("." in t), len(t)), reverse=True)
-        return [f"{prefix}:{t}" for t in tokens[:3]]
+    if key in _COMMAND_KEYS:
+        # Only a canonical class from an explicit executable allowlist may
+        # survive. Flags, paths and argument values are never copied.
+        raw = str(value or "").replace("\\", "/").replace('"', " ")
+        words = raw.split()[:4]
+        found = set()
+        for word in words:
+            base = word.strip("'\"()[]{}:,").rstrip("/").split("/")[-1].lower()
+            if base in _SAFE_COMMAND_CLASSES:
+                found.add(_SAFE_COMMAND_CLASSES[base])
+        for cls in ("test", "vcs", "build", "run"):
+            if cls in found:
+                return [f"cmd:{cls}"]
+        return []
+    if key in _TERM_KEYS:
+        # query/pattern are user content. No lexical token is persisted;
+        # a structural marker keeps the operation measurable without text.
+        return ["kind:query"]
     return []
 
 
@@ -248,7 +269,7 @@ def sanitize_operation(tool_name, args) -> str:
     return " ".join(parts)[:160]
 
 
-_OPERATION_SEMANTIC_MARKERS = ("file:", "verb:", "term:", "host:", "kind:")
+_OPERATION_SEMANTIC_MARKERS = ("file:", "dir:", "host:", "path:", "kind:", "cmd:")
 
 
 def has_operation_semantics(operation: str) -> bool:
