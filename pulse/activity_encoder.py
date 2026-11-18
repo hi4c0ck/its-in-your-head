@@ -34,49 +34,48 @@ CAPSULE_FIELDS = frozenset({
     "tool_call_id", "session_id", "turn_id", "task_id", "ts",
 })
 
-# The descriptor vocabulary core.events.sanitize_operation can emit. The
-# collector-supplied ``operation`` passthrough is accepted ONLY when every
-# token belongs to it — an arbitrary free-text "operation" string from a
-# future producer is rejected, never persisted. The legacy markers keep
-# pre-hardening descriptors (already enqueued) scoreable.
-_OPERATION_PREFIXES = ("action:", "tool:", "kind:", "arg:",
-                       "file:", "verb:", "term:", "host:", "dir:", "path:")
+# The collector-supplied ``operation`` passthrough is a TRUST gate: it
+# accepts ONLY strings that parse as the canonical descriptor schema
+# (core.events.is_canonical_operation — closed action classes, closed kind
+# set, hygienic tool/arg-key fields, closed arg type names, bounded shape).
+# A prefix check alone is not a boundary: `arg:password:hunter2` and
+# `kind:alice_smith` carry approved prefixes with forged content. Legacy
+# pre-hardening formats (verb:/term:/file:/host:/dir:/path:) are NO LONGER
+# accepted as input — the current sanitizer cannot emit them; legacy
+# persisted rows stay scoreable on the read side (has_operation_semantics).
 
 
 def _valid_operation_descriptor(operation: str) -> bool:
-    safe = "".join(c for c in operation
-                   if c.isalnum() or c in "_-.:(), ")
-    tokens = safe.split()
-    return bool(tokens) and all(t.startswith(_OPERATION_PREFIXES)
-                                for t in tokens)
+    # Lazy import: core.events owns the schema (single policy); importing
+    # at module load would couple pulse <-> core import order.
+    from core import events as _core_events
+    return _core_events.is_canonical_operation(operation)
 
 
 def sanitize_operation(tool_name, args=None, event: dict | None = None) -> str:
     """Privacy-safe operation descriptor (single policy: core.events).
 
     Accepts the collector's already-sanitized ``operation`` signature only
-    when every token belongs to the approved descriptor vocabulary; raw
-    args are delegated to ``core.events.sanitize_operation`` (categories
-    and key/type tags only — never basename/verb/host/query free text).
-    Falls back to the bare tool name when no args dict is available.
-    Never returns full args or any result content.
+    when it parses as the CANONICAL descriptor schema (strict grammar, not
+    a prefix check); raw args are delegated to
+    ``core.events.sanitize_operation`` (categories and key/type tags only —
+    never basename/verb/host/query free text). Falls back to the bare tool
+    name when no args dict is available. Never returns full args or any
+    result content.
     """
     tool = str(tool_name or (event or {}).get("tool_name") or "unknown")
     if not isinstance(args, dict):
         # C6 tool events carry args_chars only, never raw args.
         return tool
     lowered = {str(k).lower(): v for k, v in args.items()}
-    # The collector may provide the already-sanitized signature. Accept
-    # only the approved descriptor vocabulary; arbitrary arg text (even
-    # disguised as an "operation") never becomes a persistent record.
+    # The collector may provide the already-sanitized signature. Accept it
+    # UNCHANGED only when it is canonically valid; anything else (forged
+    # prefixes, legacy formats, free text) is re-sanitized from the raw
+    # args, never persisted as-is.
     operation = lowered.get("operation")
     if isinstance(operation, str) and operation \
             and _valid_operation_descriptor(operation):
-        safe = "".join(c for c in operation
-                       if c.isalnum() or c in "_-.:(), ")
-        return safe[:160]
-    # Lazy import: core.events is the single sanitization policy; importing
-    # at module load would couple pulse <-> core import order.
+        return operation
     from core import events as _core_events
     return _core_events.sanitize_operation(tool, args)
 

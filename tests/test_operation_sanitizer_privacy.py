@@ -213,3 +213,124 @@ def test_persisted_descriptors_are_canary_free(env):
         for fragment in forbidden:
             assert fragment.lower() not in persisted.lower(), \
                 f"{fragment!r} leaked into PERSISTED descriptor {persisted!r}"
+
+
+# --- forged-prefix canaries: the passthrough TRUST gate ------------------
+# A prefix check alone is not a boundary: these strings carry approved
+# prefixes (or legacy ones) with forged content and must NEVER be accepted
+# as trusted descriptors — neither by the capsule passthrough nor by the
+# engine's trajectory intake (which persists the operation column).
+
+FORGED_DESCRIPTORS = [
+    "arg:password:hunter2",                                # forged arg value
+    "kind:alice_smith",                                    # forged kind
+    "verb:hunter2",                                        # legacy prefix
+    "term:john.doe@example.com",                           # legacy + charset
+    "file:alice_resume_2026.pdf",                          # legacy basename
+    "host:internal.corp.example",                          # legacy host
+    "action:execute tool:terminal verb:hunter2",           # canonical head + legacy tail
+    "action:execute tool:terminal arg:command:hunter2",    # forged type name
+    "action:execute tool:terminal arg:password:str",       # deny-token key
+    "action:execute tool:terminal kind:secret",            # kind outside closed set
+    "action:destroy tool:terminal",                        # forged action class
+    "action:read tool:terminal",                           # action/tool mismatch
+    "action:execute tool:--password",                      # flag-like tool field
+    "action:execute tool:",                                # empty tool field
+    "action:execute tool:terminal arg:command:str extra",  # bare token
+    "action:execute tool:terminal arg:command:str,arg:timeout:int",  # comma
+    "action:execute  tool:terminal",                       # double space
+    " action:execute tool:terminal",                       # leading space
+    "action:execute tool:terminal kind:code kind:url",     # duplicate kind
+    "action:execute tool:terminal arg:command:str kind:code",  # kind after arg
+    "action:execute tool:terminal arg:command:str arg:command:int",  # dup key
+    "action:execute tool:terminal " + " ".join(
+        f"arg:k{i}:str" for i in range(7)),                # > 6 arg tags
+    "action:execute tool:terminal " + "x" * 200,           # over the 160 cap
+    "hunter2 secret payload",                              # plain free text
+    "action:execute tool:terminal arg:command:Hunter2",    # type-name case
+    "action:execute tool:terminal arg::str",               # empty arg key
+    "action:execute tool:terminal arg:command:",           # empty arg type
+]
+
+
+@pytest.mark.parametrize("forged", FORGED_DESCRIPTORS)
+def test_forged_descriptors_fail_canonical_parse(forged):
+    assert not events.is_canonical_operation(forged), \
+        f"forged descriptor accepted: {forged!r}"
+
+
+@pytest.mark.parametrize("forged", FORGED_DESCRIPTORS)
+def test_forged_passthrough_is_resanitized_not_accepted(forged):
+    args = {"operation": forged, "command": "login --password hunter2"}
+    op = activity_encoder.sanitize_operation("terminal", args=args)
+    assert op != forged
+    assert events.is_canonical_operation(op)
+    assert op == events.sanitize_operation("terminal", args)
+    assert "hunter2" not in op and "alice" not in op
+
+
+@pytest.mark.parametrize("case", CANARIES, ids=[c[0] for c in CANARIES])
+def test_real_sanitizer_output_is_canonical(case):
+    """Producer/gate lockstep: everything the sanitizer emits must parse."""
+    _, tool, args, _ = case
+    assert events.is_canonical_operation(events.sanitize_operation(tool, args))
+
+
+def test_producer_canonical_for_exotic_and_mixed_args():
+    class Weird:
+        pass
+
+    # Exotic type names collapse to the bounded 'other' category.
+    d = events.sanitize_operation("terminal", {"command": "x", "obj": Weird()})
+    assert "arg:obj:other" in d and events.is_canonical_operation(d)
+    # Mixed semantic keys: at most ONE kind token (first sorted key wins).
+    d = events.sanitize_operation(
+        "read_file", {"path": "a.py", "url": "https://x.example"})
+    assert d.count("kind:") == 1 and events.is_canonical_operation(d)
+    # Deny-token keys collapse to the same fallback -> no duplicate arg keys.
+    d = events.sanitize_operation("terminal", {"password": "x", "secret": "y"})
+    assert d.count("arg:arg:") <= 1 and events.is_canonical_operation(d)
+    # JSON type battery.
+    d = events.sanitize_operation("terminal", {
+        "a": None, "b": True, "c": [1], "d": {"k": "v"}, "e": 1.5, "f": 3})
+    assert events.is_canonical_operation(d)
+    # Long keys: the 160-char budget drops WHOLE tokens, never mid-token.
+    d = events.sanitize_operation("terminal", {
+        f"very_long_argument_key_{i}": "value" for i in range(6)})
+    assert len(d) <= 160 and events.is_canonical_operation(d)
+
+
+def test_forged_operations_never_persist(env):
+    """The trajectory intake persists the operation column DIRECTLY (it
+    does not route through the capsule passthrough) — forged descriptors
+    fed as events must be re-derived, never stored as-is."""
+    eng, db = env
+    now = time.time()
+    starts, ends = [], []
+    for i, forged in enumerate(FORGED_DESCRIPTORS):
+        call_id = f"forged-{i}"
+        starts.append({"type": "tool_start", "tool_name": "terminal",
+                       "tool_call_id": call_id, "operation": forged,
+                       "ts": now + i * 0.01})
+        ends.append({"type": "tool_end", "tool_name": "terminal",
+                     "tool_call_id": call_id, "status": "ok",
+                     "duration_ms": 5, "operation": forged,
+                     "ts": now + i * 0.01 + 0.005})
+    eng.on_events(starts)
+    eng.on_events(ends)
+
+    expected = events.sanitize_operation("terminal", None)
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT call_id, operation FROM pulse_operations"
+            " WHERE call_id LIKE 'forged-%'").fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == len(FORGED_DESCRIPTORS)
+    for call_id, persisted in rows:
+        assert persisted == expected, \
+            f"{call_id}: forged operation persisted as {persisted!r}"
+        assert events.is_canonical_operation(persisted)
+        for fragment in ("hunter2", "alice", "secret", "password"):
+            assert fragment not in persisted.lower()

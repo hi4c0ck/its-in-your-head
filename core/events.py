@@ -197,6 +197,28 @@ def _semantic_parts(raw_key, value) -> list[str]:
     return []
 
 
+# The CLOSED descriptor schema (producer + trust gate share these sets).
+# A canonical descriptor is exactly:
+#   action:<class> tool:<name> [kind:<category>] [arg:<key>:<type> ...]
+# with <=1 kind, <=6 arg tags, <=160 chars, single-space separated, and
+# charset alnum + "_-.:" only. is_canonical_operation() parses this grammar
+# strictly — a prefix check alone is NOT a trust boundary (forged strings
+# like `arg:password:hunter2` or `kind:alice_smith` carry approved prefixes
+# with arbitrary content).
+_ACTION_CLASSES = frozenset({
+    "search", "read", "write", "edit", "execute", "browse", "computer",
+    "vision", "remember", "delegate", "ask", "skill", "schedule",
+    "coordinate", "operate",
+})
+_KIND_CLASSES = frozenset(set(_EXT_CLASSES.values()) | {"file", "url"})
+_ARG_TYPE_NAMES = frozenset({
+    "str", "int", "float", "bool", "list", "dict", "NoneType",
+    "tuple", "set", "frozenset", "bytes", "bytearray", "complex",
+})
+_OPERATION_MAX_CHARS = 160
+_ARG_TAG_CAP = 6
+
+
 def sanitize_operation(tool_name, args) -> str:
     """Bounded, privacy-safe PRODUCTION operation descriptor.
 
@@ -205,24 +227,113 @@ def sanitize_operation(tool_name, args) -> str:
     class, approved semantic categories (file-extension class / url role)
     and argument key/type tags survive. NO value-derived free text is
     extracted anywhere: raw argument values, prompts, reasoning and
-    results never enter the event.
+    results never enter the event. Output is always CANONICAL
+    (is_canonical_operation accepts it): type names outside the closed set
+    collapse to ``other``, and the 160-char budget drops whole trailing
+    tokens — never a mid-token truncation.
     """
     name = _safe_token(str(tool_name or "unknown"), 32) or "unknown"
     parts = [f"action:{_action_for_tool(name)}", f"tool:{name}"]
     semantic: list[str] = []
     arg_types: list[str] = []
+    arg_keys: set[str] = set()
     if isinstance(args, dict):
         items = sorted(args.items(), key=lambda item: str(item[0]))[:6]
         for raw_key, value in items:
             key = _safe_token(str(raw_key), 32) or "arg"
-            arg_types.append(f"arg:{key}:{type(value).__name__}")
+            if key in arg_keys:
+                continue  # canonical schema forbids duplicate arg keys
+            arg_keys.add(key)
+            tname = type(value).__name__
+            if tname not in _ARG_TYPE_NAMES:
+                tname = "other"
+            arg_types.append(f"arg:{key}:{tname}")
             if raw_key in _SEMANTIC_ARG_KEYS or str(raw_key).lower() in _SEMANTIC_ARG_KEYS:
                 for token in _semantic_parts(raw_key, value):
-                    if token not in semantic and len(semantic) < 6:
+                    # At most ONE kind token (the first semantic key in
+                    # sorted order wins) — the canonical schema allows a
+                    # single category per descriptor.
+                    if not semantic:
                         semantic.append(token)
     parts.extend(semantic)
-    parts.extend(arg_types[:6])
-    return " ".join(parts)[:160]
+    parts.extend(arg_types[:_ARG_TAG_CAP])
+    # Token-budget join: action+tool always fit; a token that would exceed
+    # the cap is dropped WHOLE so the output stays parseable/canonical.
+    out = ""
+    for part in parts:
+        candidate = part if not out else out + " " + part
+        if len(candidate) > _OPERATION_MAX_CHARS:
+            break
+        out = candidate
+    return out
+
+
+def is_canonical_operation(descriptor) -> bool:
+    """Strict parse of the canonical descriptor schema — the trust gate for
+    the collector ``operation`` passthrough and the engine's trajectory
+    intake. Accepts ONLY strings sanitize_operation() itself could emit:
+
+    - charset alnum + ``_-.:`` + single separating spaces (no cleaning:
+      a string needing cleanup is rejected, not repaired);
+    - token 0 ``action:<class>`` with class in the closed action set AND
+      equal to the deterministic action for the tool field;
+    - token 1 ``tool:<name>`` where name passes the same identifier
+      hygiene the producer applies (bounded, no deny tokens, no flags);
+    - at most one ``kind:<category>`` from the closed kind set, before any
+      arg tag;
+    - up to 6 ``arg:<key>:<type>`` tags: key passes identifier hygiene,
+      type in the closed type-name set (or ``other``), no duplicate keys;
+    - total length <= 160.
+
+    Forged-prefix payloads (``arg:password:hunter2``, ``kind:alice_smith``,
+    legacy ``verb:``/``term:``/``file:``/``host:`` tokens, free text) all
+    fail. Legacy persisted ROWS remain scoreable via has_operation_semantics
+    (read side); they are no longer accepted as new input.
+    """
+    if not isinstance(descriptor, str) or not descriptor:
+        return False
+    if len(descriptor) > _OPERATION_MAX_CHARS:
+        return False
+    if not all(c.isalnum() or c in "_-.: " for c in descriptor):
+        return False
+    tokens = descriptor.split(" ")
+    if len(tokens) < 2 or any(not t for t in tokens):
+        return False
+    action = tokens[0]
+    if not action.startswith("action:") or action[7:] not in _ACTION_CLASSES:
+        return False
+    tool = tokens[1]
+    if not tool.startswith("tool:"):
+        return False
+    name = tool[5:]
+    if not name or _safe_token(name, 32) != name:
+        return False
+    if action[7:] != _action_for_tool(name):
+        return False
+    kind_seen = False
+    arg_seen = False
+    arg_keys: set[str] = set()
+    for tok in tokens[2:]:
+        if tok.startswith("kind:"):
+            if kind_seen or arg_seen or tok[5:] not in _KIND_CLASSES:
+                return False
+            kind_seen = True
+        elif tok.startswith("arg:"):
+            fields = tok.split(":")
+            if len(fields) != 3:
+                return False
+            key, tname = fields[1], fields[2]
+            if not key or _safe_token(key, 32) != key:
+                return False
+            if tname not in _ARG_TYPE_NAMES and tname != "other":
+                return False
+            if key in arg_keys or len(arg_keys) >= _ARG_TAG_CAP:
+                return False
+            arg_keys.add(key)
+            arg_seen = True
+        else:
+            return False
+    return True
 
 
 # Current descriptors emit only ``kind:``; the remaining markers recognize

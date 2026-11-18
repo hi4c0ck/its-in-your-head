@@ -539,8 +539,17 @@ class Engine:
                     # signal and must never manufacture an aligned score.
                     # Descriptors without an allowlisted semantic token are
                     # ambiguous -> no measurement, not a drift claim.
-                    descriptor = str(ev.get("operation") or
-                                     ev.get("tool_name") or "")
+                    # TRUST GATE: the trajectory PERSISTS this string, so
+                    # accept only canonically-valid descriptors (strict
+                    # schema parse — forged prefixes like arg:password:...
+                    # or kind:<free text> are rejected). Anything else is
+                    # re-derived as the bounded identity-only descriptor;
+                    # C6 events carry no raw args to re-sanitize.
+                    tool_label = str(ev.get("tool_name") or "unknown")
+                    descriptor = str(ev.get("operation") or "")
+                    if not _events.is_canonical_operation(descriptor):
+                        descriptor = _events.sanitize_operation(
+                            tool_label, None)
                     try:
                         if _events.has_operation_semantics(descriptor):
                             (op_vec,) = self._get_backend().encode([descriptor])
@@ -550,8 +559,7 @@ class Engine:
                         op_vec = None
                     vec = op_vec
                     self._trajectory.add_intent(
-                        call_id, str(ev.get("tool_name") or "unknown"),
-                        str(ev.get("operation") or ""), vec,
+                        call_id, tool_label, descriptor, vec,
                         float(ev.get("ts") or time.time()), self._objective)
                 except Exception:
                     logger.exception(
