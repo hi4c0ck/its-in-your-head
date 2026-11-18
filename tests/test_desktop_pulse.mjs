@@ -312,7 +312,7 @@ console.log('ok ' + (++n) + ' - pulseRecency buckets (pure + deterministic)')
       && lanesSrc.includes('var raw = pulseEntryValue(e)'),
     'v0.1.23: pulseRowDots drives the meter from the row OWN value (LIVE entries carry it at e.momentum.value via pulseEntryValue — the v0.1.21 structural-0 e.value-only read stays fixed)')
   ok3(src.includes('function pulseCellBase(lane, entry)') && src.includes('function pulseFnv32(str)'),
-    'v0.1.22: the per-cell STABLE drift base is defined (FNV-1a of lane|tool|value-bucket, the same 1e-6 quantization transition detection uses)')
+    'v0.1.22: the per-cell STABLE drift base is defined (FNV-1a of lane|tool|value-bucket, the same 0.01 quantization transition detection uses)')
   ok3(!lanesSrc.includes('(coord.getState().seq || 0) + i'),
     'v0.1.22: the global transition seq no longer drives the dot drift (one bubble no longer rotates the whole matrix)')
   ok3(!/var evaluated = e\.state \?/.test(lanesSrc),

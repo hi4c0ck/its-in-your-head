@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IYH PULSE — evaluation model map</title>
+<style>
+  :root{--bg:#0b0f14;--fg:#e7edf4;--mut:#8fa0b3;--line:#243244;--grn:#38d39f;--amb:#ffcc66;--red:#ff6b6b;--blu:#63b3ff;--card:#121a24}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;padding:22px}
+  h1{font-size:20px;margin:0 0 4px;letter-spacing:.04em}
+  .sub{color:var(--mut);margin-bottom:18px}
+  h2{font-size:13px;margin:24px 0 10px;color:var(--fg);letter-spacing:.1em;text-transform:uppercase;border-bottom:1px solid var(--line);padding-bottom:6px}
+  .legend span{display:inline-flex;gap:6px;align-items:center;margin-right:14px;color:var(--mut)}
+  .dot{width:9px;height:9px;border-radius:2px;display:inline-block}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:11px 12px}
+  .card b{display:block;font-size:12px;letter-spacing:.08em;margin-bottom:5px}
+  .card small{color:var(--mut);display:block;line-height:1.5}
+  .flow{width:100%;height:auto;background:var(--card);border:1px solid var(--line);border-radius:6px}
+  .tbl{width:100%;border-collapse:collapse;font-size:12px}
+  .tbl th,.tbl td{border:1px solid var(--line);padding:8px 9px;text-align:left;vertical-align:top}
+  .tbl th{color:var(--mut);font-weight:600;background:#0e151e}
+  .tag{font-size:10px;padding:2px 6px;border-radius:3px;border:1px solid currentColor}
+  .g{color:var(--grn)}.a{color:var(--amb)}.r{color:var(--red)}.b{color:var(--blu)}
+  .decision{background:#1a1208;border:1px solid #6b4a12;border-radius:6px;padding:12px 14px;margin-top:10px}
+  .decision ol{margin:6px 0 0 18px;padding:0}
+  .decision li{margin-bottom:6px}
+  .note{color:var(--amb);margin-top:18px;font-size:12px}
+  .kbd{color:var(--fg);background:#1b2634;border:1px solid var(--line);border-radius:3px;padding:1px 5px}
+</style>
+</head>
+<body>
+<h1>IYH · PULSE evaluation model</h1>
+<div class="sub">Authoritative shape vs current code · docs are the source, numbers are outputs — not targets</div>
+
+<div class="legend">
+  <span><i class="dot" style="background:var(--grn)"></i> authoritative doc</span>
+  <span><i class="dot" style="background:var(--blu)"></i> current code</span>
+  <span><i class="dot" style="background:var(--amb)"></i> unresolved / doc conflict</span>
+  <span><i class="dot" style="background:var(--red)"></i> regression / wrong</span>
+</div>
+
+<h2>1 · Four independent lanes — one contract</h2>
+<div class="grid">
+  <div class="card"><b class="g">LIVE</b><small>Operational activity. No learned-sample readiness. Freshness / momentum, not a semantic score.</small></div>
+  <div class="card"><b class="g">GOAL</b><small>Goal vector vs reference vectors. Reference support is confidence, not score. Score stays visible when provisional.</small></div>
+  <div class="card"><b class="g">GOOD</b><small>Own GOOD bank only. Support answer “how much to trust”, not “how much”. Never summed with friction.</small></div>
+  <div class="card"><b class="g">FRICTION</b><small>One lane, two sources: user and objective. Never summed; dominant source decides display.</small></div>
+</div>
+
+<h2>2 · Signal flow — where a number comes from</h2>
+<svg class="flow" viewBox="0 0 1200 400" role="img" aria-label="PULSE signal flow">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#8fa0b3"/></marker>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#ff6b6b"/></marker>
+  </defs>
+  <g font-family="ui-monospace,Consolas,monospace" font-size="12">
+    <rect x="20"  y="40"  width="180" height="72" rx="6" fill="#121a24" stroke="#243244"/><text x="36" y="66" fill="#e7edf4">turn / tool events</text><text x="36" y="88" fill="#8fa0b3">raw text never stored</text>
+    <rect x="260" y="40"  width="190" height="72" rx="6" fill="#121a24" stroke="#243244"/><text x="276" y="66" fill="#e7edf4">capsules</text><text x="276" y="88" fill="#8fa0b3">operation-domain vectors</text>
+    <rect x="510" y="40"  width="210" height="72" rx="6" fill="#121a24" stroke="#63b3ff"/><text x="526" y="66" fill="#63b3ff">prototype banks</text><text x="526" y="88" fill="#8fa0b3">NOW prompt-domain</text>
+    <rect x="780" y="40"  width="190" height="72" rx="6" fill="#121a24" stroke="#243244"/><text x="796" y="66" fill="#e7edf4">lane value</text><text x="796" y="88" fill="#8fa0b3">0..1 weighted output</text>
+    <rect x="1030" y="40" width="150" height="72" rx="6" fill="#121a24" stroke="#243244"/><text x="1046" y="66" fill="#e7edf4">pane</text><text x="1046" y="88" fill="#8fa0b3">dots + tooltip</text>
+    <path d="M200,76 H255" stroke="#8fa0b3" marker-end="url(#ar)"/>
+    <path d="M450,76 H505" stroke="#8fa0b3" marker-end="url(#ar)"/>
+    <path d="M720,76 H775" stroke="#8fa0b3" marker-end="url(#ar)"/>
+    <path d="M970,76 H1025" stroke="#8fa0b3" marker-end="url(#ar)"/>
+
+    <rect x="510" y="190" width="210" height="80" rx="6" fill="#1a1208" stroke="#ffcc66"/><text x="526" y="216" fill="#ffcc66">adaptation</text><text x="526" y="238" fill="#8fa0b3">cos(prompt, bank)</text><text x="526" y="256" fill="#ffcc66">needs prompt domain</text>
+    <path d="M615,112 V185" stroke="#ffcc66" marker-end="url(#ar)"/>
+
+    <rect x="780" y="190" width="390" height="80" rx="6" fill="#1a0d0d" stroke="#ff6b6b"/><text x="796" y="216" fill="#ff6b6b">GOAL currently reads banks → 1.00 echo</text><text x="796" y="238" fill="#8fa0b3">normative contract says banks first;</text><text x="796" y="256" fill="#ff6b6b">capsule-only patch violates that line</text>
+    <path d="M615,112 L780,215" stroke="#ff6b6b" marker-end="url(#arr)" stroke-dasharray="5 4"/>
+
+    <rect x="20" y="190" width="430" height="80" rx="6" fill="#0e151e" stroke="#243244"/><text x="36" y="216" fill="#e7edf4">level ≠ state</text><text x="36" y="238" fill="#8fa0b3">level = value vs threshold</text><text x="36" y="256" fill="#8fa0b3">state = evidence support</text>
+
+    <rect x="20" y="310" width="1150" height="60" rx="6" fill="#0e151e" stroke="#243244"/>
+    <text x="36" y="334" fill="#e7edf4">value = f(evidence) · confidence = support · dots = value · bubbles = meaningful change</text>
+    <text x="36" y="355" fill="#8fa0b3">Hard numbers (0.370 / 0.140) are outputs of one synthetic run — never correctness targets.</text>
+  </g>
+</svg>
+
+<h2>3 · Where docs and code disagree</h2>
+<table class="tbl">
+  <tr><th>Topic</th><th>Authoritative text</th><th>Current code / action</th><th>Status</th></tr>
+  <tr><td>GOAL reference</td><td class="g">v2 contract §3: banks first, capsules fallback. Redesign plan §5: GOAL can use reference capsules.</td><td class="b">I changed to capsules-only after banks became prompt-domain.</td><td><span class="tag a">CONFLICT</span></td></tr>
+  <tr><td>GOOD event</td><td class="a">accumulate plan §75-79: pure status vs channel-gated vs quality gate = OPEN KNOB.</td><td class="r">I added automatic GOOD from <span class="kbd">status=="ok"</span> without ruling.</td><td><span class="tag r">UNRULLED</span></td></tr>
+  <tr><td>Decay</td><td class="a">pulse-meter-model: “stateless, no time decay”. matrix.py has 1h half-life.</td><td class="b">Both exist; no owner decision found.</td><td><span class="tag a">CONTRADICTION</span></td></tr>
+  <tr><td>Hysteresis</td><td class="a">“minimum meaningful change”, no number. Owner style: present options first.</td><td class="r">I picked <span class="kbd">0.01</span> directly.</td><td><span class="tag r">GUESSED</span></td></tr>
+  <tr><td>Confidence</td><td class="g">value × confidence NEVER multiplied; support is separate.</td><td class="g">Current code keeps them separate (after removing the old ceiling).</td><td><span class="tag g">OK</span></td></tr>
+  <tr><td>Absent evidence</td><td class="g">No fabricated 0.00; empty = no score.</td><td class="g">Current code returns <span class="kbd">None</span> for unmeasured tools.</td><td><span class="tag g">OK</span></td></tr>
+</table>
+
+<h2>4 · Decision gates before any more code</h2>
+<div class="decision">
+  <ol>
+    <li><b>GOAL reference:</b> keep normative bank-first + add a separate operation-domain GOAL reference vector, or amend the contract to capsule-only?</li>
+    <li><b>GOOD/FRICTION driver:</b> pure status slice, channel-gated, or quality-gated?</li>
+    <li><b>Decay:</b> no time decay (skill spec) or 1h half-life (current code)?</li>
+    <li><b>Hysteresis:</b> choose the bucket before I touch the constant again.</li>
+  </ol>
+</div>
+
+<div class="note">No edits were made while producing this map. It is a visual index of the docs, the code, and the four unresolved rulings — not a proposal to change anything.</div>
+</body>
+</html>

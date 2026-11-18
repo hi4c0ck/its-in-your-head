@@ -93,6 +93,7 @@ def extract_pulse(view: dict) -> dict:
         "rows": len(view.get("rows") or []),
         "lanes": {m: _lane_entries(lanes.get(m)) for m in ("live", "goal", "good", "friction")},
         "upset": view.get("upset") or {},
+        "goal_signal": view.get("goal_signal") or {},
     }
 
 

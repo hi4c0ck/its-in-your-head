@@ -45,9 +45,9 @@ ok(BUBBLE_TRAVEL_MS >= 600 && BUBBLE_TRAVEL_MS <= 750, 'travel tuning 600-750ms 
 ok(BUBBLE_ARRIVAL_MS >= 180 && BUBBLE_ARRIVAL_MS <= 240, 'arrival tuning 180-240ms (got ' + BUBBLE_ARRIVAL_MS + ')')
 ok(MAX_CONCURRENT_BUBBLES >= 1 && MAX_CONCURRENT_BUBBLES <= 8, 'bounded concurrent cap present (got ' + MAX_CONCURRENT_BUBBLES + ')')
 ok(BUBBLE_STAGGER_MS > 0, 'stagger tuning present')
-eq(PULSE_HYSTERESIS, 1e-6, 'hysteresis mirrors pulse/matrix.py HYSTERESIS = 1e-6 (no second threshold)')
-eq(pulseQuantizedScore(0.5 + 4e-7), pulseQuantizedScore(0.5), 'quantized bucket: sub-hysteresis noise shares bucket')
-ok(pulseQuantizedScore(0.5 + 2e-6) !== pulseQuantizedScore(0.5), 'quantized bucket: above-hysteresis change differs')
+eq(PULSE_HYSTERESIS, 0.01, 'hysteresis mirrors pulse/matrix.py HYSTERESIS = 0.01 (1% bucket, no float-noise bubbles)')
+eq(pulseQuantizedScore(0.5 + 0.002), pulseQuantizedScore(0.5), 'quantized bucket: sub-hysteresis noise shares bucket')
+ok(pulseQuantizedScore(0.5 + 0.02) !== pulseQuantizedScore(0.5), 'quantized bucket: above-hysteresis change differs')
 
 // Identities.
 eq(pulseSemanticId('goal', { tool_id: 12 }), 'goal|12', 'semantic identity metric|tool')

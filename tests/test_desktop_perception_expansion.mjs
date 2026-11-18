@@ -120,6 +120,8 @@ assert.ok(strip.length > 0, 'Strip region found')
 // 48px strip square is retired). Intentional strip edit.
 // Re-baselined at v0.1.25-revert + v0.1.26 friction trigger: the pin had
 // gone stale; re-pinned. Intentional strip re-baseline.
+// Re-baselined at v0.1.31 (global GOAL trajectory signal threaded into
+// PulseLanes tooltip) — intentional strip edit.
 // Re-baselined at v0.1.27 (D1-D6 upset glitch): the first /pulse queryFn
 // now threads the top-level `upset` block into the shared renderer state
 // (iiyhIngestUpset) — an intentional strip edit (the trigger STATE block
@@ -130,7 +132,7 @@ assert.ok(strip.length > 0, 'Strip region found')
 // continues while the dock tab is backgrounded — an intentional strip
 // edit. The pane copy at desktop-plugins/ keeps the previous pin until the
 // next user-approved pane sync (v0.1.28 deploy).
-const STRIP_SHA = 'ad43b72207ad6ff9667e37f589922ea639e5bc0ae3a92b214397a268a5962144'
+const STRIP_SHA = 'e9a6a7f326451a7c87b82f4c83dcaac1d3c3f40a950fd1b752842a3661955b11'
 assert.equal(createHash('sha256').update(strip).digest('hex'), STRIP_SHA,
   '96px strip source byte-identical to the full-height-portrait baseline')
 ok(true, 'strip byte-identity snapshot pinned')

@@ -56,7 +56,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION  # alias
 # v9 (§8, privacy hardening v0.1.28): one-time legacy scrub that NULLs the
 # raw-text event columns (events.user_message / events.error_message) on any
@@ -247,8 +247,48 @@ PULSE_CAPSULES_DDL = (
 
 # The three derived-vector tables, for the pulse writer's lazy
 # executescript bootstrap (single source; do not copy the DDL).
+# v11: versioned global objective + bounded operation trajectory history.
+# Only DERIVED vectors and bounded metadata are stored — never raw prompts,
+# reasoning or tool results. The singleton pulse_goal row stays for v2
+# compatibility; these tables carry the continuity/retrospective model.
+_CREATE_PULSE_GOAL_HISTORY_TABLE = """CREATE TABLE IF NOT EXISTS pulse_goal_history (
+    id       INTEGER PRIMARY KEY,
+    version  INTEGER NOT NULL UNIQUE,
+    ts       REAL NOT NULL,
+    vector   BLOB NOT NULL,
+    backend  TEXT,
+    label    TEXT
+)"""
+
+_CREATE_PULSE_OPERATIONS_TABLE = """CREATE TABLE IF NOT EXISTS pulse_operations (
+    id                    INTEGER PRIMARY KEY,
+    call_id               TEXT NOT NULL UNIQUE,
+    tool_name             TEXT NOT NULL,
+    turn_id               TEXT,
+    operation             TEXT,
+    vector                BLOB,
+    status                TEXT,
+    ts                    REAL NOT NULL,
+    objective_version     INTEGER,
+    historical_assessment REAL,
+    current_assessment    REAL,
+    category              TEXT
+)"""
+
+_CREATE_PULSE_OPERATIONS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_pulse_operations_call "
+    "ON pulse_operations (call_id)"
+)
+
+PULSE_GOAL_HISTORY_DDL = _CREATE_PULSE_GOAL_HISTORY_TABLE + ";\n"
+PULSE_OPERATIONS_DDL = (
+    _CREATE_PULSE_OPERATIONS_TABLE + ";\n"
+    + _CREATE_PULSE_OPERATIONS_INDEX + ";\n"
+)
+
 PULSE_STATE_DDL = (
     PULSE_PROTOTYPES_DDL + PULSE_GOAL_DDL + PULSE_CAPSULES_DDL
+    + PULSE_GOAL_HISTORY_DDL + PULSE_OPERATIONS_DDL
 )
 
 # --- PORTRAIT perception derived persistence (v5, D4 Option B) -----------
@@ -500,6 +540,9 @@ def _create_pulse_tables(conn: sqlite3.Connection) -> None:
         _CREATE_PULSE_GOAL_TABLE,
         _CREATE_PULSE_CAPSULES_TABLE,
         _CREATE_PULSE_CAPSULES_INDEX,
+        _CREATE_PULSE_GOAL_HISTORY_TABLE,
+        _CREATE_PULSE_OPERATIONS_TABLE,
+        _CREATE_PULSE_OPERATIONS_INDEX,
     ):
         conn.execute(stmt)
     # v8: add the vector-space provenance columns to pre-v8 tables
@@ -608,6 +651,8 @@ __all__ = [
     "PULSE_GOAL_DDL",
     "PULSE_CAPSULES_DDL",
     "PULSE_STATE_DDL",
+    "PULSE_GOAL_HISTORY_DDL",
+    "PULSE_OPERATIONS_DDL",
     "PATTERN_AFFINITY_HISTORY_MAX",
     "PATTERN_AFFINITY_HISTORY_DDL",
     "PATTERN_BANK_DDL",

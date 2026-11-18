@@ -2151,15 +2151,18 @@ function iihyJStep7(x) {
 // Resolve the pane's theme accent CSS variable once; fall back to IYH_J.accent
 // when unresolvable (e.g. a non-DOM context). The bricks are painted in the accent.
 let IYH_ACCENT_RESOLVED = ''
+let IYH_ACCENT_AT = 0
 // Resolve the pane's theme accent. The pane sets it on its mounted container (a
 // <body> child), so read it off the CANVAS element (which inherits it), then fall
 // back to documentElement / body. CSS custom properties don't flow UP, so reading
 // document.body directly misses a body-child's accent -> fell back to cyan before.
 function iiyhJResolveAccent(el) {
-  if (IYH_ACCENT_RESOLVED) return IYH_ACCENT_RESOLVED
+  const now = Date.now()
+  if (IYH_ACCENT_RESOLVED && (typeof IYH_ACCENT_AT === 'undefined' || now - IYH_ACCENT_AT < 2000)) return IYH_ACCENT_RESOLVED
+
   try {
     if (typeof getComputedStyle === 'function') {
-      const names = ['--accent', '--ui-accent', '--color-accent', '--accent-color']
+      const names = ['--ui-accent', '--accent', '--color-accent', '--accent-color']
       const roots = []
       if (el) roots.push(el)
       if (typeof document !== 'undefined') { if (document.documentElement) roots.push(document.documentElement); if (document.body) roots.push(document.body) }
@@ -2167,12 +2170,24 @@ function iiyhJResolveAccent(el) {
         const cs = getComputedStyle(node)
         for (const nm of names) {
           const v = cs.getPropertyValue(nm).trim()
-          if (v && v.length > 2) { IYH_ACCENT_RESOLVED = v; return IYH_ACCENT_RESOLVED }
+          if (v && v.length > 2) { IYH_ACCENT_RESOLVED = v; IYH_ACCENT_AT = now; return IYH_ACCENT_RESOLVED }
         }
       }
     }
   } catch (e) {}
-  return IYH_ACCENT_RESOLVED || IYH_J.accent
+  IYH_ACCENT_AT = now; return IYH_ACCENT_RESOLVED || IYH_J.accent
+}
+// Glitch/rip tint derived from the RESOLVED Hermes skin accent — no hardcoded
+// violet. Lightens the skin accent so the band still pops against the face.
+function iiyhJGlitchTint() {
+  const a = iiyhJResolveAccent().trim()
+  const m = /^#([0-9a-f]{6})$/i.exec(a)
+  if (!m) return a
+  const n = parseInt(m[1], 16)
+  const r = Math.min(255, (n >> 16) + 60)
+  const g = Math.min(255, ((n >> 8) & 255) + 60)
+  const b = Math.min(255, (n & 255) + 60)
+  return '#' + (((r << 16) | (g << 8) | b) >>> 0).toString(16).padStart(6, '0')
 }
 // Rasterize a DRAWING TEMPLATE's rest-state face to a 214x240 coverage grid (0..255
 // darkness), same format as the baked IYH_FACE_COV_BYTES, so the brick mosaic can
@@ -2345,12 +2360,12 @@ function iiyhBrickCanvasDraw(ctx, W, H, frame, seed, cov, focusShift = false) {
       gH = 4 + Math.floor(iihyJHash(gIdx * 17 + 3, gIdx * 3 + 4, IYH_J.ditherSeed + 99) * 5)
       gShift = (Math.floor(iihyJHash(gIdx * 13 + 5, gIdx * 11 + 6, IYH_J.ditherSeed + 98) * 9) - 4) * bwS
       gGain = 0.55 + 0.45 * upInt
-      gColor = '#ff2d95'
+      gColor = iiyhJGlitchTint()
     } else {
       gBand = 30 + Math.floor(iihyJHash(gIdx * 31 + 1, gIdx * 7 + 2, IYH_J.ditherSeed + 100) * 15)   // the face's LIT middle (eye/nose), so the rip always shows
       gH = 5 + Math.floor(iihyJHash(gIdx * 17 + 3, gIdx * 3 + 4, IYH_J.ditherSeed + 99) * 7)
       gShift = (Math.floor(iihyJHash(gIdx * 13 + 5, gIdx * 11 + 6, IYH_J.ditherSeed + 98) * 13) - 6) * bwS
-      gColor = '#ff2d95'   // the RGB-split glitch color: a strong MAGENTA (unmistakable against the base cyan)
+      gColor = iiyhJGlitchTint()   // the RGB-split rip: derived from the resolved Hermes skin accent
     }
   }
   const accentColor = iiyhJResolveAccent()                     // pane accent (cached); alpha via globalAlpha; the glitch band overrides it
@@ -3602,7 +3617,7 @@ function adaptPulseToLanes(pulse) {
 // second invented threshold. All timing/cap values are named tuning
 // constants. Surface coordinates are relative to the measured box
 // supplied by the Stage 4 composition layer (no hardcoded dims).
-const PULSE_HYSTERESIS = 1e-6; // mirrors pulse/matrix.py HYSTERESIS
+const PULSE_HYSTERESIS = 0.01; // mirrors pulse/matrix.py HYSTERESIS: 1% bucket, not float noise
 const BUBBLE_TRAVEL_MS = 650; // was 450: a 4px column crossing ~70px in 450ms was imperceptible in the compact strip
 const BUBBLE_ARRIVAL_MS = 200; // was 150: keep the discrete stamp readable after the longer climb
 const MAX_CONCURRENT_BUBBLES = 4; // bounded concurrent bubbles
@@ -4444,7 +4459,7 @@ const PULSE_GLOW_CSS =
 // lane grid itself (never the whole Strip), and bubbles travel
 // bottom-edge -> destination cell in one pixel coordinate system.
 function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow = false,
-                      activityEvents, rest, ioRecent }) {
+                      activityEvents, rest, ioRecent, goalSignal }) {
   var order = ['live', 'goal', 'good', 'friction'];
   var cap = Math.max(1, Math.floor(Number(capacity) || 1));
   var coordRef = useRef(null);
@@ -4753,6 +4768,11 @@ function PulseLanes({ lanes: rawLanes, capacity, surfaceBox, available, narrow =
               if (supCount !== null) parts.push('support ' + supCount);
               if (e.level) parts.push(String(e.level));
               parts.push('evidence: ' + evidenceSrc);
+              if (lane === 'goal' && goalSignal && goalSignal.category) {
+                parts.push('trajectory ' + (goalSignal.value === null
+                  ? 'no evidence' : Number(goalSignal.value).toFixed(2))
+                  + ' ' + goalSignal.category);
+              }
               var tip = parts.join(' · ');
               return jsxs('div', {
                 key: e.tool_id + '-' + e.rank,
@@ -6333,6 +6353,7 @@ function Strip({ source, rest, portraitPreferences }) {
     children: [
       jsx(PulseLanes, {
         lanes: pulseV2.lanes,
+        goalSignal: pulseQ.data && pulseQ.data.goal_signal,
         capacity,
         surfaceBox: pulseMeasured ? pulseBox : null,
         available: pulseV2.available,

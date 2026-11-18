@@ -137,7 +137,7 @@ class PrototypeStore:
 
     # -- ingestion ---------------------------------------------------------
     def add(self, tool: str, capsule_or_vector, label: str,
-            provenance: tuple | None = None):
+            provenance: tuple | None = None, unique: bool = False):
         """Add a prototype; oldest evicted past ``cap``. Only the vector
         is stored — never the capsule text payload fields beyond it.
 
@@ -155,6 +155,8 @@ class PrototypeStore:
             provenance = self._provenance_of(capsule_or_vector)
         with self._lock:
             bank = self._bank(str(tool))
+            if unique and vec in bank[label]:
+                return None
             bank[label].append(vec)
             del bank[label][:-self.cap]  # FIFO eviction, keeps newest cap
             if provenance is not None:
@@ -172,17 +174,45 @@ class PrototypeStore:
     def add_objective_friction(self, tool, capsule_or_vector):
         return self.add(tool, capsule_or_vector, "objective_friction")
 
-    def record_tool_end(self, capsule: dict) -> str | None:
-        """Objective problems -> objective-friction ONLY (never user
-        friction). Returns 'objective_friction' or None."""
+    def record_tool_end(self, capsule: dict, relevance_vector=None,
+                        provenance: tuple | None = None) -> str | None:
+        """Objective problems -> objective-friction; successful calls ->
+        GOOD. Neither ever writes USER friction (that stays feedback-only).
+        Returns the applied label or None.
+
+        ``relevance_vector`` is the derived vector of the PROMPT that led to
+        this tool call, when the turn cache has one. It is stored in the
+        bank instead of the capsule-operation vector so the rule engine
+        compares prompt-to-prompt (same text domain); raw prompt text is
+        never stored. Falls back to the capsule vector for legacy callers.
+        """
         status = str(capsule.get("status") or "").lower()
+        tool = str(capsule.get("tool_name") or "unknown")
         if status in OBJECTIVE_STATUSES:
-            self.add_objective_friction(capsule.get("tool_name"), capsule)
+            if relevance_vector is not None:
+                self.add(tool, relevance_vector, "objective_friction",
+                         provenance=provenance)
+            else:
+                self.add_objective_friction(tool, capsule)
             return "objective_friction"
+        # A successful call is real behavioural evidence: the prompt that
+        # led to it landed. Store the SAME prompt-derived relevance vector
+        # (never the capsule operation vector) so GOOD banks become a live
+        # domain model instead of waiting for a rare explicit "thanks".
+        # This is the P2 status-slice model; explicit feedback adds a
+        # stronger label on top of the same channel.
+        if status == "ok":
+            if relevance_vector is not None:
+                self.add(tool, relevance_vector, "good",
+                         provenance=provenance)
+            else:
+                self.add_good(tool, capsule)
+            return "good"
         return None
 
     def record_feedback(self, tool: str, capsule_or_vector, text,
-                        user_attributed: bool = False) -> str | None:
+                        user_attributed: bool = False,
+                        provenance: tuple | None = None) -> str | None:
         """Explicit feedback -> GOOD/FRICTION on the preceding capsule.
         User-attributed execution failure -> FRICTION. Returns the label
         applied, or None for neutral feedback."""
@@ -191,7 +221,8 @@ class PrototypeStore:
             label = "friction"
         if label is None:
             return None
-        self.add(tool, capsule_or_vector, label)
+        self.add(tool, capsule_or_vector, label, provenance=provenance,
+                 unique=True)
         return label
 
     # -- reads ---------------------------------------------------------------

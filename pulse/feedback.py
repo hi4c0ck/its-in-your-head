@@ -112,18 +112,21 @@ for _label, _phrase in FEEDBACK_RULES:
 
 
 def detect_feedback(text) -> str | None:
-    """Return 'good' | 'friction' | None for one short user message.
+    """Return 'good' | 'friction' | None from a user message.
 
-    Guardrails: non-str / empty -> None; more than MAX_WORDS words ->
-    None (long task descriptions are never classified); no phrase -> None.
+    MAX_WORDS is a SOFT PREFIX WINDOW, not a rejection gate: only the
+    first N words are scanned, because that is the part most likely to
+    react to the last LLM response / tool call. A long task description
+    is classified by its opening reaction; feedback appearing only after
+    the window is deliberately ignored (no full-message scan).
     Deterministic and pure (no I/O, no logging of the text).
     """
     if not isinstance(text, str):
         return None
     words = text.split()
-    if not words or len(words) > MAX_WORDS:
+    if not words:
         return None
-    t = text.casefold()
+    t = " ".join(words[:MAX_WORDS]).casefold()
     # Negative outranks positive regardless of table position ordering
     # within a label; the table is already ordered friction-first, and
     # this two-pass scan makes that precedence explicit.
@@ -169,41 +172,68 @@ def _recent_capsules(capsules_by_tool, window=RECENT_CAPSULE_WINDOW):
     return flat[-max(1, int(window)):] if flat else []
 
 
-def apply_feedback(store, capsules_by_tool, text) -> str | None:
-    """Detect feedback in ``text`` and label the most recent capsule.
+def apply_feedback(store, capsules_by_tool, text,
+                   relevance_vector=None,
+                   provenance: tuple | None = None,
+                   tools=None) -> str | None:
+    """Detect feedback in ``text`` and label eligible capsules.
 
-    Returns the label applied ('good' | 'friction') or None. The label
-    is applied only to the single most recent capsule within the last
-    RECENT_CAPSULE_WINDOW capsules; older capsules are never relabeled.
-    Never raises (fault isolation) and never logs raw text.
+    Default keeps the legacy single most-recent-capsule association.
+    When ``tools`` is given (the distinct tools used in the preceding
+    turn), the SAME detected label and derived relevance vector are
+    credited to the latest capsule of EACH listed tool. That is the
+    turn-level fan-out the behaviour-alignment model needs: one reaction
+    to an assistant turn reflects the tools used in that turn, not just
+    whichever capsule happened to be last. Never raises, never logs text.
     """
     try:
         label = detect_feedback(text)
         if label is None or store is None:
             return None
-        recent = _recent_capsules(capsules_by_tool)
-        if not recent:
-            return None
-        _ts, _seq, tool, capsule = recent[-1]
+        if tools is None:
+            recent = _recent_capsules(capsules_by_tool)
+            targets = [recent[-1]] if recent else []
+        else:
+            flat = _recent_capsules(capsules_by_tool, window=None)
+            targets = []
+            seen = set()
+            for tool in tools:
+                name = str(tool)
+                if name in seen:
+                    continue
+                seen.add(name)
+                matches = [row for row in flat if row[2] == name]
+                if matches:
+                    targets.append(matches[-1])
         applied = None
-        try:
-            applied = store.record_feedback(tool, capsule, text)
-        except Exception:
-            logger.exception(
-                "its-in-your-head: feedback record failed")
-            return None
-        if applied is None:
-            # PrototypeStore.record_feedback re-classifies with its own
-            # (broader) table; if it did not recognise this detector's
-            # phrase, apply the detector's label directly so the two
-            # tables cannot silently diverge into a lost label.
+        for _ts, _seq, tool, capsule in targets:
             try:
-                store.add(tool, capsule, label)
-                applied = label
+                got = store.record_feedback(
+                    tool,
+                    capsule if relevance_vector is None else relevance_vector,
+                    text,
+                    provenance=provenance)
             except Exception:
                 logger.exception(
-                    "its-in-your-head: feedback add failed")
-                return None
+                    "its-in-your-head: feedback record failed")
+                continue
+            if got is None:
+                # PrototypeStore.record_feedback re-classifies with its own
+                # (broader) table; if it did not recognise this detector's
+                # phrase, apply the detector's label directly so the two
+                # tables cannot silently diverge into a lost label.
+                try:
+                    store.add(tool,
+                              capsule if relevance_vector is None
+                              else relevance_vector,
+                              label, provenance=provenance, unique=True)
+                    got = label
+                except Exception:
+                    logger.exception(
+                        "its-in-your-head: feedback add failed")
+                    continue
+            if applied is None:
+                applied = got
         return applied
     except Exception:
         logger.exception("its-in-your-head: feedback association failed")

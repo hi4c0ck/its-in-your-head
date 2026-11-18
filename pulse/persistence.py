@@ -183,6 +183,99 @@ def persist_goal_vector(vector, ts: float | None = None,
         logger.exception("its-in-your-head: goal vector persist failed")
 
 
+def persist_trajectory(objective, operations) -> None:
+    """Persist the bounded global objective history + operation records.
+
+    Derived vectors and bounded metadata ONLY: no raw prompt/reasoning/
+    tool result is ever written. Fault-isolated; never raises.
+    """
+    try:
+        conn = _database.connect()
+        try:
+            _ensure_schema(conn)
+            conn.execute("DELETE FROM pulse_goal_history")
+            versions = []
+            for v in list(getattr(objective, "history", ()) or [])[-32:]:
+                versions.append((int(v.version), float(v.ts),
+                                 pack_vector(v.vector), None, v.label))
+            if getattr(objective, "version", 0):
+                versions.append((int(objective.version),
+                                 float(getattr(objective, "ts", 0.0) or 0.0),
+                                 pack_vector(objective.vector), None,
+                                 getattr(objective, "label", None)))
+            if versions:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO pulse_goal_history"
+                    " (version, ts, vector, backend, label)"
+                    " VALUES (?, ?, ?, ?, ?)", versions)
+            conn.execute("DELETE FROM pulse_operations")
+            rows = []
+            for rec in list(operations or [])[-32:]:
+                d = rec if isinstance(rec, dict) else rec.to_dict()
+                rows.append((
+                    str(d.get("call_id") or ""),
+                    str(d.get("tool") or "unknown"),
+                    str(d.get("turn_id") or "") or None,
+                    str(d.get("operation") or "")[:160],
+                    pack_vector(d.get("vector")),
+                    str(d.get("status") or "ok"),
+                    float(d.get("ts") or 0.0),
+                    d.get("objective_version"),
+                    d.get("historical_assessment"),
+                    d.get("current_assessment"),
+                    d.get("category") or "pending"))
+            if rows:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO pulse_operations"
+                    " (call_id, tool_name, turn_id, operation, vector,"
+                    " status, ts, objective_version, historical_assessment,"
+                    " current_assessment, category)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("its-in-your-head: trajectory persist failed")
+
+
+def load_trajectory_state() -> dict:
+    """Load the bounded trajectory state (fault-isolated, never raises)."""
+    empty = {"objective": None, "operations": []}
+    try:
+        conn = _database.connect()
+        try:
+            _ensure_schema(conn)
+            versions = []
+            for version, ts, blob, backend, label in conn.execute(
+                    "SELECT version, ts, vector, backend, label"
+                    " FROM pulse_goal_history ORDER BY version ASC"):
+                vec = unpack_vector(blob)
+                if vec is None:
+                    continue
+                versions.append({"version": int(version), "ts": float(ts),
+                                 "vector": vec, "label": label})
+            objective = versions[-1] if versions else None
+            operations = []
+            for row in conn.execute(
+                    "SELECT call_id, tool_name, turn_id, operation, vector,"
+                    " status, ts, objective_version, historical_assessment,"
+                    " current_assessment, category"
+                    " FROM pulse_operations ORDER BY ts ASC, id ASC"):
+                operations.append({
+                    "call_id": row[0], "tool": row[1], "turn_id": row[2],
+                    "operation": row[3], "vector": unpack_vector(row[4]),
+                    "status": row[5], "ts": float(row[6]),
+                    "objective_version": row[7],
+                    "historical_assessment": row[8],
+                    "current_assessment": row[9], "category": row[10]})
+            return {"objective": objective, "operations": operations}
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("its-in-your-head: trajectory load failed")
+        return empty
+
+
 def load_pulse_state() -> dict:
     """Legacy fault-isolated load (pre-v0.1.10 signature): returns the
     empty shape on any failure, never raises. New code uses

@@ -546,6 +546,15 @@ def test_user_message_scores_instantly():
     assert p["tier"] == 1
 
 
+def test_user_message_attribution_roundtrip():
+    acc = _acc()
+    be = _enc()
+    ev = _user("u1", "The user is clearly frustrated.")
+    acc.on_user_message(ev, ev["user_message"], be,
+                        last_tool="terminal")
+    assert acc.payload("s1")["last_tool"] == "terminal"
+
+
 def test_engine_user_turn_instant_upset(tmp_path, monkeypatch):
     import metrics
     metrics.set_db_path(tmp_path / "engine.db")

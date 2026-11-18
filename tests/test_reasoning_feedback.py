@@ -176,9 +176,18 @@ def test_detect_feedback_table(text, expected):
 
 
 def test_detect_feedback_long_utterance_never_labeled():
-    text = "thank you " + " ".join(["please"] * MAX_WORDS)  # > MAX_WORDS
+    # Gratitude BURIED mid-clause in a long task description stays unlabeled;
+    # only an isolated clause-start acknowledgement is promoted (below).
+    text = "please " + " ".join(["please"] * MAX_WORDS) + " thanks again"
     assert len(text.split()) > MAX_WORDS
     assert detect_feedback(text) is None
+
+
+def test_detect_feedback_clause_start_thanks_in_long_message():
+    text = ("dat huge! Thanks. Keep investigate, we should follow "
+            "is everything going straight forward as our expectations.")
+    assert len(text.split()) > MAX_WORDS
+    assert detect_feedback(text) == "good"
 
 
 def test_detect_feedback_negative_outranks_positive():
@@ -187,7 +196,7 @@ def test_detect_feedback_negative_outranks_positive():
 
 # --- feedback -> prototypes (collector seam) -------------------------------
 
-def test_positive_utterance_labels_most_recent_capsule_only():
+def test_positive_utterance_credits_all_tools_in_preceding_turn():
     eng = _eng()
     eng.on_events([_tool_end(tool="read_file", ts=1000.0),
                    _tool_end(tool="terminal", ts=1001.0)])
@@ -195,9 +204,12 @@ def test_positive_utterance_labels_most_recent_capsule_only():
     read_vec = caps["read_file"][-1]["vector"]
     term_vec = caps["terminal"][-1]["vector"]
     _user_turn_via_collector("thanks, that worked", eng)
+    # One reaction to an assistant turn credits the distinct tools that
+    # turn used; it is not a single last-capsule lottery.
     assert eng.protos.bank("terminal")["good"] == [term_vec]
-    assert eng.protos.bank("read_file")["good"] == []  # older not relabeled
+    assert eng.protos.bank("read_file")["good"] == [read_vec]
     assert eng.protos.labeled_count("terminal") == 1
+    assert eng.protos.labeled_count("read_file") == 1
 
 
 def test_negative_utterance_records_friction():
@@ -206,15 +218,19 @@ def test_negative_utterance_records_friction():
     vec = eng.capsule_state()["read_file"][-1]["vector"]
     _user_turn_via_collector("still broken", eng)
     assert eng.protos.bank("read_file")["friction"] == [vec]
-    assert eng.protos.bank("read_file")["good"] == []
+    # The successful tool_end itself is behavioural GOOD evidence; explicit
+    # friction is a separate label, never a rewrite of that success.
+    assert eng.protos.bank("read_file")["good"] == [vec]
 
 
-def test_followup_records_nothing():
+def test_followup_records_no_explicit_label():
     eng = _eng()
     eng.on_events([_tool_end(tool="read_file")])
     _user_turn_via_collector("now run the tests", eng)
-    assert eng.protos.labeled_count("read_file") == 0
-    assert eng.protos.bank("read_file")["good"] == []
+    # A successful call still lands in GOOD (behavioural evidence); the
+    # neutral follow-up adds no USER label of its own.
+    assert eng.protos.labeled_count("read_file") == 1
+    assert len(eng.protos.bank("read_file")["good"]) == 1
     assert eng.protos.bank("read_file")["friction"] == []
 
 
@@ -234,19 +250,42 @@ def test_detector_fault_degrades_to_observer_only(monkeypatch):
     monkeypatch.setattr(collector, "detect_feedback", _boom)
     out = _user_turn_via_collector("thanks, that worked", eng)
     assert out is None  # observer-only, no crash out of the hook
-    assert eng.protos.labeled_count("read_file") == 0
+    # The successful call still lands GOOD; the faulted detector adds
+    # nothing further (no duplicate, no crash).
+    assert eng.protos.labeled_count("read_file") == 1
+    assert len(eng.protos.bank("read_file")["good"]) == 1
 
 
-def test_feedback_bounded_window_labels_only_latest_of_two():
+def test_feedback_credits_all_distinct_turn_tools():
     eng = _eng()
     eng.on_events([_tool_end(tool="read_file", ts=1000.0),
                    _tool_end(tool="terminal", ts=1001.0),
                    _tool_end(tool="search_files", ts=1002.0)])
     caps = eng.capsule_state()
-    latest_vec = caps["search_files"][-1]["vector"]
     _user_turn_via_collector("you fixed it", eng)
-    assert eng.protos.bank("search_files")["good"] == [latest_vec]
-    assert eng.protos.bank("read_file")["good"] == []  # older not relabeled
-    assert eng.protos.bank("terminal")["good"] == []
-    assert eng.protos.labeled_count("read_file") == 0
-    assert eng.protos.labeled_count("terminal") == 0
+    for tool in ("read_file", "terminal", "search_files"):
+        vec = caps[tool][-1]["vector"]
+        assert eng.protos.bank(tool)["good"] == [vec]
+        assert eng.protos.labeled_count(tool) == 1
+
+
+def test_feedback_ignores_tools_from_earlier_turns():
+    eng = _eng()
+    eng.on_events([
+        _tool_end(tool="read_file", ts=1000.0, turn_id="t0"),
+        _tool_end(tool="terminal", ts=1001.0, turn_id="t1"),
+        _tool_end(tool="search_files", ts=1002.0, turn_id="t1"),
+    ])
+    caps = eng.capsule_state()
+    before = {t: len(eng.protos.bank(t)["good"])
+              for t in ("read_file", "terminal", "search_files")}
+    assert all(n == 1 for n in before.values())  # successful calls only
+    _user_turn_via_collector("you fixed it", eng)
+    after = {t: len(eng.protos.bank(t)["good"])
+             for t in before}
+    # Earlier-turn tool got no extra credit; the t1 tools were already
+    # GOOD from their own successful calls and are deduplicated.
+    assert after == before
+    for tool in ("read_file", "terminal", "search_files"):
+        vec = caps[tool][-1]["vector"]
+        assert eng.protos.bank(tool)["good"] == [vec]

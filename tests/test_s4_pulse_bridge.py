@@ -178,7 +178,11 @@ def test_pulse_fallback_empty_db_returns_documented_shape(tmp_path):
     api = _api(tmp_path / "empty.db")
     monkeypatch_free = api._pulse_shape()
     # Additive v2 envelope: DB-down / no-tools still carries empty lanes.
-    assert monkeypatch_free == {"schema_version": 2,
+    assert monkeypatch_free == {"goal_signal": {
+        "value": None, "category": "empty",
+        "support": {"count": 0, "required": 2, "ratio": 0.0},
+        "operation_count": 0, "drift_streak": 0, "detours": 0,
+        "version": None, "history_count": 0}, "schema_version": 2,
                                 "lane_order": ["live", "goal", "good",
                                                "friction"],
                                 "lanes": {"live": [], "goal": [], "good": [],

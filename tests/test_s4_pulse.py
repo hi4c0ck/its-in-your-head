@@ -203,7 +203,7 @@ def test_positive_feedback_labels_good(backend):
     assert classify_feedback("good job but still broken") == "friction"
     assert classify_feedback("brilliant, totally useless") == "friction"
     # Long utterances (>12 words) are never labeled.
-    assert classify_feedback("thank you " + "please " * 12) is None
+    assert classify_feedback("please " + "please " * 12 + " thanks again") is None
     assert store.record_feedback("read_file", cap, "great job, thank you") == "good"
     assert len(store.bank("read_file")["good"]) == 1
 

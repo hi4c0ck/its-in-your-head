@@ -302,7 +302,7 @@ def test_reset_wipes_newer_analytical_state(tmp_path):
         keys = dict(
             conn.execute("SELECT key, value FROM meta").fetchall())
         assert keys.get("plugin_settings") == "{}"
-        assert keys.get("schema_version") == "10"
+        assert keys.get("schema_version") == "11"
     finally:
         conn.close()
 

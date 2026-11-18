@@ -155,6 +155,18 @@ def test_good_independent_of_user_friction(registry, backend):
 
 # --- FRICTION: user/objective independent, never summed -----------------------
 
+def test_success_lands_in_good_bank_with_prompt_vector():
+    store = PrototypeStore(min_labeled=3)
+    cap = {"tool_name": "read_file", "status": "ok",
+           "vector": [0.0, 1.0], "text": "read_file run ok fast", "ts": 1.0}
+    assert store.record_tool_end(
+        cap, relevance_vector=[1.0, 0.0],
+        provenance=("tier-1-onnx", None)) == "good"
+    assert store.bank("read_file")["good"] == [[1.0, 0.0]]
+    assert store.bank("read_file")["friction"] == []
+    assert store.bank("read_file")["objective_friction"] == []
+
+
 def test_objective_failure_never_increments_user_friction(registry, backend):
     store = PrototypeStore(min_labeled=3)
     for _ in range(3):
@@ -212,7 +224,8 @@ def test_goal_scores_with_references_zero_feedback(registry, backend):
     for _ in range(2):
         store.record_tool_end(
             build_capsule(_end(TOOL, status="error"), backend=backend))
-    row = _row(registry, store, backend)
+    row = _row(registry, store, backend,
+               capsules={TOOL: _caps(backend, 2)})
     assert store.labeled_count(TOOL) == 0
     goal = row["goal"]
     assert goal["value"] is not None
@@ -222,7 +235,8 @@ def test_goal_scores_with_references_zero_feedback(registry, backend):
 
     store.record_tool_end(
         build_capsule(_end(TOOL, status="error"), backend=backend))
-    row = _row(registry, store, backend)
+    row = _row(registry, store, backend,
+               capsules={TOOL: _caps(backend, 3)})
     assert row["goal"]["state"] == "ready"
     assert row["goal"]["support"]["count"] == 3
 
@@ -245,7 +259,8 @@ def test_goal_provisional_score_keeps_level(registry, backend):
                         backend=backend)
     store.add_good(TOOL, cap)
     row = _row(registry, store, backend,
-               goal_text="read the config file please")
+               goal_text="read the config file please",
+               capsules={TOOL: [cap]})
     goal = row["goal"]
     assert goal["state"] == "provisional"
     assert goal["value"] is not None
@@ -278,7 +293,7 @@ def test_single_phrase_table_consumed_by_both_paths():
                            ("hmm, interesting", None), ("", None),
                            (None, None)]:
         assert classify_feedback(text) == expected == detect_feedback(text)
-    assert classify_feedback("thank you " + "please " * 12) is None
+    assert classify_feedback("please " + "please " * 12 + " thanks again") is None
 
 
 def test_mixed_utterance_negative_precedence():

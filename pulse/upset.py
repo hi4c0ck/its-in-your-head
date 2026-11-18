@@ -361,7 +361,8 @@ class UpsetAccumulator:
 
     def on_user_message(self, ev: dict, text: str, backend,
                        backend_name: str | None = None,
-                       now: float | None = None) -> bool:
+                       now: float | None = None,
+                       last_tool: str | None = None) -> bool:
         """Immediacy feed (owner rule 2026-11-12): the user's OWN
         message is the fastest upset signal — score it NOW and step the
         window, instead of waiting for the next turn's reasoning
@@ -379,6 +380,8 @@ class UpsetAccumulator:
         ts = float(ev.get("ts") or now or _time.time())
         st = self._session(ev.get("session_id"), ts)
         self._evict_stale(ts)
+        if isinstance(last_tool, str) and last_tool:
+            st["last_tool"] = last_tool
         self._step(st, self.score_reasoning(text, backend, backend_name))
         return True
 

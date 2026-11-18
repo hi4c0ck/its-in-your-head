@@ -92,21 +92,41 @@ def _error_type(error) -> "str | None":
 error_type = _error_type
 
 
+def sanitize_operation(tool_name, args) -> str:
+    """Bounded, privacy-safe operation description.
+
+    Only argument NAMES and value TYPE tags are emitted — never values,
+    paths, prompts or tool output. The result is an intention label for
+    trajectory evaluation, not a raw record of what the user said.
+    """
+    name = str(tool_name or "unknown")
+    parts = []
+    if isinstance(args, dict):
+        for key in sorted(str(k) for k in args)[:6]:
+            key = "".join(c if (c.isalnum() or c in "_-") else "_"
+                          for c in key)[:32]
+            parts.append("%s:%s" % (key, type(args[key]).__name__))
+    elif args is not None:
+        parts.append(type(args).__name__)
+    return ("%s(%s)" % (name, ",".join(parts)))[:160]
+
+
 def tool_start(*, tool_name, task_id=None, session_id=None, turn_id=None,
-               tool_call_id=None, args_chars=None, **kw):
+               tool_call_id=None, args_chars=None, operation=None, **kw):
     return _base("tool_start", tool_name=tool_name, task_id=task_id,
                  session_id=session_id, turn_id=turn_id,
-                 tool_call_id=tool_call_id, args_chars=args_chars)
+                 tool_call_id=tool_call_id, args_chars=args_chars,
+                 operation=operation)
 
 
 def tool_end(*, tool_name, status="ok", duration_ms=None, result_type=None,
              result_chars=None, task_id=None, session_id=None, turn_id=None,
-             tool_call_id=None, **kw):
+             tool_call_id=None, operation=None, **kw):
     return _base("tool_end", tool_name=tool_name, status=status,
                  duration_ms=duration_ms, result_type=result_type,
                  result_chars=result_chars, task_id=task_id,
                  session_id=session_id, turn_id=turn_id,
-                 tool_call_id=tool_call_id)
+                 tool_call_id=tool_call_id, operation=operation)
 
 
 def reasoning_seg(*, turn_id, session_id=None, reasoning_text="",

@@ -124,9 +124,10 @@ def test_feedback_before_first_poll_associates_correctly(env):
     # The restored read_file capsule should have been labelled good
     # (most recent capsule across tools by ts).
     assert fresh.protos.bank("read_file")["good"], "feedback must associate"
-    # The restored good bank had 1 vector; feedback labels the most
-    # recent capsule again, so the count grows (not a hydration dup).
-    assert len(fresh.protos.bank("read_file")["good"]) == 2
+    # The restored GOOD bank already holds this prompt vector from the
+    # successful tool_end; explicit feedback is deduplicated (unique=True),
+    # so hydration must NOT create a second copy.
+    assert len(fresh.protos.bank("read_file")["good"]) == 1
 
 
 def test_concurrent_first_reads_do_not_double_load(env, monkeypatch):

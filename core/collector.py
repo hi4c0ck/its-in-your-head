@@ -114,7 +114,38 @@ def _apply_explicit_feedback(message) -> None:
         ensure = getattr(eng, "ensure_pulse_hydrated", None)
         if callable(ensure):
             ensure()
-        apply_feedback(eng.protos, eng.capsule_state(), message)
+        caps = eng.capsule_state()
+        # One reaction to an assistant turn reflects ALL tools that turn
+        # used. Share the PRECEDING turn's prompt-derived vector across
+        # the whole credit set; legacy engines without turn tracking keep
+        # the single most-recent-capsule path.
+        recent_tools = getattr(eng, "recent_turn_tools", None)
+        tools = list(recent_tools()) if callable(recent_tools) else []
+        turn_id = getattr(eng, "_last_tool_turn_id", None)
+        lookup = getattr(eng, "_lookup_prompt_vector", None)
+        relevance = (lookup(turn_id) if callable(lookup) and turn_id
+                     else None)
+        if relevance is None:
+            latest_ts = None
+            for _tool, items in (caps or {}).items():
+                for cap in items or []:
+                    if not isinstance(cap, dict):
+                        continue
+                    cts = cap.get("ts") or 0
+                    if latest_ts is None or cts > latest_ts:
+                        latest_ts = cts
+                        relevance = (lookup(cap.get("turn_id"))
+                                     if callable(lookup) else None)
+        backend = getattr(eng, "_backend_name", None)
+        apply_feedback(eng.protos, caps, message,
+                       relevance_vector=relevance,
+                       provenance=((backend, None)
+                                   if relevance is not None and backend
+                                   else None),
+                       tools=tools or None)
+        note = getattr(eng, "note_pulse_write", None)
+        if callable(note):
+            note()
     except Exception:
         logger.exception(
             "its-in-your-head: explicit feedback association failed")
@@ -244,7 +275,8 @@ def _on_pre_tool_call(tool_name=None, args=None, task_id=None, **kwargs):
             task_id=task_id or kwargs.get("task_id") or corr["task_id"],
             session_id=corr["session_id"], turn_id=corr["turn_id"],
             tool_call_id=kwargs.get("tool_call_id"),
-            args_chars=len(str(args)) if args is not None else None)
+            args_chars=len(str(args)) if args is not None else None,
+            operation=events.sanitize_operation(name, args))
         # PULSE registry bump happens worker-side (engine.on_events) — the
         # hot path stays STATE counter + enqueue only, sub-0.5 ms, no I/O.
         metrics.enqueue(ev)

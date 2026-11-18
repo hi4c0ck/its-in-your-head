@@ -31,6 +31,7 @@ try:  # hermes namespaced import (gateway) vs top-level import (tests)
     from .pulse import persistence as _pulse_persist
     from .pulse import velocity as _pulse_velocity
     from .pulse import upset as _pulse_upset
+    from .pulse import goal_trajectory as _goal_traj
     from .perception import encoder as _encoder
     from .perception import anchors as _anchors
     from .perception import resemblance as _resemblance
@@ -43,6 +44,7 @@ except ImportError:
     from pulse import persistence as _pulse_persist
     from pulse import velocity as _pulse_velocity
     from pulse import upset as _pulse_upset
+    from pulse import goal_trajectory as _goal_traj
     from perception import encoder as _encoder
     from perception import anchors as _anchors
     from perception import resemblance as _resemblance
@@ -129,6 +131,10 @@ class Engine:
         self._goal_vector = None
         self._goal_ts = None
         self._goal_backend = None
+        # v0.1.31: global trajectory objective (continuity across prompts)
+        # + bounded operation history with retrospective re-assessment.
+        self._objective = _goal_traj.ObjectiveState()
+        self._trajectory = _goal_traj.TrajectoryEvaluator()
         # PULSE hydration (Stage 1): lazy one-time restore from the
         # active profile's DB. _pulse_hydrated guards duplicate loads;
         # _pulse_hydration_lock serializes concurrent first reads.
@@ -138,6 +144,9 @@ class Engine:
         # hydration retry after a FAILED load (bounded backoff — a
         # broken DB read must not be hammered on every /pulse poll).
         self._pulse_retry_at = 0.0
+        # Cross-process feedback visibility (agent writes, dashboard reads).
+        self._pulse_last_refresh = 0.0
+        self._pulse_refresh_suppressed = False
         # Interpreted-track (agent/reasoning) evidence bookkeeping:
         # counts reasoning_seg updates that actually landed, so
         # /portrait can evidence-gate the agent track separately from
@@ -155,6 +164,10 @@ class Engine:
         # (a) attribution: the tool active when a reasoning segment lands.
         # Session-keyed so a cross-session boundary cannot bleed tools.
         self._last_tool_by_session: dict[str, str] = {}
+        # Turn-scoped feedback credit: the tools used in the MOST RECENT
+        # completed tool turn, in first-use order, deduplicated and capped.
+        self._last_tool_turn_id: str | None = None
+        self._last_turn_tools: list[str] = []
         self._anchor_backend = None
         # Rolling reference (dynamic reassembly): lazily created + seeded from
         # the bank on the first backend-available turn, then reassembled by
@@ -262,6 +275,7 @@ class Engine:
 
     # -- PULSE lazy hydration (Stage 1) ------------------------------------ #
     PULSE_HYDRATION_RETRY_SECONDS = 30.0
+    PULSE_REFRESH_INTERVAL_S = 3.0
 
     def ensure_pulse_hydrated(self) -> None:
         """Lazy ONE-TIME hydration of PULSE learning state from the
@@ -297,6 +311,12 @@ class Engine:
                 self._pulse_retry_at = (
                     now + self.PULSE_HYDRATION_RETRY_SECONDS)
                 return
+            try:
+                self._merge_trajectory_state(
+                    _pulse_persist.load_trajectory_state())
+            except Exception:
+                logger.exception(
+                    "its-in-your-head: trajectory hydration failed")
             try:
                 # Banks: merge, skipping vectors already present (a
                 # tool_end persisted before hydration must not
@@ -355,6 +375,131 @@ class Engine:
                     now + self.PULSE_HYDRATION_RETRY_SECONDS)
                 return
             self._pulse_hydrated = True
+            # A hydration load already carries the full DB state; do not
+            # trigger a second refresh from the same pulse_view call.
+            self._pulse_last_refresh = now
+
+    def _merge_trajectory_state(self, tstate: dict) -> None:
+        """Additive restore of the bounded global objective/operation model."""
+        if not isinstance(tstate, dict):
+            return
+        obj = tstate.get("objective")
+        if isinstance(obj, dict) and obj.get("vector") is not None:
+            if int(obj.get("version") or 0) >= int(self._objective.version or 0):
+                hist = []
+                for h in obj.get("history") or []:
+                    if h.get("vector") is None:
+                        continue
+                    hist.append(_goal_traj.ObjectiveVersion(
+                        int(h.get("version") or 0), list(h["vector"]),
+                        float(h.get("ts") or 0.0), h.get("label")))
+                self._objective = _goal_traj.ObjectiveState(
+                    version=int(obj.get("version") or 0),
+                    vector=list(obj["vector"]),
+                    ts=float(obj.get("ts") or 0.0),
+                    label=obj.get("label"), history=hist)
+                if self._goal_vector is None:
+                    self._goal_vector = list(obj["vector"])
+                    self._goal_ts = self._objective.ts
+        records = []
+        for d in tstate.get("operations") or []:
+            if d.get("vector") is None:
+                continue
+            records.append(_goal_traj.OperationRecord(
+                call_id=str(d.get("call_id") or ""),
+                tool=str(d.get("tool") or "unknown"),
+                operation=str(d.get("operation") or ""),
+                vector=list(d["vector"]), ts=float(d.get("ts") or 0.0),
+                objective_version=int(d.get("objective_version") or 0),
+                historical_assessment=d.get("historical_assessment"),
+                status=str(d.get("status") or "ok"),
+                ended_ts=d.get("ts"),
+                current_assessment=d.get("current_assessment"),
+                category=str(d.get("category") or "pending")))
+        if records:
+            self._trajectory.operations = records[-self._trajectory.window:]
+
+    def recent_turn_tools(self) -> list[str]:
+        """Distinct tools in the most recent tool turn (first-use order)."""
+        return list(self._last_turn_tools)
+
+    def note_pulse_write(self) -> None:
+        """Clear the post-reset refresh suppression after a real write."""
+        self._pulse_refresh_suppressed = False
+
+    def refresh_pulse_from_db(self, force: bool = False) -> None:
+        """Periodically merge NEW cross-process PULSE evidence into a
+        already-hydrated engine.
+
+        The agent half and the dashboard child are separate processes that
+        share one profile DB. One-time hydration made the dashboard blind to
+        feedback/prototypes written after its startup, so a 'thanks' in the
+        chat changed the DB but never reached the served lane. This is a
+        bounded, additive merge: existing in-memory rows are never removed
+        and no vector is duplicated. Failure is isolated; the next poll can
+        retry immediately.
+        """
+        if self._pulse_refresh_suppressed:
+            return
+        if not self._pulse_hydrated:
+            self.ensure_pulse_hydrated()
+            return
+        now = time.monotonic()
+        if not force and (now - self._pulse_last_refresh) < \
+                self.PULSE_REFRESH_INTERVAL_S:
+            return
+        self._pulse_last_refresh = now
+        state, ok = _pulse_persist.load_pulse_state_checked()
+        if not ok:
+            return
+        try:
+            self._merge_trajectory_state(
+                _pulse_persist.load_trajectory_state())
+        except Exception:
+            logger.exception("its-in-your-head: trajectory refresh failed")
+        try:
+            for tool, banks in (state.get("banks") or {}).items():
+                meta = (state.get("banks_meta") or {}).get(tool) or {}
+                existing = self.protos.bank(tool)
+                for label, vecs in banks.items():
+                    label_meta = meta.get(label) or {}
+                    provenance = None
+                    if (label_meta.get("backend") is not None
+                            or label_meta.get("model_version") is not None):
+                        provenance = (label_meta.get("backend"),
+                                      label_meta.get("model_version"))
+                    for vec in vecs or []:
+                        if vec not in existing.get(label, []):
+                            self.protos.add(tool, vec, label,
+                                            provenance=provenance)
+                self.protos.mark_clean(tool)
+            with self._lock:
+                for tool, caps in (state.get("capsules") or {}).items():
+                    dq = self._capsules.setdefault(
+                        str(tool), deque(maxlen=CAPSULES_PER_TOOL))
+                    seen = {(c.get("ts"), tuple(c.get("vector") or ()))
+                            for c in dq if isinstance(c, dict)}
+                    for cap in caps or []:
+                        vec = cap.get("vector")
+                        if vec is None:
+                            continue
+                        key = (cap.get("ts"), tuple(vec))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        dq.append({"vector": list(vec),
+                                   "ts": cap.get("ts"),
+                                   "tool_name": str(tool),
+                                   "backend": cap.get("backend"),
+                                   "model_version": cap.get("model_version")})
+            gt = state.get("goal_ts")
+            if state.get("goal_vector") is not None and \
+                    (self._goal_ts is None or gt is None or gt >= self._goal_ts):
+                self._goal_vector = list(state["goal_vector"])
+                self._goal_ts = gt
+                self._goal_backend = state.get("goal_backend")
+        except Exception:
+            logger.exception("its-in-your-head: pulse refresh merge failed")
 
     def ensure_restored(self) -> None:
         """Alias of ensure_pulse_hydrated (public restore entry)."""
@@ -380,11 +525,51 @@ class Engine:
                 except Exception:
                     logger.exception(
                         "its-in-your-head: engine tool_start feed failed")
+                try:
+                    call_id = str(ev.get("tool_call_id") or "")
+                    # Intention = prompt context BLENDED with sanitized
+                    # operation semantics. Using the prompt alone echoes the
+                    # objective (cosine 1.0); using the label alone loses the
+                    # task context and labels everything drift.
+                    try:
+                        (op_vec,) = self._get_backend().encode(
+                            [str(ev.get("operation") or
+                                 ev.get("tool_name") or "")])
+                    except Exception:
+                        op_vec = None
+                    vec = _goal_traj.blend_intention(
+                        self._lookup_prompt_vector(ev.get("turn_id")),
+                        op_vec)
+                    self._trajectory.add_intent(
+                        call_id, str(ev.get("tool_name") or "unknown"),
+                        str(ev.get("operation") or ""), vec,
+                        float(ev.get("ts") or time.time()), self._objective)
+                except Exception:
+                    logger.exception(
+                        "its-in-your-head: trajectory intent capture failed")
                 tool_name = ev.get("tool_name")
                 if isinstance(tool_name, str) and tool_name:
                     self._last_tool_by_session[
                         str(ev.get("session_id") or "local")] = tool_name
+                    tid = ev.get("turn_id")
+                    key = str(tid) if tid is not None else "__no_turn__"
+                    if key != self._last_tool_turn_id:
+                        self._last_tool_turn_id = key
+                        self._last_turn_tools = []
+                    if (tool_name not in self._last_turn_tools
+                            and len(self._last_turn_tools) < 16):
+                        self._last_turn_tools.append(tool_name)
             elif etype == "tool_end":
+                tool_name = ev.get("tool_name")
+                if isinstance(tool_name, str) and tool_name:
+                    tid = ev.get("turn_id")
+                    key = str(tid) if tid is not None else "__no_turn__"
+                    if key != self._last_tool_turn_id:
+                        self._last_tool_turn_id = key
+                        self._last_turn_tools = []
+                    if (tool_name not in self._last_turn_tools
+                            and len(self._last_turn_tools) < 16):
+                        self._last_turn_tools.append(tool_name)
                 self._on_tool_end(ev)
             elif etype in ("user_turn", "turn"):
                 self._on_user_turn(ev)
@@ -931,8 +1116,20 @@ class Engine:
 
     def _on_tool_end(self, ev: dict) -> None:
         try:
+            operation = str(ev.get("operation") or "")
             capsule = pulse.handle_post_tool_call(
-                ev, self.registry, backend=self._get_backend(), args=None)
+                ev, self.registry, backend=self._get_backend(),
+                args={"operation": operation} if operation else None)
+            try:
+                self._trajectory.complete(
+                    str(ev.get("tool_call_id") or ""),
+                    str(ev.get("status") or "ok"),
+                    float(ev.get("ts") or time.time()), self._objective)
+                _pulse_persist.persist_trajectory(
+                    self._objective, self._trajectory.operations)
+            except Exception:
+                logger.exception(
+                    "its-in-your-head: trajectory completion failed")
             tool = str(ev.get("tool_name") or "unknown")
             # v0.1.10 (review fix 3): tag the capsule's vector-space
             # identity (the encoder name; model_version was attached by
@@ -945,7 +1142,18 @@ class Engine:
             self._store_capsule(tool, capsule)
             label = None
             if isinstance(capsule, dict):
-                label = self.protos.record_tool_end(capsule)
+                # Relevance-domain fix: bank vectors must live in the same
+                # TEXT DOMAIN as the prompt vector scored against them.
+                # The turn cache holds only a derived vector (never raw
+                # text), so this preserves the no-raw-prompt-storage
+                # contract while making prompt-to-prototype similarity
+                # meaningful. Legacy/no-cache turns keep capsule vectors.
+                prompt_vec = self._lookup_prompt_vector(ev.get("turn_id"))
+                label = self.protos.record_tool_end(
+                    capsule,
+                    relevance_vector=prompt_vec,
+                    provenance=((self._backend_name, None)
+                                if prompt_vec is not None else None))
             # Cross-process bridge (worker side, fault-isolated): persist
             # the bounded derived-vector state the isolated dashboard
             # half reads. Derived vectors only — the capsule text payload
@@ -958,6 +1166,8 @@ class Engine:
                     backend=self._backend_name,
                     model_version=self._pulse_vector_space()
                     ["model_version"])
+            if isinstance(capsule, dict):
+                self.note_pulse_write()
         except Exception:
             logger.exception("its-in-your-head: engine tool_end feed failed")
 
@@ -992,7 +1202,9 @@ class Engine:
                 space = self._pulse_vector_space()
                 stepped = self.upset.on_user_message(
                     ev, text, self._get_backend(),
-                    str(space.get("id") or self._backend_name))
+                    str(space.get("id") or self._backend_name),
+                    last_tool=self._last_tool_by_session.get(
+                        str(ev.get("session_id") or "local")))
                 if stepped:
                     # Immediacy: the pane must see the friction the moment
                     # the user's harsh message lands — persist NOW, not
@@ -1010,12 +1222,24 @@ class Engine:
             try:
                 goal_vector = pulse.activity_encoder.encode_goal_text(
                     text, self._get_backend())
-                self._goal_vector = list(goal_vector) if goal_vector else None
-                self._goal_ts = ev.get("ts")
+                # v0.1.31: a follow-up EVOLVES the global objective; it must
+                # not overwrite the trajectory with the last prompt.
+                _goal_traj.update_objective(
+                    self._objective, goal_vector,
+                    float(ev.get("ts") or time.time()),
+                    label="prompt-derived",
+                    new_topic=bool(getattr(self, "_last_feedback_new_topic",
+                                           False)))
+                self._goal_vector = list(self._objective.vector) \
+                    if self._objective.vector else None
+                self._goal_ts = self._objective.ts
                 self._goal_backend = self._backend_name
+                self._trajectory.reevaluate(self._objective)
                 _pulse_persist.persist_goal_vector(
-                    goal_vector, ts=ev.get("ts"),
+                    self._goal_vector, ts=self._goal_ts,
                     backend=self._backend_name)
+                _pulse_persist.persist_trajectory(
+                    self._objective, self._trajectory.operations)
             except Exception:
                 logger.exception(
                     "its-in-your-head: goal vector persist failed")
@@ -1440,7 +1664,7 @@ class Engine:
         accumulation at a caller-chosen instant. ``None`` (the production
         path) keeps using wall time, byte-identical to before.
         """
-        self.ensure_pulse_hydrated()
+        self.refresh_pulse_from_db()
         self._hydrate_upset_mood()
         thr = {k: v for k, v in self._thresholds.items() if v is not None}
         capsules = None
@@ -1497,6 +1721,9 @@ class Engine:
                 "schema_version": 2,
                 "lane_order": ["live", "goal", "good", "friction"],
                 "lanes": lanes,
+                # v0.1.31: global trajectory signal (additive; v2 lanes
+                # stay byte-compatible and per-tool GOAL is diagnostic).
+                "goal_signal": self._trajectory.signal(),
                 # D1-D6: the top-level upset block (the pane's glitch
                 # trigger + the M/prognosis read).
                 "upset": common["upset"]}
@@ -1666,6 +1893,7 @@ class Engine:
             # hydrated so ensure_pulse_hydrated() never re-loads the
             # just-deleted state. Clear the goal vector too.
             self._pulse_hydrated = True
+            self._pulse_refresh_suppressed = True
             self._goal_vector = None
             self._goal_ts = None
             self._goal_backend = None

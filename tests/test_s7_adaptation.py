@@ -380,6 +380,29 @@ def test_adaptation_no_file_writes_or_memory_retrieval():
         assert banned not in blob, banned
 
 
+def test_prototypes_store_prompt_domain_vector_not_operation_vector():
+    """The rule engine scores PROMPT vectors; bank vectors must be in the
+    same text domain or similarity is always ~0 and adaptation never fires."""
+    from pulse.feedback import apply_feedback
+    store = PrototypeStore(cap=8, min_labeled=3)
+    cap = {"tool_name": "web_search", "status": "error", "vector": OTHER,
+           "text": "web_search run ok fast", "ts": 1.0}
+    assert store.record_tool_end(
+        cap, relevance_vector=VEC,
+        provenance=("tier-1-onnx", None)) == "objective_friction"
+    bank = store.bank("web_search")["objective_friction"]
+    assert bank == [VEC]
+    assert store.bank_meta("web_search")["objective_friction"] == (
+        "tier-1-onnx", None)
+
+    store2 = PrototypeStore(cap=8, min_labeled=3)
+    assert apply_feedback(
+        store2, {"web_search": [cap]}, "good, fixed it",
+        relevance_vector=VEC,
+        provenance=("tier-1-onnx", None)) == "good"
+    assert store2.bank("web_search")["good"] == [VEC]
+
+
 def test_instruction_never_marks_identity_or_permissions():
     out = injection.build_injection(ON, prompt(), good_state())
     text = out["context"].lower()

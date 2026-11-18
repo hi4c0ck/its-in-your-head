@@ -757,7 +757,7 @@ def _pulse_momentum(recent_counts: dict, cumulative_counts: dict) -> dict:
 # same hysteresis quantization + deterministic tie-breaks). Keep the two
 # in sync; tests/test_pulse_lanes.py pins live == fallback lanes.
 _PULSE_LANE_ORDER = ["live", "goal", "good", "friction"]
-_PULSE_HYSTERESIS = 1e-6
+_PULSE_HYSTERESIS = 0.01
 
 
 def _pulse_q(score) -> int:
@@ -900,6 +900,84 @@ def _unpack_pulse_vector(blob) -> list[float] | None:
     return list(struct.unpack(f"<{len(blob) // 4}f", bytes(blob)))
 
 
+def _cosine_fallback(a, b):
+    if not a or not b or len(a) != len(b):
+        return None
+    na = math.sqrt(sum(float(x) * float(x) for x in a))
+    nb = math.sqrt(sum(float(x) * float(x) for x in b))
+    if na <= 0 or nb <= 0:
+        return None
+    return max(-1.0, min(1.0,
+                sum(float(x) * float(y) for x, y in zip(a, b)) / (na * nb)))
+
+
+def _goal_signal_from_conn(conn) -> dict:
+    """Dashboard-mirror of the global trajectory signal (derived vectors
+    only). Same shape as `Engine.pulse_view()["goal_signal"]`."""
+    empty = {"value": None, "category": "empty", "support": {
+        "count": 0, "required": 2, "ratio": 0.0},
+        "operation_count": 0, "drift_streak": 0, "detours": 0,
+        "version": None, "history_count": 0}
+    try:
+        row = conn.execute(
+            "SELECT version, vector, ts FROM pulse_goal_history"
+            " ORDER BY version DESC LIMIT 1").fetchone()
+        hv = conn.execute(
+            "SELECT COUNT(*) FROM pulse_goal_history").fetchone()[0]
+        if row is None:
+            return empty
+        objective = _unpack_pulse_vector(row[1])
+        if objective is None:
+            return empty
+        ops = []
+        for r in conn.execute(
+                "SELECT vector, current_assessment, category, ts,"
+                " objective_version FROM pulse_operations"
+                " ORDER BY ts ASC, id ASC"):
+            vec = _unpack_pulse_vector(r[0])
+            sim = _cosine_fallback(vec, objective)
+            ops.append({"value": max(0.0, min(1.0, sim or 0.0)),
+                        "category": str(r[2] or "pending"),
+                        "version": int(r[4] or 0)})
+        if not ops:
+            return empty
+        vals = [o["value"] for o in ops]
+        cats = [o["category"] for o in ops]
+        streak = 0
+        if cats[-1] == "drifting":
+            for cat in reversed(cats):
+                if cat != "drifting":
+                    break
+                streak += 1
+        else:
+            for cat in reversed(cats[:-1]):
+                if cat != "drifting":
+                    break
+                streak += 1
+        last = ops[-1]
+        detours = sum(1 for o in ops
+                      if o["category"] == "productive_detour")
+        if streak >= 2 and last["category"] != "drifting":
+            category = "recovering"
+        elif streak >= 2:
+            category = "drifting"
+        elif detours and last["category"] in ("aligned", "productive_detour"):
+            category = "productive_detour"
+        elif last["category"] in ("exploring", "drifting"):
+            category = last["category"]
+        else:
+            category = "aligned"
+        return {"value": round(sum(vals) / len(vals), 4),
+                "category": category,
+                "support": {"count": len(ops), "required": 2,
+                            "ratio": round(min(1.0, len(ops) / 2.0), 4)},
+                "operation_count": len(ops), "drift_streak": streak,
+                "detours": detours, "version": int(row[0]),
+                "history_count": int(hv)}
+    except Exception:
+        return empty
+
+
 def _pulse_shape() -> dict:
     """Profile-DB fallback for the isolated dashboard half (4-column
     matrix rows x 4).
@@ -917,6 +995,12 @@ def _pulse_shape() -> dict:
              "lane_order": list(_PULSE_LANE_ORDER),
              "lanes": {"live": [], "goal": [], "good": [], "friction": []},
              "rows": [], "columns": list(_PULSE_COLUMNS),
+             "goal_signal": {"value": None, "category": "empty",
+                             "support": {"count": 0, "required": 2,
+                                         "ratio": 0.0},
+                             "operation_count": 0, "drift_streak": 0,
+                             "detours": 0, "version": None,
+                             "history_count": 0},
              "available": False}
     try:
         conn = _connect()
@@ -955,6 +1039,7 @@ def _pulse_shape() -> dict:
         ).fetchone()
         if goal_row is not None:
             goal_vector = _unpack_pulse_vector(goal_row[1])
+        shape["goal_signal"] = _goal_signal_from_conn(conn)
         for tool, ts, blob, backend, model_version in conn.execute(
                 "SELECT tool_name, ts, vector, backend, model_version"
                 " FROM pulse_capsules"
@@ -1896,6 +1981,13 @@ def pulse(after_event_id: int | None = Query(default=None),
     upset = result.get("upset")
     if not isinstance(upset, dict) or "tier" not in upset:
         result["upset"] = dict(_NEUTRAL_UPSET)
+    if not isinstance(result.get("goal_signal"), dict):
+        result["goal_signal"] = {"value": None, "category": "empty",
+                                 "support": {"count": 0, "required": 2,
+                                             "ratio": 0.0},
+                                 "operation_count": 0, "drift_streak": 0,
+                                 "detours": 0, "version": None,
+                                 "history_count": 0}
     return result
 
 

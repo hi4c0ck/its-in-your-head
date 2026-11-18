@@ -148,19 +148,19 @@ def test_deterministic_tie_break_equal_scores():
 
 def test_hysteresis_sub_noise_never_reshuffles():
     # Within one HYSTERESIS bucket, name order wins over raw float value.
-    assert _q(0.5) == _q(0.5 + 5e-7)
-    assert _q(0.5) != _q(0.5 + 2e-6)
+    assert _q(0.5) == _q(0.5 + 0.002)
+    assert _q(0.5) != _q(0.5 + 0.02)
     close = [
         {"tool_id": 2, "tool_name": "alpha", "rank": 0, "value": 0.5,
          "support": {"count": 1, "required": 3, "ratio": 1 / 3}},
-        {"tool_id": 1, "tool_name": "zeta", "rank": 0, "value": 0.5 + 5e-7,
+        {"tool_id": 1, "tool_name": "zeta", "rank": 0, "value": 0.5 + 0.002,
          "support": {"count": 1, "required": 3, "ratio": 1 / 3}},
     ]
     ordered = _assign_ranks([dict(e) for e in close], _sem_sort_key)
     assert ordered[0]["tool_name"] == "alpha"  # noise ignored, name wins
     far = [
         dict(close[0]),
-        dict(close[1], value=0.5 + 2e-6),
+        dict(close[1], value=0.5 + 0.02),
     ]
     ordered2 = _assign_ranks(far, _sem_sort_key)
     assert ordered2[0]["tool_name"] == "zeta"  # meaningful gap wins
@@ -183,9 +183,9 @@ def test_friction_user_objective_parts_independent():
                        "user_accumulation", "objective_hint",
                        "objective_hint_cap"}
     assert fr["threshold"] == 0.4
-    # P2: value = channel-gated accumulation (0.0 — no capsules passed here);
-    # the single-prompt strongest similarity is preserved as the sub-field.
-    assert fr["value"] == 0.0
+    # No capsules = no measurement: an honest absence (None), not a 0.00
+    # that fabricates a reading for this tool.
+    assert fr["value"] is None
     assert fr["similarity"] == 1.0
     # Tie in similarity -> support ratio decides (user 3/3 = 1.0 > 1/3).
     assert fr["dominant_source"] == "user"
@@ -254,13 +254,13 @@ def test_good_friction_value_is_channel_gated_accumulation():
     assert good_a["value"] == _val(2 * hl, True)     # decayed, below fresh
     assert good_a["value"] < good["value"]            # structural decay
 
-    # Quality gate: no labeled good bank -> nothing accumulates (0.0).
+    # Quality gate: no labeled good bank -> no reading at all (None).
     empty = build_lanes(
         reg, _FakeProtos({"browser": {"good": [], "friction": [],
                                       "objective_friction": []}}),
         goal_vector=[1.0, 0.0],
         capsules_by_tool={"browser": good_caps}, now=now)
-    assert empty["good"][0]["value"] == 0.0
+    assert empty["good"][0]["value"] is None
 
     # Non-similar calls (cos 0.0 < 0.6) accumulate nothing for GOOD.
     dissim = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
@@ -324,17 +324,17 @@ def test_value_decoupled_from_confidence():
                            now=now)["good"][0]
     assert no_match["value"] == 0.0
 
-    # Objective-friction ONLY (no user labels): the display value stays 0.0
-    # (user-labeled accumulation), while the capped objective_hint < 0.4
-    # (never 'strong'), reported on its own.
+    # Objective-friction ONLY (no user labels): the user display value is
+    # absent (None, not a fabricated 0.00), while the capped objective_hint
+    # < 0.4 (never 'strong') is reported on its own.
     obj_only = _FakeProtos({"browser": {"good": [], "friction": [],
                                         "objective_friction": [[0.0, 1.0]] * 3}})
     ocaps = [{"vector": [0.0, 1.0]} for _ in range(8)]
     f = build_lanes(reg, obj_only, goal_vector=[1.0, 0.0],
                     capsules_by_tool={"browser": ocaps})["friction"][0]
-    assert f["value"] == 0.0                            # user-labeled only
-    assert f["level"] == "weak"
-    assert f["user_accumulation"] == 0.0
+    assert f["value"] is None                           # no user measurement
+    assert f["level"] == "neutral"
+    assert f["user_accumulation"] is None
     assert 0.0 < f["objective_hint"] <= 0.30            # capped hint
     assert f["objective_hint"] < 0.4                     # never 'strong'
 
@@ -420,11 +420,14 @@ def test_goal_and_good_reach_ready_independently():
         "t": {"good": [[1.0, 0.0]] * 3, "friction": [],
               "objective_friction": []},
     })
-    lanes = build_lanes(reg, protos, goal_vector=[1.0, 0.0])
+    caps = {"t": [{"vector": [1.0, 0.0]} for _ in range(3)]}
+    lanes = build_lanes(reg, protos, goal_vector=[1.0, 0.0],
+                        capsules_by_tool=caps)
     assert lanes["good"][0]["state"] == "ready"
     assert lanes["good"][0]["evidence_source"] == "good_prototypes"
-    assert lanes["goal"][0]["evidence"]["source"] == "prototype_banks"
-    assert lanes["goal"][0]["evidence"]["prototype_count"] == 3
+    # GOAL reads capsule reference vectors, never prompt-domain banks.
+    assert lanes["goal"][0]["evidence"]["source"] == "recent_capsules"
+    assert lanes["goal"][0]["evidence"]["capsule_count"] == 3
 
 
 def test_no_animation_fields_in_lane_entries():

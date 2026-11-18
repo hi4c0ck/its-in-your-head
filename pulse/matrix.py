@@ -319,19 +319,14 @@ def build_matrix(registry, prototypes, session_state=None,
         # support candidates (dimension-comparable AND known provenance
         # in the active space); unknown-provenance vectors can still be
         # scored but never satisfy readiness.
-        ref_scored: list = []
-        ref_supported: list = []
-        for _label in ("good", "friction", "objective_friction"):
-            _scored, _supported = _gated_bank(tool, prototypes, _label,
-                                               vector_space)
-            ref_scored.extend(_scored)
-            ref_supported.extend(_supported)
+        # v0.1.30+ GOAL reference = recent CAPSULE vectors ONLY. Prototype
+        # banks now live in the PROMPT domain (Resembly fix), so scoring
+        # GOAL against them compares a goal embedding to its own echo and
+        # saturates at 1.00. Capsules remain the operation-domain evidence
+        # the GOAL lane was designed to measure.
         capsule_scored, capsule_supported = _gated_capsules(
             capsules_by_tool.get(tool, []), vector_space)
-        if ref_scored:
-            reference, reference_support = ref_scored, ref_supported
-        else:
-            reference, reference_support = capsule_scored, capsule_supported
+        reference, reference_support = capsule_scored, capsule_supported
         goal_raw = strongest_similarity(goal_vector, reference)
         goal_value = _floor(goal_raw)
         goal_support = _support(len(reference_support), goal_req)
@@ -461,7 +456,7 @@ def required_for(prototypes, category: str, legacy: int) -> int:
 # ---------------------------------------------------------------------------
 
 LANE_ORDER = ["live", "goal", "good", "friction"]
-HYSTERESIS = 1e-6  # minimum meaningful score change for ranking
+HYSTERESIS = 0.01  # 1% bucket = tooltip precision; 1e-6 let float decay spawn bubbles every poll
 
 
 def _q(score) -> int:
@@ -572,27 +567,13 @@ def build_lanes(registry, prototypes, session_state=None,
         bank = prototypes.bank(tool)
         capsules = [c for c in (capsules_by_tool.get(tool) or [])
                     if isinstance(c, dict) and c.get("vector")]
-        ref_from_banks = (bank["good"] + bank["friction"]
-                          + bank["objective_friction"])
-        # v0.1.10 gate: scored vs support-eligible candidates; the RAW
-        # counts stay the evidence facts below.
-        ref_scored: list = []
-        ref_supported: list = []
-        for _label in ("good", "friction", "objective_friction"):
-            _scored, _supported = _gated_bank(tool, prototypes, _label,
-                                               vector_space)
-            ref_scored.extend(_scored)
-            ref_supported.extend(_supported)
+        # GOAL reference = recent CAPSULE vectors only (see build_matrix
+        # note): prompt-domain prototype banks would echo the goal vector.
         capsule_scored, capsule_supported = _gated_capsules(capsules,
                                                              vector_space)
-        if ref_from_banks:
-            reference, reference_support = ref_scored, ref_supported
-            evidence_source = "prototype_banks"
-            capsule_count = len(capsules)
-        else:
-            reference, reference_support = capsule_scored, capsule_supported
-            evidence_source = "recent_capsules" if capsules else "none"
-            capsule_count = len(capsules)
+        reference, reference_support = capsule_scored, capsule_supported
+        evidence_source = "recent_capsules" if capsules else "none"
+        capsule_count = len(capsules)
         goal_value = _floor(strongest_similarity(goal_vector, reference))
         goal_support = _support(len(reference_support), goal_req)
         goal.append({
@@ -602,7 +583,7 @@ def build_lanes(registry, prototypes, session_state=None,
             "state": _state(has_goal, len(reference_support), goal_req),
             "support": goal_support,
             "evidence": {"source": evidence_source,
-                         "prototype_count": len(ref_from_banks),
+                         "prototype_count": 0,
                          "capsule_count": capsule_count},
         })
         good_scored, good_supported = _gated_bank(tool, prototypes, "good",
@@ -631,11 +612,16 @@ def build_lanes(registry, prototypes, session_state=None,
         if total_w > 0.0:
             activation = 1.0 - math.exp(
                 -total_w / max(1.0, float(PULSE_ACCUM_HALF_LIFE)))
-            good_value = round(activation * (good_w / total_w), 4)
-            user_hint = round(activation * (fric_w / total_w), 4)
+            raw_good = round(activation * (good_w / total_w), 4)
+            raw_user = round(activation * (fric_w / total_w), 4)
         else:
-            good_value = 0.0
-            user_hint = 0.0
+            raw_good = raw_user = 0.0
+        # HONEST ABSENCE: a tool with no labeled bank (or no capsules to
+        # score) has NOT measured 0.00 — it has no reading at all. Rendering
+        # that as 0.00 in the pane is a fabricated value. Keep None so the
+        # tooltip says "no evidence" and the rank sinks below measured cells.
+        good_value = raw_good if (good_scored and capsules) else None
+        user_hint = raw_user if (user_scored and capsules) else None
         good.append({
             "tool_id": tid, "tool_name": tool, "rank": 0,
             "value": good_value, "threshold": thr["good"],
@@ -672,7 +658,8 @@ def build_lanes(registry, prototypes, session_state=None,
         # user_hint was derived from the shared good/friction budget above.
         obj_acc = _lane_accumulation(
             capsules, obj_scored, thr["friction"], PULSE_ACCUM_HALF_LIFE, now_ts)
-        obj_hint = round(min(obj_acc, PULSE_OBJ_HINT_CAP), 4)
+        obj_hint = (round(min(obj_acc, PULSE_OBJ_HINT_CAP), 4)
+                    if (obj_scored and capsules) else None)
         friction_value = user_hint
         friction.append({
             "tool_id": tid, "tool_name": tool, "rank": 0,

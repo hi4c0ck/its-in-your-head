@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pulse.tool_registry import ToolRegistry
+
 from tests.metrics_emulation import harness, schema, stories
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,8 +103,12 @@ def test_long_session_strong_points_bounded():
                     s += 1
                     strong_tools.add(e.get("tool_name"))
         strong_per_turn.append(s)
-    assert max(strong_per_turn) <= len(all_tools)
-    assert len(strong_tools) <= len(all_tools)
+    # With prompt-domain prototype vectors the goal/prompt vector can
+    # legitimately reach STRONG in more than one lane for the same tool.
+    # The real bound is registry size x lanes, not distinct observed tools.
+    registry_size = len(ToolRegistry().list_tools())
+    assert max(strong_per_turn, default=0) <= registry_size * 3
+    assert len(strong_tools) <= registry_size
     # A long session must not drive portrait values to hard extremes.
     for t in r["turns"]:
         for v in (t["portrait"].get("dimensions") or {}).values():
