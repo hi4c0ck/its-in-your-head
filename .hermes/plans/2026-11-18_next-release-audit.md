@@ -18,8 +18,8 @@ fixed in code + regression-tested; release still BLOCK.** The first pass
 kept unrestricted value tokenization behind a deny-token filter, which
 rejects `--password` but not the value after it (`login --password hunter2`
 leaked `verb:hunter2`). Value extraction is now removed outright (see
-"Sanitizer privacy hardening" below). Still pending: gateway restart + live
-replay, green CI on the new HEAD, and the tag decision. No tag created.
+"Sanitizer privacy hardening" below). CI is green on HEAD `ad3a5fa`. Still
+pending: gateway restart + live replay and the tag decision. No tag created.
 
 ## Hard blockers
 
@@ -171,6 +171,10 @@ Implementation (value extraction removed, not filtered):
   from a future producer is rejected, never persisted.
 - `has_operation_semantics` keeps the legacy markers so pre-hardening rows
   stay scoreable; current descriptors emit only `kind:`.
+- The earlier branch `fix/operation-descriptor-privacy` (`428feda`, green
+  CI but never merged to main) is SUPERSEDED: it mapped an executable
+  allowlist to command classes, kept basename/dir tokens, and did not
+  cover the `pulse/activity_encoder.py` extractor or persistence.
 
 Regression evidence (actual runs, not predictions):
 - `tests/test_operation_sanitizer_privacy.py` (new, 24 tests): 14 canaries
@@ -191,6 +195,8 @@ Regression evidence (actual runs, not predictions):
   `tests/test_desktop_*.mjs` PASS; `hermes plugins doctor . --ci` OK;
   installed pane hash matches `desktop/plugin.js`
   (`0af085acc924363c7e75c7d31419755f`).
+- CI for commit `ad3a5fa` is green (6/6 matrix, win/linux x py 3.11-3.13):
+  https://github.com/hi4c0ck/its-in-your-head/actions/runs/44397211291
 
 Known consequence (accepted trade-off, owner-directed privacy-first):
 - Tier-0 GOAL separation is now at the action/category level, not the
@@ -208,7 +214,7 @@ Release checks after this pass:
 | D4 threshold | Fixed (6f47e80) |
 | GOAL prompt-blend removal | Present |
 | Sanitizer privacy | Fixed in code + canary/persistence regression tests |
-| CI | Pending on new HEAD (previous green matrix was 6f47e80) |
+| CI | Green on HEAD `ad3a5fa` (6/6 matrix): runs/44397211291 |
 | Gateway restart + live replay | Not evidenced — still pending |
 | Manifest | 0.1.31 |
 | Tag v0.1.31 | Does not exist — deliberately not tagged |
