@@ -44,7 +44,7 @@ const context = vm.createContext({
   PORTRAIT_POLL_MS: 850,
 })
 vm.runInContext(engineBlock + '\nglobalThis.__IYH_PORTRAIT__ = IYH_PORTRAIT;', context)
-vm.runInContext(uiBlock + '\nglobalThis.__IYH_UI__ = { buildIyhPortraitMarkup, createIyhPortraitTemplatePreferences, IYH_PORTRAIT_TEMPLATE_PREF_KEY };', context)
+vm.runInContext(uiBlock + '\nglobalThis.__IYH_UI__ = { buildIyhPortraitMarkup, createIyhPortraitTemplatePreferences, IYH_PORTRAIT_TEMPLATE_PREF_KEY, IYH_PORTRAIT_INK_PREF_KEY, initIyhInvertSourcePersistence, iyhInvertSourceSet, iyhInvertSourceGet: () => iyhInvertSource, hydratePortraitPreferencesFromBackend };', context)
 const IYH_PORTRAIT = context.__IYH_PORTRAIT__
 const UI = context.__IYH_UI__
 
@@ -183,5 +183,87 @@ ok(/deviation:\s*\(\s*v\s*-\s*0\.5\s*\)\s*\*\s*2\s*,/.test(src),
 ok(!/deviation:\s*\(\s*v\s*-\s*0\.5\s*\)\s*\*\s*2\s*\*\s*c\b/.test(src),
    'effective(): deviation is NOT re-multiplied by confidence (c)')
 ok(/strength: c/.test(src), 'effective(): confidence stays an independent `strength` data value')
+
+// (12) portrait selections persist: INK through ctx.storage + the durable
+// backend mirror; DRAWING mirrored too; hydration adopts durable overrides
+// and seeds the backend when no override exists (owner bug: selections lost
+// on restart/session change — INK was memory-only, DRAWING was localStorage-
+// only and the desktop quarantines that store on multi-instance contention).
+const inkPersisted = new Map()
+const inkWrites = []
+const posts = []
+let getResponse = { user: {} }
+const richCtx = {
+  storage: {
+    get: (k, d) => (inkPersisted.has(k) ? inkPersisted.get(k) : d),
+    set: (k, v) => { inkWrites.push([k, v]); inkPersisted.set(k, v) },
+    remove: (k) => inkPersisted.delete(k),
+  },
+  rest: (path, opts) => {
+    if (opts && opts.method === 'POST') {
+      posts.push(opts.body.settings)
+      return Promise.resolve({ persisted: true })
+    }
+    return Promise.resolve(getResponse)
+  },
+}
+UI.initIyhInvertSourcePersistence(richCtx)
+ok(UI.iyhInvertSourceSet(true) === true, 'INK toggle flips')
+ok(inkWrites.some(([k, v]) => k === UI.IYH_PORTRAIT_INK_PREF_KEY && v === true),
+  'INK persisted through ctx.storage (plugin-scoped)')
+ok(posts.some((s) => s['portrait.ink'] === true),
+  'INK mirrored to the durable backend user-data store')
+// Reload simulation: a FRESH module realm (all memory reset) over the SAME
+// storage — the persisted INK value must be restored at init.
+const reloadContext = vm.createContext({
+  useState: () => [null, () => {}],
+  useEffect: () => {},
+  jsx: () => null,
+  jsxs: () => null,
+  clamp01: (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null),
+  PORTRAIT_POLL_MS: 850,
+})
+vm.runInContext(engineBlock + '\nglobalThis.__IYH_PORTRAIT__ = IYH_PORTRAIT;', reloadContext)
+vm.runInContext(uiBlock + '\nglobalThis.__IYH_UI__ = { initIyhInvertSourcePersistence, iyhInvertSourceSet, iyhInvertSourceGet: () => iyhInvertSource };', reloadContext)
+const UI2 = reloadContext.__IYH_UI__
+UI2.initIyhInvertSourcePersistence(richCtx)
+ok(UI2.iyhInvertSourceGet() === true, 'INK restored from ctx.storage after a full module reload')
+
+const tplPosts = []
+const tplStore = new Map()
+const tplCtx = {
+  storage: {
+    get: (k, d) => (tplStore.has(k) ? tplStore.get(k) : d),
+    set: (k, v) => tplStore.set(k, v),
+    remove: (k) => tplStore.delete(k),
+  },
+  rest: (path, opts) => {
+    if (opts && opts.method === 'POST') tplPosts.push(opts.body.settings)
+    return Promise.resolve({})
+  },
+}
+const tplPrefs = UI.createIyhPortraitTemplatePreferences(tplCtx)
+tplPrefs.set('angular-pencil')
+ok(tplPosts.some((s) => s['portrait.template'] === 'angular-pencil'),
+  'DRAWING mirrored to the durable backend user-data store')
+
+getResponse = { user: { 'portrait.template': 'soft-flow-study', 'portrait.ink': false } }
+await UI.hydratePortraitPreferencesFromBackend(richCtx, tplPrefs)
+ok(tplPrefs.get() === 'soft-flow-study', 'hydration adopts the durable template override (backend wins)')
+ok(UI.iyhInvertSourceGet() === false, 'hydration adopts the durable INK override')
+
+posts.length = 0
+getResponse = { user: {} }
+await UI.hydratePortraitPreferencesFromBackend(richCtx, tplPrefs)
+ok(posts.some((s) => s['portrait.template'] === 'soft-flow-study' && s['portrait.ink'] === false),
+  'hydration seeds the durable store from local values when no override exists (migration)')
+
+const legacyCtx = { storage: { get: (k, d) => d, set: () => {}, remove: () => {} } }
+UI.initIyhInvertSourcePersistence(legacyCtx)    // older host: no ctx.rest
+ok(UI.iyhInvertSourceSet(true) === true && UI.iyhInvertSourceGet() === true,
+  'older host without ctx.rest degrades cleanly (storage-only, no throw)')
+ok(src.includes('initIyhInvertSourcePersistence(ctx)') &&
+   src.includes('hydratePortraitPreferencesFromBackend(ctx, portraitPreferences)'),
+  'register(ctx) wires both persistence doors')
 
 console.log('PASS portrait_engine: ' + n + ' assertions')

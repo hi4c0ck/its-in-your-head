@@ -1799,6 +1799,46 @@ const PORTRAIT_DIMS = IYH_PORTRAIT.PORTRAIT_DIMENSIONS
 
 // IYH-PORTRAIT-UI-START
 const IYH_PORTRAIT_TEMPLATE_PREF_KEY = 'portrait.template.v1'
+const IYH_PORTRAIT_INK_PREF_KEY = 'portrait.ink.v1'
+
+// Durable backend mirror for the portrait UI preferences. The profile-DB
+// user-data store (POST /settings) is the source of truth that survives
+// renderer-localStorage wipes/quarantine; ctx.storage stays the instant
+// cold-read cache. Fire-and-forget + feature-detected: an older host without
+// ctx.rest (or an offline backend) degrades to ctx.storage-only, never a
+// thrown error on the UI path.
+function postPortraitSettings(ctx, settings) {
+  if (!ctx || typeof ctx.rest !== 'function') return
+  try {
+    const p = ctx.rest('/settings', { method: 'POST', body: { settings }, timeoutMs: 8000 })
+    if (p && typeof p.catch === 'function') p.catch(() => {})
+  } catch { /* backend offline: the local cache already holds the value */ }
+}
+
+// Hydrate both portrait preferences from the durable override document
+// (GET /settings -> "user": only keys the user actually persisted). The
+// backend wins when present; when a key has no durable override yet, the
+// local value seeds the backend once (migration from storage-only builds).
+function hydratePortraitPreferencesFromBackend(ctx, templatePreferences) {
+  if (!ctx || typeof ctx.rest !== 'function') return Promise.resolve()
+  let p
+  try { p = ctx.rest('/settings', { timeoutMs: 8000 }) } catch { return Promise.resolve() }
+  if (!p || typeof p.then !== 'function') return Promise.resolve()
+  return p.then((resp) => {
+    const user = (resp && typeof resp.user === 'object' && resp.user) || {}
+    const has = (k) => Object.prototype.hasOwnProperty.call(user, k)
+    if (has('portrait.template') && typeof user['portrait.template'] === 'string') {
+      templatePreferences.set(user['portrait.template'])  // registry-validated; no-op when equal
+    }
+    if (has('portrait.ink')) {
+      iyhInvertSourceSet(!!user['portrait.ink'])
+    }
+    const seed = {}
+    if (!has('portrait.template')) seed['portrait.template'] = templatePreferences.get()
+    if (!has('portrait.ink')) seed['portrait.ink'] = iyhInvertSource
+    if (Object.keys(seed).length > 0) postPortraitSettings(ctx, seed)
+  }).catch(() => { /* offline: local cache remains authoritative */ })
+}
 
 function createIyhPortraitTemplatePreferences(ctx) {
   const registryIds = () => new Set(
@@ -1836,6 +1876,9 @@ function createIyhPortraitTemplatePreferences(ctx) {
       // Persist first. If storage rejects, do not publish a UI state that will
       // silently disappear on reload.
       storage.set(IYH_PORTRAIT_TEMPLATE_PREF_KEY, templateId)
+      // Durable mirror: the profile-DB user-data store survives a renderer
+      // localStorage wipe/quarantine (the observed selection-loss mode).
+      postPortraitSettings(ctx, { 'portrait.template': templateId })
       selected = templateId
       listeners.forEach((listener) => listener(selected))
       return true
@@ -1854,7 +1897,11 @@ function useIyhPortraitTemplate(preferences) {
 
 // SHARED INVERT-SOURCE preference (module-level, so the studio checkbox + the
 // compact sidebar canvas reflect the same state across both React roots).
+// Persisted through ctx.storage (instant cold read) AND the durable backend
+// user-data store (survives a renderer localStorage wipe/quarantine) — the
+// INK toggle used to be memory-only and reset on every reload/session change.
 let iyhInvertSource = false
+let iyhInvertSourceCtx = null
 const iyhInvertSourceListeners = new Set()
 function iyhInvertSourceSubscribe(listener) {
   if (typeof listener !== 'function') return function () {}
@@ -1865,8 +1912,27 @@ function iyhInvertSourceSet(next) {
   const v = !!next
   if (iyhInvertSource === v) return false
   iyhInvertSource = v
+  const ctx = iyhInvertSourceCtx
+  if (ctx && typeof ctx.storage === 'object') {
+    try { ctx.storage.set(IYH_PORTRAIT_INK_PREF_KEY, v) } catch { /* degrade */ }
+  }
+  postPortraitSettings(ctx, { 'portrait.ink': v })
   iyhInvertSourceListeners.forEach((listener) => listener(v))
   return true
+}
+// Bind the persistence doors at register() time and restore the persisted
+// value BEFORE any component mounts (silent apply: the value already lives
+// in storage; the backend override is handled by the shared hydration).
+function initIyhInvertSourcePersistence(ctx) {
+  iyhInvertSourceCtx = ctx || null
+  if (ctx && typeof ctx.storage === 'object') {
+    let persisted = false
+    try { persisted = ctx.storage.get(IYH_PORTRAIT_INK_PREF_KEY, false) } catch { /* degrade */ }
+    if (typeof persisted === 'boolean' && persisted !== iyhInvertSource) {
+      iyhInvertSource = persisted
+      iyhInvertSourceListeners.forEach((listener) => listener(persisted))
+    }
+  }
 }
 function useIyhInvertSource() {
   const [value, setValue] = useState(iyhInvertSource)
@@ -6756,8 +6822,12 @@ export default {
   register(ctx) {
     // One shared preference store for the portrait drawing template. Both the
     // compact strip and the expanded workspace render through it, so the
-    // selection stays synchronized; ctx.storage persists it (plugin-scoped).
+    // selection stays synchronized; ctx.storage persists it (plugin-scoped)
+    // and the durable backend user-data store survives a localStorage wipe.
     const portraitPreferences = createIyhPortraitTemplatePreferences(ctx)
+    // INK toggle: same two-door persistence (storage cache + durable mirror).
+    initIyhInvertSourcePersistence(ctx)
+    hydratePortraitPreferencesFromBackend(ctx, portraitPreferences)
     ctx.register({
       id: 'its-in-your-head',
       area: 'panes',

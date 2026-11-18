@@ -35,6 +35,13 @@ DEFAULTS = {
     # paired observations; minimum amplification to qualify.
     "perception.reinforce": True,
     "perception.reinforce_min_amplification": 0.15,
+    # Pane UI preferences (portrait surface). The profile-DB user-data
+    # store is the durable source of truth (survives renderer-localStorage
+    # wipes/quarantine); the pane mirrors them to ctx.storage for instant
+    # cold reads. portrait.template must stay a registered drawing-template
+    # id (the pane validates against its registry on read and write).
+    "portrait.template": "neutral-pencil",
+    "portrait.ink": False,
 }
 
 

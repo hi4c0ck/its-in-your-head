@@ -518,6 +518,8 @@ def _settings_defaults():
             "perception.custom_patterns": [],
             "perception.reinforce": True,
             "perception.reinforce_min_amplification": 0.15,
+            "portrait.template": "neutral-pencil",
+            "portrait.ink": False,
         }
 
 
@@ -2059,7 +2061,10 @@ def settings():
     """C4 keys + current values. The DURABLE pane read: the profile-DB
     user-data store is the source of truth (survives restarts); the flat
     dotted-key map lives under "settings"/"keys"; the nested top-level
-    expansion is what the desktop settingValue() walk resolves."""
+    expansion is what the desktop settingValue() walk resolves. "user" is
+    the raw durable override document (only keys the user actually set) —
+    the pane hydrates from it so a wiped renderer-localStorage never loses
+    a persisted selection."""
     flat = _pane_settings()
     nested: dict = {}
     for key, value in flat.items():
@@ -2068,7 +2073,8 @@ def settings():
         for part in parts[:-1]:
             cur = cur.setdefault(part, {})
         cur[parts[-1]] = value
-    return {**nested, "settings": flat, "keys": sorted(flat)}
+    return {**nested, "settings": flat, "keys": sorted(flat),
+            "user": _user_settings_from_db()}
 
 
 @router.post("/settings")
