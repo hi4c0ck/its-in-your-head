@@ -96,15 +96,17 @@ def test_post_tool_call_encodes_on_worker_side(registry):
     assert registry.get("terminal")["calls_completed"] == 1
 
 
-def test_sanitize_read_file_basename():
+def test_sanitize_read_file_category_only():
     op = sanitize_operation("read_file", args={"path": "/home/u/project/config.py"})
-    assert op == "read_file:config.py"
+    assert op == "action:read tool:read_file kind:code arg:path:str"
     assert "/home" not in op
+    assert "config" not in op  # basename is never tokenized
 
 
-def test_sanitize_terminal_command_verb():
+def test_sanitize_terminal_no_value_tokens():
     op = sanitize_operation("terminal", args={"command": "git status --porcelain"})
-    assert op == "terminal:git"
+    assert op == "action:execute tool:terminal arg:command:str"
+    assert "git" not in op  # command values contribute no tokens
 
 
 def test_duration_buckets():

@@ -4,10 +4,13 @@ A capsule is the unit of similarity for PULSE. It carries ONLY:
 
     tool + sanitized operation + status + duration bucket (+ vector)
 
-Sanitized operation examples: ``read_file`` -> file-path basename,
-``terminal`` -> command verb (first token). Full args and full results
-are NEVER stored — there is no result-payload field in the schema
-(C6 / ARCHITECTURE locked rule: capsules only).
+The operation descriptor follows the SINGLE core.events privacy policy:
+action class + tool identity + approved semantic categories (file-extension
+class / url role) + argument key/type tags. NO value-derived free text —
+command/query values, path basenames and URL hosts/credentials are never
+tokenized. Full args and full results are NEVER stored — there is no
+result-payload field in the schema (C6 / ARCHITECTURE locked rule:
+capsules only).
 
 Encoding goes through the S2 ``EmbeddingBackend`` interface and happens
 on the post_tool_call / worker side only. ``handle_pre_tool_call`` is
@@ -16,7 +19,6 @@ never calls ``encode()`` (no backend argument is even accepted).
 """
 from __future__ import annotations
 
-import os
 import time
 
 try:
@@ -32,38 +34,31 @@ CAPSULE_FIELDS = frozenset({
     "tool_call_id", "session_id", "turn_id", "task_id", "ts",
 })
 
-_PATH_KEYS = ("path", "file", "filepath", "file_path", "filename",
-              "name", "uri", "url")
-_COMMAND_KEYS = ("command", "cmd", "shell_command")
-_QUERY_KEYS = ("query", "pattern", "search", "text", "prompt")
+# The descriptor vocabulary core.events.sanitize_operation can emit. The
+# collector-supplied ``operation`` passthrough is accepted ONLY when every
+# token belongs to it — an arbitrary free-text "operation" string from a
+# future producer is rejected, never persisted. The legacy markers keep
+# pre-hardening descriptors (already enqueued) scoreable.
+_OPERATION_PREFIXES = ("action:", "tool:", "kind:", "arg:",
+                       "file:", "verb:", "term:", "host:", "dir:", "path:")
 
 
-def _basename(value) -> str:
-    text = str(value or "").replace("\\", "/").rstrip("/")
-    if not text:
-        return ""
-    base = os.path.basename(text)
-    return base[:80] if base else ""
-
-
-def _first_token(value) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    return text.split()[0][:80]
-
-
-def _host(value) -> str:
-    text = str(value or "").strip()
-    if "://" in text:
-        text = text.split("://", 1)[1]
-    return text.split("/")[0][:80]
+def _valid_operation_descriptor(operation: str) -> bool:
+    safe = "".join(c for c in operation
+                   if c.isalnum() or c in "_-.:(), ")
+    tokens = safe.split()
+    return bool(tokens) and all(t.startswith(_OPERATION_PREFIXES)
+                                for t in tokens)
 
 
 def sanitize_operation(tool_name, args=None, event: dict | None = None) -> str:
-    """Sanitized arg summary: basename / command verb / host / first token.
+    """Privacy-safe operation descriptor (single policy: core.events).
 
-    Falls back to the bare tool name when no usable arg summary exists.
+    Accepts the collector's already-sanitized ``operation`` signature only
+    when every token belongs to the approved descriptor vocabulary; raw
+    args are delegated to ``core.events.sanitize_operation`` (categories
+    and key/type tags only — never basename/verb/host/query free text).
+    Falls back to the bare tool name when no args dict is available.
     Never returns full args or any result content.
     """
     tool = str(tool_name or (event or {}).get("tool_name") or "unknown")
@@ -72,33 +67,18 @@ def sanitize_operation(tool_name, args=None, event: dict | None = None) -> str:
         return tool
     lowered = {str(k).lower(): v for k, v in args.items()}
     # The collector may provide the already-sanitized signature. Accept
-    # only bounded identifier punctuation; never persist arbitrary arg text.
+    # only the approved descriptor vocabulary; arbitrary arg text (even
+    # disguised as an "operation") never becomes a persistent record.
     operation = lowered.get("operation")
-    if isinstance(operation, str) and operation:
+    if isinstance(operation, str) and operation \
+            and _valid_operation_descriptor(operation):
         safe = "".join(c for c in operation
                        if c.isalnum() or c in "_-.:(), ")
-        if safe:
-            return safe[:160]
-    # Path-like first (most specific), then command verb.
-    for key in _PATH_KEYS:
-        if lowered.get(key):
-            if key in ("uri", "url"):
-                host = _host(lowered[key])
-                if host:
-                    return f"{tool}:{host}"
-            base = _basename(lowered[key])
-            if base:
-                return f"{tool}:{base}"
-    for key in _COMMAND_KEYS:
-        verb = _first_token(lowered.get(key))
-        if verb:
-            return f"{tool}:{verb}"
-    for key in _QUERY_KEYS:
-        token = _first_token(lowered.get(key))
-        if token:
-            return f"{tool}:{token}"
-    # Generic: no free-text dump — a bounded op count, not the args.
-    return f"{tool}:args={min(len(args), 99)}"
+        return safe[:160]
+    # Lazy import: core.events is the single sanitization policy; importing
+    # at module load would couple pulse <-> core import order.
+    from core import events as _core_events
+    return _core_events.sanitize_operation(tool, args)
 
 
 def duration_bucket(duration_ms) -> str:

@@ -156,7 +156,13 @@ def test_trajectory_persistence_roundtrip(tmp_path: Path):
 
 
 def test_production_descriptors_separate_relevant_from_unrelated():
-    """Sanitized production-shape traces, not synthetic `sem:` labels."""
+    """REAL sanitizer output from REAL tool args — not preconstructed strings.
+
+    The privacy-strict vocabulary (action class + tool + kind: category +
+    arg key/type tags) separates at the action/category level. Command and
+    query values contribute no tokens, so terminal/search-only operations
+    are ambiguous (unmeasured) — never a drift claim.
+    """
     import json
 
     from core import events as core_events
@@ -169,7 +175,7 @@ def test_production_descriptors_separate_relevant_from_unrelated():
     (objective_vector,) = backend.encode([fixture["objective"]])
     scored = {}
     for case in fixture["cases"]:
-        descriptor = case["operation"]
+        descriptor = core_events.sanitize_operation(case["tool"], case["args"])
         if not core_events.has_operation_semantics(descriptor):
             scored[case["id"]] = (None, case)
             continue
@@ -183,13 +189,14 @@ def test_production_descriptors_separate_relevant_from_unrelated():
     assert relevant and unrelated
     assert min(relevant) - max(unrelated) > 0.05
     ambiguous = [v for v, c in scored.values() if c["class"] == "ambiguous"]
-    assert ambiguous == [None]
+    assert ambiguous and all(v is None for v in ambiguous)
 
 
 def test_success_without_alignment_is_not_progress():
     """A successful irrelevant operation is execution evidence only."""
     import json
 
+    from core import events as core_events
     from perception.encoder import Tier0SketchBackend
 
     fixture = json.loads(
@@ -201,9 +208,10 @@ def test_success_without_alignment_is_not_progress():
     st.version = 1
     st.vector = objective_vector
     ev = gt.TrajectoryEvaluator()
-    case = next(c for c in fixture["cases"] if c["id"] == "sandwich")
-    (vector,) = backend.encode([case["operation"]])
-    ev.add_intent("real-1", "terminal", case["operation"],
+    case = next(c for c in fixture["cases"] if c["id"] == "pizza-browser")
+    descriptor = core_events.sanitize_operation(case["tool"], case["args"])
+    (vector,) = backend.encode([descriptor])
+    ev.add_intent("real-1", case["tool"], descriptor,
                   vector, 1.0, st)
     rec = ev.complete("real-1", "ok", 2.0, st)
     assert rec is not None and rec.category == "drifting"
@@ -236,8 +244,8 @@ def test_dashboard_fallback_uses_shared_evaluator(tmp_path: Path):
     gt.update_objective(st, V_FOLLOW, 2.0)
     ev = gt.TrajectoryEvaluator()
     ev.add_intent("c1", "read_file",
-                  "action:read tool:read_file file:goal_trajectory.py "
-                  "kind:code arg:path:str", V_FOLLOW, 3.0, st)
+                  "action:read tool:read_file kind:code arg:path:str",
+                  V_FOLLOW, 3.0, st)
     ev.complete("c1", "ok", 3.5, st)
     pers.persist_trajectory(st, ev.operations)
     loaded = pers.load_trajectory_state()

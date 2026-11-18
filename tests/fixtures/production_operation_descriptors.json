@@ -1,51 +1,46 @@
 {
-  "objective": "fix the PULSE GOAL trajectory in the its-in-your-head plugin",
+  "note": "Descriptors are GENERATED at test time by core.events.sanitize_operation(tool, args) - never preconstructed strings. Privacy-strict vocabulary: action class + tool identity + approved kind: categories (file-extension class / url role) + arg key/type tags. Command/query values contribute no tokens, so terminal/search-only operations are ambiguous (unmeasured). Separation is at the action/category level, not the filename level.",
+  "objective": "read the python code file, search the code file, patch the code file",
   "cases": [
     {
-      "id": "pytest-goal",
-      "operation": "action:execute tool:terminal verb:test_goal_trajectory.py verb:python verb:pytest arg:command:str",
-      "status": "ok",
-      "class": "relevant"
-    },
-    {
-      "id": "search-goal",
-      "operation": "action:search tool:search_files term:trajectory term:descriptor term:GOAL arg:query:str",
-      "status": "ok",
-      "class": "relevant"
-    },
-    {
       "id": "read-goal-file",
-      "operation": "action:read tool:read_file file:goal_trajectory.py dir:pulse kind:code arg:path:str",
+      "tool": "read_file",
+      "args": {"path": "D:/work/its-in-your-head/pulse/goal_trajectory.py"},
       "status": "ok",
       "class": "relevant"
     },
     {
       "id": "patch-goal-file",
-      "operation": "action:edit tool:patch file:goal_trajectory.py dir:pulse kind:code arg:path:str",
+      "tool": "patch",
+      "args": {"path": "pulse/goal_trajectory.py", "old_string": "sim = cosine(a, b)", "new_string": "sim = cosine(a, b) or 0.0"},
       "status": "ok",
       "class": "relevant"
     },
     {
-      "id": "repo-browser",
-      "operation": "action:browse tool:browser_exec host:github.com path:hi4c0ck path:its-in-your-head arg:url:str",
+      "id": "search-code",
+      "tool": "search_files",
+      "args": {"pattern": "def _assessment", "path": "pulse/goal_trajectory.py", "target": "content"},
       "status": "ok",
       "class": "relevant"
     },
     {
-      "id": "sandwich",
-      "operation": "action:execute tool:terminal verb:sandwich verb:make verb:milk arg:command:str",
+      "id": "pizza-browser",
+      "tool": "browser_exec",
+      "args": {"url": "https://example.com/recipes/best-pizza"},
       "status": "ok",
       "class": "unrelated"
     },
     {
-      "id": "pizza",
-      "operation": "action:search tool:web_search term:recipe term:pizza term:best arg:query:str",
+      "id": "pytest-run",
+      "tool": "terminal",
+      "args": {"command": "python -m pytest tests/test_goal_trajectory.py -q"},
       "status": "ok",
-      "class": "unrelated"
+      "class": "ambiguous"
     },
     {
       "id": "generic-code",
-      "operation": "action:execute tool:execute_code arg:code:str",
+      "tool": "execute_code",
+      "args": {"code": "print(1+1)"},
       "status": "ok",
       "class": "ambiguous"
     }

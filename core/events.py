@@ -92,17 +92,23 @@ def _error_type(error) -> "str | None":
 error_type = _error_type
 
 
-# v0.1.32: production operation descriptors are deterministic, bounded and
-# built ONLY from tool identity, an action class and allowlisted argument
-# semantics. No raw argument values, prompts, reasoning or results survive.
+# v0.1.31 privacy hardening: production operation descriptors are built ONLY
+# from tool identity, a deterministic action class, explicitly approved
+# semantic CATEGORIES (the file-extension class allowlist + the url role)
+# and argument key/type tags. NO value-derived free text is extracted:
+# command/query/pattern values contribute no tokens at all, and path
+# basenames, parent directories, URL hosts, URL paths and URL credentials
+# are NEVER tokenized — any of them can carry personal or confidential
+# fragments. A deny-token filter is NOT a privacy boundary: it rejects
+# `--password` but not the value that follows it (`login --password
+# hunter2` leaked `verb:hunter2`), so value extraction is removed outright
+# instead of filtered. _DENY_TOKENS remains only as identifier hygiene for
+# tool names / argument keys, never as a value filter.
 _SEMANTIC_ARG_KEYS = frozenset({
-    "path", "file", "file_path", "filename",
-    "command", "cmd", "query", "q", "url", "uri", "pattern",
+    "path", "file", "file_path", "filename", "url", "uri",
 })
 _PATH_KEYS = frozenset({"path", "file", "file_path", "filename"})
-_COMMAND_KEYS = frozenset({"command", "cmd"})
 _URL_KEYS = frozenset({"url", "uri"})
-_TERM_KEYS = frozenset({"query", "q", "pattern"})
 _DENY_TOKENS = frozenset({
     "token", "secret", "password", "passwd", "api", "apikey", "bearer",
     "credential", "credentials", "authorization", "private",
@@ -151,10 +157,12 @@ def _action_for_tool(name: str) -> str:
     return "operate"
 
 
-def _safe_tokens(raw: str, limit: int = 32, max_tokens: int = 3) -> list[str]:
-    """Allowlist short identifiers; reject secret-like and hash-like text."""
+def _safe_token(raw: str, limit: int = 32) -> str:
+    """Identifier hygiene for tool names / argument keys ONLY (never for
+    argument values): allowlist short identifiers, reject secret-like and
+    hash-like text. This is not a value-privacy boundary — values are not
+    tokenized at all (see _semantic_parts)."""
     clean = "".join(c if (c.isalnum() or c in "_-.") else " " for c in raw)
-    out = []
     for part in clean.split():
         low = part.lower()
         if not part or part in (".", "..") or part.startswith("-"):
@@ -163,72 +171,41 @@ def _safe_tokens(raw: str, limit: int = 32, max_tokens: int = 3) -> list[str]:
             continue
         if len(part) > limit or sum(c.isdigit() for c in part) > len(part) // 2:
             continue
-        out.append(part[:limit])
-        if len(out) >= max_tokens:
-            break
-    return out
-
-
-def _safe_token(raw: str, limit: int = 32) -> str:
-    tokens = _safe_tokens(raw, limit, 1)
-    return tokens[0] if tokens else ""
-
-
-def _path_semantics(value) -> tuple[str, str]:
-    raw = str(value or "").replace("\\", "/")
-    base = raw.rstrip("/").split("/")[-1]
-    token = _safe_token(base, 32)
-    dot = base.rfind(".")
-    ext = base[dot:].lower() if dot >= 0 else ""
-    category = _EXT_CLASSES.get(ext, "file")
-    return token, category
+        return part[:limit]
+    return ""
 
 
 def _semantic_parts(raw_key, value) -> list[str]:
-    """Return bounded, key-specific semantic tokens only."""
+    """Approved semantic CATEGORIES only — never value-derived free text.
+
+    path-like keys -> the file-extension class (``kind:code`` etc.); the
+                      basename and parent directory are NEVER tokenized.
+    url-like keys  -> the categorical ``kind:url`` role marker; the host,
+                      path, query and any embedded credentials are NEVER
+                      parsed into tokens.
+    command/query/pattern keys -> nothing (no token extraction at all).
+    """
     key = str(raw_key).lower()
     if key in _PATH_KEYS:
         raw = str(value or "").replace("\\", "/")
-        parts = raw.rstrip("/").split("/")
-        base = parts[-1]
-        token, category = _path_semantics(value)
-        out = ([f"file:{token}"] if token else []) + [f"kind:{category}"]
-        if len(parts) >= 2:
-            parent = _safe_token(parts[-2], 32)
-            if parent and "." not in parent:
-                out.insert(1, f"dir:{parent}")
-        return out
+        base = raw.rstrip("/").split("/")[-1]
+        dot = base.rfind(".")
+        ext = base[dot:].lower() if dot >= 0 else ""
+        return [f"kind:{_EXT_CLASSES.get(ext, 'file')}"]
     if key in _URL_KEYS:
-        raw = str(value or "").split("?", 1)[0].split("#", 1)[0]
-        if "://" in raw:
-            rest = raw.split("://", 1)[1]
-            host, _, tail = rest.partition("/")
-        else:
-            host, _, tail = raw.partition("/")
-        out = []
-        token = _safe_token(host, 48)
-        if token:
-            out.append(f"host:{token}")
-        for segment in _safe_tokens(tail.replace("/", " "), 32, 2):
-            out.append(f"path:{segment}")
-        return out
-    if key in _COMMAND_KEYS or key in _TERM_KEYS:
-        prefix = "verb" if key in _COMMAND_KEYS else "term"
-        raw = str(value or "").replace("\\", "/").replace("/", " ")
-        # Prefer specific file-like tokens over generic path/flag words.
-        tokens = _safe_tokens(raw, 32, 6)
-        tokens.sort(key=lambda t: (("." in t), len(t)), reverse=True)
-        return [f"{prefix}:{t}" for t in tokens[:3]]
+        return ["kind:url"] if str(value or "").strip() else []
     return []
 
 
 def sanitize_operation(tool_name, args) -> str:
     """Bounded, privacy-safe PRODUCTION operation descriptor.
 
-    Shape: ``action tool:<tool> [file/verb/term/host/kind tokens]
+    Shape: ``action:<class> tool:<tool> [kind:<category>]
     [arg:<key>:<type> ...]``. Only tool identity, a deterministic action
-    class, allowlisted bounded tokens and argument key/type tags survive.
-    Raw values, prompts, reasoning and results never enter the event.
+    class, approved semantic categories (file-extension class / url role)
+    and argument key/type tags survive. NO value-derived free text is
+    extracted anywhere: raw argument values, prompts, reasoning and
+    results never enter the event.
     """
     name = _safe_token(str(tool_name or "unknown"), 32) or "unknown"
     parts = [f"action:{_action_for_tool(name)}", f"tool:{name}"]
@@ -248,7 +225,11 @@ def sanitize_operation(tool_name, args) -> str:
     return " ".join(parts)[:160]
 
 
-_OPERATION_SEMANTIC_MARKERS = ("file:", "verb:", "term:", "host:", "kind:")
+# Current descriptors emit only ``kind:``; the remaining markers recognize
+# LEGACY rows persisted before the value-extraction removal so they stay
+# scoreable (scoring never re-emits their text).
+_OPERATION_SEMANTIC_MARKERS = ("file:", "verb:", "term:", "host:", "kind:",
+                               "path:")
 
 
 def has_operation_semantics(operation: str) -> bool:

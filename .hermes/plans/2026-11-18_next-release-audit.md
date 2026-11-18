@@ -13,6 +13,14 @@ descriptors because `core/events.py` is agent-side and is loaded at gateway
 process start; a gateway restart is required before live replay is valid. A
 new release tag has NOT been created.
 
+**Update 2026-11-18 (sanitizer second pass): the descriptor privacy hole is
+fixed in code + regression-tested; release still BLOCK.** The first pass
+kept unrestricted value tokenization behind a deny-token filter, which
+rejects `--password` but not the value after it (`login --password hunter2`
+leaked `verb:hunter2`). Value extraction is now removed outright (see
+"Sanitizer privacy hardening" below). Still pending: gateway restart + live
+replay, green CI on the new HEAD, and the tag decision. No tag created.
+
 ## Hard blockers
 
 1. **D4 glitch gate is wrong in the shipped pane.**
@@ -118,12 +126,17 @@ new release tag has NOT been created.
 - D4: `desktop/plugin.js` now uses tier 2 / `IYH_UPSET_GLITCH_TIER`;
   `test_desktop_glitch_friction.mjs` passes.
 - GOAL descriptors: `core/events.py` emits deterministic bounded descriptors
-  (action + tool + allowlisted file/verb/term/host/path/kind tokens + arg
-  types). Ambiguous descriptors with no semantic token are unmeasured.
+  (action class + tool identity + approved `kind:` categories + arg key/type
+  tags). NO value-derived free text: command/query/pattern values contribute
+  no tokens; path basenames/parent dirs and URL hosts/paths/credentials are
+  never tokenized. Ambiguous descriptors with no semantic token are
+  unmeasured.
 - Engine no longer blends prompt context into operation assessment; tool
   success is execution evidence only.
-- Production replay fixture: `tests/fixtures/production_operation_descriptors.json`;
-  test asserts relevant > unrelated by margin and ambiguous is `None`.
+- Production replay fixture: `tests/fixtures/production_operation_descriptors.json`
+  stores REAL tool args; the test GENERATES descriptors via
+  `core_events.sanitize_operation(tool, args)` (no preconstructed strings)
+  and asserts relevant > unrelated by margin and ambiguous is `None`.
 - Synthetic board is explicitly labelled as synthetic in `board.html`.
 - Docs reconciled: one-hour half-life, locked channel-gated driver, capsule-only
   TS comment, quantization wording.
@@ -132,3 +145,70 @@ new release tag has NOT been created.
   doctor OK; pane hash synced; DB integrity OK; raw text columns empty.
 - CI for commit `6f47e80` is green: https://github.com/hi4c0ck/its-in-your-head/actions/runs/44369943457
 - Do not tag until a gateway restart confirms the new descriptors in live events.
+
+## Sanitizer privacy hardening (second pass, 2026-11-18)
+
+Owner finding: the first-pass deny-token filter rejects `--password` but not
+the value following it; `login --password hunter2` produced
+`verb:hunter2` in a persistable descriptor. Query terms and path components
+had the same broader problem (personal/confidential fragments).
+
+Implementation (value extraction removed, not filtered):
+- `core/events.py`: command/cmd/query/q/pattern values contribute NO tokens
+  (removed from `_SEMANTIC_ARG_KEYS`; `_safe_tokens`/`_path_semantics`
+  deleted). Path keys emit only the allowlisted extension class
+  (`kind:code|data|config|doc|style|image|file`); basenames and parent dirs
+  are never tokenized. URL keys emit only the categorical `kind:url` role;
+  hosts, paths, queries and embedded credentials are never parsed.
+  Descriptor shape: `action:<class> tool:<tool> [kind:<category>]
+  [arg:<key>:<type> ...]`, capped at 160 chars. `_DENY_TOKENS` survives only
+  as identifier hygiene for tool names/arg keys, never as a value filter.
+- `pulse/activity_encoder.py`: the second, rawer extractor (80-char
+  basename / first command token / host incl. userinfo / first query token)
+  is deleted; raw args delegate to the SINGLE `core.events` policy. The
+  collector `operation` passthrough is accepted only when every token
+  belongs to the approved descriptor vocabulary — a free-text "operation"
+  from a future producer is rejected, never persisted.
+- `has_operation_semantics` keeps the legacy markers so pre-hardening rows
+  stay scoreable; current descriptors emit only `kind:`.
+
+Regression evidence (actual runs, not predictions):
+- `tests/test_operation_sanitizer_privacy.py` (new, 24 tests): 14 canaries
+  (password flag/attached/short-flag values, Bearer + code + query API keys,
+  email in query/pattern/URL path, URL userinfo credentials, personal names
+  in path/dir/query, git credential URL) run through the REAL
+  `sanitize_operation()`; positive category contract; capsule delegation +
+  hostile-passthrough rejection; metrics row boundary; and a production
+  persistence roundtrip (`engine.on_events` -> `pulse_operations.operation`
+  read back via raw SQL) asserting the persisted column equals the
+  sanitized descriptor and carries no canary fragment.
+- `tests/test_goal_trajectory.py`: the production fixture now stores real
+  tool args and GENERATES descriptors via `sanitize_operation` at test
+  time; relevant/unrelated margin > 0.05 holds at the action/category
+  level; terminal/search-only cases are ambiguous (`None`).
+- Local gates: `pytest -q` 713 passed / 8 skipped; `check_contracts.py`
+  G5 CLEAN; temp budget 2.3 MB OK; ESM check OK; all 19
+  `tests/test_desktop_*.mjs` PASS; `hermes plugins doctor . --ci` OK;
+  installed pane hash matches `desktop/plugin.js`
+  (`0af085acc924363c7e75c7d31419755f`).
+
+Known consequence (accepted trade-off, owner-directed privacy-first):
+- Tier-0 GOAL separation is now at the action/category level, not the
+  filename level; terminal commands and text queries are unmeasured
+  (ambiguous), never a drift claim. Absolute alignment scores for code
+  work stay below `ALIGN_THRESHOLD` at Tier-0; the fixture asserts
+  relative separation only.
+- Legacy `pulse_operations` rows persisted before this pass still carry
+  old-style descriptors until retention/reset; the gateway must restart
+  to load the new `core/events.py` before live replay is valid.
+
+Release checks after this pass:
+| Check | Result |
+|---|---|
+| D4 threshold | Fixed (6f47e80) |
+| GOAL prompt-blend removal | Present |
+| Sanitizer privacy | Fixed in code + canary/persistence regression tests |
+| CI | Pending on new HEAD (previous green matrix was 6f47e80) |
+| Gateway restart + live replay | Not evidenced — still pending |
+| Manifest | 0.1.31 |
+| Tag v0.1.31 | Does not exist — deliberately not tagged |
