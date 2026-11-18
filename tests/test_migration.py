@@ -240,7 +240,7 @@ def test_schema_v5_pattern_affinity_history_ddl(tmp_path):
     try:
         assert migration.schema_bootstrap(conn) is True
         assert migration.get_schema_version(conn) == migration.CURRENT_SCHEMA_VERSION
-        assert migration.CURRENT_SCHEMA_VERSION == 11
+        assert migration.CURRENT_SCHEMA_VERSION == 12
         assert migration.PATTERN_AFFINITY_HISTORY_MAX == 512
         assert migration.PATTERN_AFFINITY_HISTORY_MAX == \
             migration.PORTRAIT_HISTORY_MAX
@@ -381,7 +381,7 @@ def test_v9_scrubs_legacy_raw_fields(tmp_path):
         r = rows[1]
         assert r[1] is None and r[2] is None, "raw text must be scrubbed"
         assert r[3] == "exec" and r[4] == 200, "safe fields are preserved"
-        assert migration.get_schema_version(conn) == 11
+        assert migration.get_schema_version(conn) == 12
         assert migration.schema_bootstrap(conn) is False  # already v9: no-op
     finally:
         conn.close()

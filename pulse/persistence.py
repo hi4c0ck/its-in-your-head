@@ -220,17 +220,23 @@ def persist_trajectory(objective, operations) -> None:
                     pack_vector(d.get("vector")),
                     str(d.get("status") or "ok"),
                     float(d.get("ts") or 0.0),
+                    d.get("ended_ts"),
                     d.get("objective_version"),
                     d.get("historical_assessment"),
+                    d.get("result_assessment"),
                     d.get("current_assessment"),
-                    d.get("category") or "pending"))
+                    d.get("historical_category") or d.get("category")
+                    or "pending",
+                    d.get("current_category") or d.get("category")
+                    or "pending"))
             if rows:
                 conn.executemany(
                     "INSERT OR REPLACE INTO pulse_operations"
                     " (call_id, tool_name, turn_id, operation, vector,"
-                    " status, ts, objective_version, historical_assessment,"
-                    " current_assessment, category)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                    " status, ts, ended_ts, objective_version,"
+                    " historical_assessment, result_assessment,"
+                    " current_assessment, historical_category, category)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
             conn.commit()
         finally:
             conn.close()
@@ -254,20 +260,27 @@ def load_trajectory_state() -> dict:
                     continue
                 versions.append({"version": int(version), "ts": float(ts),
                                  "vector": vec, "label": label})
-            objective = versions[-1] if versions else None
+            objective = None
+            if versions:
+                objective = dict(versions[-1])
+                objective["history"] = versions[:-1][-32:]
             operations = []
             for row in conn.execute(
                     "SELECT call_id, tool_name, turn_id, operation, vector,"
-                    " status, ts, objective_version, historical_assessment,"
-                    " current_assessment, category"
+                    " status, ts, ended_ts, objective_version,"
+                    " historical_assessment, result_assessment,"
+                    " current_assessment, historical_category, category"
                     " FROM pulse_operations ORDER BY ts ASC, id ASC"):
                 operations.append({
                     "call_id": row[0], "tool": row[1], "turn_id": row[2],
                     "operation": row[3], "vector": unpack_vector(row[4]),
                     "status": row[5], "ts": float(row[6]),
-                    "objective_version": row[7],
-                    "historical_assessment": row[8],
-                    "current_assessment": row[9], "category": row[10]})
+                    "ended_ts": row[7], "objective_version": row[8],
+                    "historical_assessment": row[9],
+                    "result_assessment": row[10],
+                    "current_assessment": row[11],
+                    "historical_category": row[12],
+                    "category": row[13], "current_category": row[13]})
             return {"objective": objective, "operations": operations}
         finally:
             conn.close()

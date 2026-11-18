@@ -92,6 +92,30 @@ def _error_type(error) -> "str | None":
 error_type = _error_type
 
 
+_SEMANTIC_ARG_KEYS = frozenset({
+    "path", "file", "file_path", "filename", "command", "cmd",
+    "query", "q", "url", "uri", "pattern",
+})
+
+
+def _bounded_semantic_token(value) -> str:
+    """One bounded, non-value token from a known arg key (basename/verb/host).
+
+    This is derived metadata for trajectory semantics, never a raw argument
+    dump: only a single <=48-char identifier survives.
+    """
+    raw = str(value or "")
+    if "://" in raw:
+        raw = raw.split("://", 1)[1].split("/", 1)[0].split("?", 1)[0]
+    elif "/" in raw or "\\" in raw:
+        raw = raw.replace("\\", "/").rstrip("/").split("/")[-1]
+    clean = "".join(c if (c.isalnum() or c in "_-.") else " " for c in raw)
+    for token in clean.split():
+        if token and token not in (".", ".."):
+            return token[:48]
+    return ""
+
+
 def sanitize_operation(tool_name, args) -> str:
     """Bounded, privacy-safe operation description.
 
@@ -102,10 +126,18 @@ def sanitize_operation(tool_name, args) -> str:
     name = str(tool_name or "unknown")
     parts = []
     if isinstance(args, dict):
-        for key in sorted(str(k) for k in args)[:6]:
+        # Sort original (key, value) pairs; indexing back by the coerced
+        # key would raise KeyError for non-string keys on the hot path.
+        items = sorted(args.items(), key=lambda item: str(item[0]))[:6]
+        semantic = None
+        for raw_key, value in items:
             key = "".join(c if (c.isalnum() or c in "_-") else "_"
-                          for c in key)[:32]
-            parts.append("%s:%s" % (key, type(args[key]).__name__))
+                          for c in str(raw_key))[:32]
+            parts.append("%s:%s" % (key, type(value).__name__))
+            if semantic is None and str(raw_key).lower() in _SEMANTIC_ARG_KEYS:
+                semantic = _bounded_semantic_token(value)
+        if semantic:
+            parts.insert(0, "sem:%s" % semantic)
     elif args is not None:
         parts.append(type(args).__name__)
     return ("%s(%s)" % (name, ",".join(parts)))[:160]

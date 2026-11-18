@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -98,6 +99,9 @@ def run_story(story_id: str, turns: int = 80, seed: int = 8117,
                 prompt = rng.choice(phase["prompts"])
                 tool = rng.choice(phase["tools"])
                 status = rng.choice(phase["statuses"])
+                match = re.search(r"[A-Za-z][A-Za-z0-9_-]{2,31}", prompt)
+                sem = (match.group(0) if match else "task").lower()[:32]
+                operation = "%s(sem:%s)" % (tool, sem)
                 reasoning = rng.choice(phase["reasoning"])
                 tid = "t%d" % i
                 # Realistic session cadence: ~40 s per turn (80 turns ~53 min)
@@ -110,7 +114,8 @@ def run_story(story_id: str, turns: int = 80, seed: int = 8117,
                      "user_chars": len(prompt)},
                     {"type": "tool_start", "ts": ts + 1.0, "session_id": "emul",
                      "turn_id": tid, "tool_name": tool,
-                     "tool_call_id": tid + "-call"},
+                     "tool_call_id": tid + "-call",
+                     "operation": operation},
                     {"type": "tool_end", "ts": ts + 2.0, "session_id": "emul",
                      "turn_id": tid, "tool_name": tool, "status": status,
                      "tool_call_id": tid + "-call",

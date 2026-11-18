@@ -56,7 +56,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION  # alias
 # v9 (§8, privacy hardening v0.1.28): one-time legacy scrub that NULLs the
 # raw-text event columns (events.user_message / events.error_message) on any
@@ -269,9 +269,12 @@ _CREATE_PULSE_OPERATIONS_TABLE = """CREATE TABLE IF NOT EXISTS pulse_operations 
     vector                BLOB,
     status                TEXT,
     ts                    REAL NOT NULL,
+    ended_ts              REAL,
     objective_version     INTEGER,
     historical_assessment REAL,
+    result_assessment     REAL,
     current_assessment    REAL,
+    historical_category   TEXT,
     category              TEXT
 )"""
 
@@ -556,6 +559,26 @@ def _create_pulse_tables(conn: sqlite3.Connection) -> None:
                 if col not in existing:
                     conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+    # v12: keep immutable completion-time evidence separate from the
+    # current/re-evaluated category and assessment. Historical v11 rows
+    # have no reliable end timestamp; leave ended_ts NULL.
+    operation_columns = _table_columns(conn, "pulse_operations")
+    if operation_columns:
+        if "ended_ts" not in operation_columns:
+            conn.execute("ALTER TABLE pulse_operations ADD COLUMN ended_ts REAL")
+        if "result_assessment" not in operation_columns:
+            conn.execute(
+                "ALTER TABLE pulse_operations ADD COLUMN result_assessment REAL")
+        if "historical_category" not in operation_columns:
+            conn.execute(
+                "ALTER TABLE pulse_operations ADD COLUMN historical_category TEXT")
+        if "current_assessment" in operation_columns:
+            conn.execute(
+                "UPDATE pulse_operations SET result_assessment = current_assessment "
+                "WHERE result_assessment IS NULL AND current_assessment IS NOT NULL")
+        conn.execute(
+            "UPDATE pulse_operations SET historical_category = category "
+            "WHERE historical_category IS NULL AND category IS NOT NULL")
 
 
 def migrate(conn: sqlite3.Connection,

@@ -71,6 +71,14 @@ def sanitize_operation(tool_name, args=None, event: dict | None = None) -> str:
         # C6 tool events carry args_chars only, never raw args.
         return tool
     lowered = {str(k).lower(): v for k, v in args.items()}
+    # The collector may provide the already-sanitized signature. Accept
+    # only bounded identifier punctuation; never persist arbitrary arg text.
+    operation = lowered.get("operation")
+    if isinstance(operation, str) and operation:
+        safe = "".join(c for c in operation
+                       if c.isalnum() or c in "_-.:(), ")
+        if safe:
+            return safe[:160]
     # Path-like first (most specific), then command verb.
     for key in _PATH_KEYS:
         if lowered.get(key):

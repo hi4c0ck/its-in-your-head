@@ -413,9 +413,14 @@ class Engine:
                 objective_version=int(d.get("objective_version") or 0),
                 historical_assessment=d.get("historical_assessment"),
                 status=str(d.get("status") or "ok"),
-                ended_ts=d.get("ts"),
+                ended_ts=d.get("ended_ts") or d.get("ts"),
+                result_assessment=d.get("result_assessment"),
                 current_assessment=d.get("current_assessment"),
-                category=str(d.get("category") or "pending")))
+                historical_category=str(
+                    d.get("historical_category")
+                    or d.get("category") or "pending"),
+                category=str(d.get("current_category")
+                             or d.get("category") or "pending")))
         if records:
             self._trajectory.operations = records[-self._trajectory.window:]
 
@@ -539,7 +544,7 @@ class Engine:
                         op_vec = None
                     vec = _goal_traj.blend_intention(
                         self._lookup_prompt_vector(ev.get("turn_id")),
-                        op_vec)
+                        op_vec, self._objective.vector)
                     self._trajectory.add_intent(
                         call_id, str(ev.get("tool_name") or "unknown"),
                         str(ev.get("operation") or ""), vec,
@@ -1723,7 +1728,7 @@ class Engine:
                 "lanes": lanes,
                 # v0.1.31: global trajectory signal (additive; v2 lanes
                 # stay byte-compatible and per-tool GOAL is diagnostic).
-                "goal_signal": self._trajectory.signal(),
+                "goal_signal": self._trajectory.signal(self._objective),
                 # D1-D6: the top-level upset block (the pane's glitch
                 # trigger + the M/prognosis read).
                 "upset": common["upset"]}
@@ -1897,6 +1902,14 @@ class Engine:
             self._goal_vector = None
             self._goal_ts = None
             self._goal_backend = None
+            # GOAL is part of the same explicit wipe. Clear the objective,
+            # operation history, pending pre/post correlations and the
+            # current tool-turn bookkeeping in the same critical section as
+            # the DB wipe, so no old trajectory survives a reset.
+            self._objective = _goal_traj.ObjectiveState()
+            self._trajectory = _goal_traj.TrajectoryEvaluator()
+            self._last_tool_turn_id = None
+            self._last_turn_tools = []
             self._interpreted_evidence_count = 0
             self._interpreted_last_ts = None
             self._interpreted_last_confidence = None

@@ -12,6 +12,12 @@ Source: owner-specified contract, 2026-11-09. This file is the exact spec the PU
   "available": true,
   "lane_order": ["live", "goal", "good", "friction"],
   "lanes": { "live": [], "goal": [], "good": [], "friction": [] },
+  "goal_signal": {
+    "value": null, "category": "empty",
+    "support": { "count": 0, "required": 2, "ratio": 0.0 },
+    "operation_count": 0, "drift_streak": 0, "detours": 0,
+    "version": null, "history_count": 0
+  },
   "rows": [],
   "columns": ["goal", "good", "friction", "unlabeled"]
 }
@@ -23,6 +29,7 @@ Source: owner-specified contract, 2026-11-09. This file is the exact spec the PU
 | `available` | `boolean` | `true` when at least one PULSE tool record is available. Does not mean all metrics have evidence. |
 | `lane_order` | `string[4]` | Canonical lane order. |
 | `lanes` | `PulseLanes` | Four independent, independently ranked arrays. |
+| `goal_signal` | `GlobalGoalSignal` | Additive global trajectory evaluation; distinct from per-tool GOAL cells. Computed by one shared evaluator in both live and DB-fallback paths. |
 | `rows` | `LegacyPulseRow[]` | Existing row-oriented response, preserved for compatibility. |
 | `columns` | `string[]` | Existing legacy column order, unchanged. |
 
@@ -171,7 +178,11 @@ LIVE ranking is independent of all semantic lanes (freshness, recent activity, c
   "evidence": { "source": "prototype_banks", "prototype_count": 2, "capsule_count": 8 }
 }
 ```
-GOAL `value` = strongest cosine similarity (current goal vector vs selected reference vectors), floored to [0,1]. Reference selection: (1) valid vectors from GOOD, user-FRICTION and objective-FRICTION prototype banks; (2) no prototype references ⇒ recent capsule vectors; (3) no goal vector or no usable reference ⇒ `value: null`. Score threshold stays `pulse.thresholds.goal` (0.8). Readiness threshold is SEPARATE: `required` inherits legacy `pulse.min_labeled` (3) but counts REFERENCE VECTORS, not user feedback labels. Two usable references can yield a strong GOAL score while the cell stays provisional — never forced neutral for insufficient explicit feedback.
+Per-tool GOAL `value` is currently the strongest similarity against RECENT CAPSULES only (capsule-only implementation). Prototype-bank reference selection remains the earlier design note, not the shipped per-tool behaviour. No goal vector or no usable capsule ⇒ `value: null`. Score threshold stays `pulse.thresholds.goal` (0.8). This lane is DIAGNOSTIC tool contribution; it is not the global task evaluation.
+
+### Global GOAL signal (v0.1.31)
+
+`goal_signal` evaluates the whole operation trajectory, not a single tool. Its `value` is the mean of available current assessments; absent measurements are excluded, never coerced to zero. `category` is one of `empty`, `aligned`, `exploring`, `productive_detour`, `drifting`, `recovering`. A detour is promoted only after later work is itself aligned with the current objective and improves on the earlier assessment. `version`/`history_count` come from the evolving objective state; `support` reports bounded operation evidence. Historical assessments/categories are immutable; current ones are recomputed when the objective changes. The live engine and the profile-DB fallback both call `pulse.goal_trajectory.signal_from_state`, so their signal fields are identical.
 
 ### GOOD
 ```json

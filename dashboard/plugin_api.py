@@ -900,80 +900,73 @@ def _unpack_pulse_vector(blob) -> list[float] | None:
     return list(struct.unpack(f"<{len(blob) // 4}f", bytes(blob)))
 
 
-def _cosine_fallback(a, b):
-    if not a or not b or len(a) != len(b):
-        return None
-    na = math.sqrt(sum(float(x) * float(x) for x in a))
-    nb = math.sqrt(sum(float(x) * float(x) for x in b))
-    if na <= 0 or nb <= 0:
-        return None
-    return max(-1.0, min(1.0,
-                sum(float(x) * float(y) for x, y in zip(a, b)) / (na * nb)))
+def _goal_trajectory_module():
+    """Load the shared pure evaluator in both host and isolated child."""
+    try:
+        from pulse import goal_trajectory as _gt
+        return _gt
+    except ImportError:
+        root = Path(__file__).resolve().parents[1]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from pulse import goal_trajectory as _gt
+        return _gt
 
 
 def _goal_signal_from_conn(conn) -> dict:
-    """Dashboard-mirror of the global trajectory signal (derived vectors
-    only). Same shape as `Engine.pulse_view()["goal_signal"]`."""
+    """DB fallback uses the SAME evaluator as the live engine.
+
+    This is not a second implementation: both sides call
+    `pulse.goal_trajectory.signal_from_state` with a bounded snapshot, so
+    value/version/history_count/support/drift_streak/detours stay identical.
+    """
     empty = {"value": None, "category": "empty", "support": {
         "count": 0, "required": 2, "ratio": 0.0},
         "operation_count": 0, "drift_streak": 0, "detours": 0,
         "version": None, "history_count": 0}
     try:
-        row = conn.execute(
-            "SELECT version, vector, ts FROM pulse_goal_history"
-            " ORDER BY version DESC LIMIT 1").fetchone()
-        hv = conn.execute(
-            "SELECT COUNT(*) FROM pulse_goal_history").fetchone()[0]
-        if row is None:
+        gt = _goal_trajectory_module()
+        versions = []
+        for version, ts, blob, label in conn.execute(
+                "SELECT version, ts, vector, label FROM pulse_goal_history"
+                " ORDER BY version ASC"):
+            vec = _unpack_pulse_vector(blob)
+            if vec is None:
+                continue
+            versions.append({"version": int(version), "ts": float(ts),
+                             "vector": vec, "label": label})
+        if not versions:
             return empty
-        objective = _unpack_pulse_vector(row[1])
-        if objective is None:
-            return empty
-        ops = []
-        for r in conn.execute(
-                "SELECT vector, current_assessment, category, ts,"
-                " objective_version FROM pulse_operations"
-                " ORDER BY ts ASC, id ASC"):
-            vec = _unpack_pulse_vector(r[0])
-            sim = _cosine_fallback(vec, objective)
-            ops.append({"value": max(0.0, min(1.0, sim or 0.0)),
-                        "category": str(r[2] or "pending"),
-                        "version": int(r[4] or 0)})
-        if not ops:
-            return empty
-        vals = [o["value"] for o in ops]
-        cats = [o["category"] for o in ops]
-        streak = 0
-        if cats[-1] == "drifting":
-            for cat in reversed(cats):
-                if cat != "drifting":
-                    break
-                streak += 1
-        else:
-            for cat in reversed(cats[:-1]):
-                if cat != "drifting":
-                    break
-                streak += 1
-        last = ops[-1]
-        detours = sum(1 for o in ops
-                      if o["category"] == "productive_detour")
-        if streak >= 2 and last["category"] != "drifting":
-            category = "recovering"
-        elif streak >= 2:
-            category = "drifting"
-        elif detours and last["category"] in ("aligned", "productive_detour"):
-            category = "productive_detour"
-        elif last["category"] in ("exploring", "drifting"):
-            category = last["category"]
-        else:
-            category = "aligned"
-        return {"value": round(sum(vals) / len(vals), 4),
-                "category": category,
-                "support": {"count": len(ops), "required": 2,
-                            "ratio": round(min(1.0, len(ops) / 2.0), 4)},
-                "operation_count": len(ops), "drift_streak": streak,
-                "detours": detours, "version": int(row[0]),
-                "history_count": int(hv)}
+        objective = dict(versions[-1])
+        objective["history"] = versions[:-1][-32:]
+        present = {row[1] for row in conn.execute(
+            "PRAGMA table_info(pulse_operations)")}
+        names = ["call_id", "tool_name", "turn_id", "operation", "vector",
+                 "status", "ts", "ended_ts", "objective_version",
+                 "historical_assessment", "result_assessment",
+                 "current_assessment", "historical_category", "category"]
+        usable = [n for n in names if n in present]
+        sql = "SELECT %s FROM pulse_operations ORDER BY ts ASC, id ASC" % (
+            ",".join(usable))
+        operations = []
+        for row in conn.execute(sql):
+            d = dict(zip(usable, row))
+            vec = _unpack_pulse_vector(d.get("vector"))
+            if vec is None:
+                continue
+            operations.append({
+                "call_id": d.get("call_id"), "tool": d.get("tool_name"),
+                "turn_id": d.get("turn_id"), "operation": d.get("operation"),
+                "vector": vec, "status": d.get("status"),
+                "ts": d.get("ts"), "ended_ts": d.get("ended_ts"),
+                "objective_version": d.get("objective_version"),
+                "historical_assessment": d.get("historical_assessment"),
+                "result_assessment": d.get("result_assessment"),
+                "current_assessment": d.get("current_assessment"),
+                "historical_category": d.get("historical_category"),
+                "category": d.get("category"),
+                "current_category": d.get("category")})
+        return gt.signal_from_state(objective, operations)
     except Exception:
         return empty
 
@@ -1009,6 +1002,10 @@ def _pulse_shape() -> dict:
     tool_rows, banks, goal_vector, capsules = [], {}, None, {}
     try:
         _migration.schema_bootstrap(conn)
+        # The global trajectory is independent of per-tool PULSE rows:
+        # expose it even when pulse_tools is empty (e.g. after reset or
+        # a trajectory-only restore).
+        shape["goal_signal"] = _goal_signal_from_conn(conn)
         tool_rows = conn.execute(
             "SELECT id, tool_name, first_seen, last_seen,"
             " calls_started, calls_completed, errors"
@@ -1039,7 +1036,6 @@ def _pulse_shape() -> dict:
         ).fetchone()
         if goal_row is not None:
             goal_vector = _unpack_pulse_vector(goal_row[1])
-        shape["goal_signal"] = _goal_signal_from_conn(conn)
         for tool, ts, blob, backend, model_version in conn.execute(
                 "SELECT tool_name, ts, vector, backend, model_version"
                 " FROM pulse_capsules"
@@ -1816,7 +1812,7 @@ def _context_shape() -> dict:
 _ANALYTICAL_TABLES = (
     "events", "portrait_history", "pattern_affinity_history",
     "pattern_bank", "pulse_tools", "pulse_prototypes", "pulse_goal",
-    "pulse_capsules",
+    "pulse_capsules", "pulse_goal_history", "pulse_operations",
 )
 _ANALYTICAL_META_KEYS = (
     "reference_state", "upset_fstate", "upset_mood", "upset_mood_history",

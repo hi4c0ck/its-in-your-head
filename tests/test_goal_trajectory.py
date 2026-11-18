@@ -15,6 +15,7 @@ V_FOLLOW = [0.95, 0.31]
 V_EXPLORE = [0.5, 0.866]
 V_NEW = [-0.9, 0.44]
 V_FAR = [-1.0, 0.0]
+V_ORTHOGONAL = [0.0, 1.0]
 
 
 def test_followup_keeps_objective_continuity():
@@ -45,12 +46,54 @@ def test_pre_post_link_and_retrospective_detour():
     assert ev.pending["c1"]["historical_assessment"] is not None
     rec = ev.complete("c1", "ok", 3.0, st)
     assert rec is not None and rec.category == "exploring"
-    # A later aligned op close to the earlier exploration promotes it.
+    assert rec.historical_category == "exploring"
+    assert rec.result_assessment == rec.current_assessment
+    # A later operation aligned with the objective confirms the detour.
     ev.add_intent("c2", "read_file", "read_file(path:str)",
                   V_FOLLOW, 4.0, st)
     ev.complete("c2", "ok", 5.0, st)
     assert ev.operations[0].category == "productive_detour"
-    assert ev.signal()["detours"] == 1
+    assert ev.signal(st)["detours"] == 1
+
+
+def test_detour_not_promoted_by_similarity_alone():
+    st = gt.ObjectiveState()
+    gt.update_objective(st, V_ALIGN, 1.0)
+    ev = gt.TrajectoryEvaluator()
+    ev.add_intent("c1", "search_files", "search_files(query:str)",
+                  V_EXPLORE, 2.0, st)
+    ev.complete("c1", "ok", 3.0, st)
+    # Similar to c1 but NOT aligned with the objective: no confirmation.
+    ev.add_intent("c2", "read_file", "read_file(path:str)",
+                  V_EXPLORE, 4.0, st)
+    ev.complete("c2", "ok", 5.0, st)
+    assert ev.operations[0].category == "exploring"
+
+
+def test_success_is_not_progress_evidence():
+    st = gt.ObjectiveState()
+    gt.update_objective(st, V_ALIGN, 1.0)
+    ev = gt.TrajectoryEvaluator()
+    ev.add_intent("c1", "terminal", "terminal(command:str)",
+                  V_FAR, 2.0, st)
+    rec = ev.complete("c1", "ok", 3.0, st)
+    assert rec is not None and rec.category == "drifting"
+    assert rec.current_assessment == 0.0
+
+
+def test_historical_category_survives_objective_change():
+    st = gt.ObjectiveState()
+    gt.update_objective(st, V_ALIGN, 1.0)
+    ev = gt.TrajectoryEvaluator()
+    ev.add_intent("c1", "terminal", "terminal(command:str)",
+                  V_ALIGN, 2.0, st)
+    ev.complete("c1", "ok", 3.0, st)
+    old = ev.operations[0]
+    assert old.historical_category == "aligned"
+    gt.update_objective(st, V_FAR, 4.0, new_topic=True)
+    ev.reevaluate(st)
+    assert old.historical_category == "aligned"
+    assert old.category == "drifting"
 
 
 def test_sustained_drift_then_recovery():
@@ -61,9 +104,36 @@ def test_sustained_drift_then_recovery():
         ev.add_intent("c%d" % i, "terminal", "terminal(command:str)",
                       vec, 2.0 + i, st)
         ev.complete("c%d" % i, "ok", 2.5 + i, st)
-    assert ev.operations[0].category == "drifting"
-    assert ev.operations[1].category == "drifting"
-    assert ev.signal()["category"] == "recovering"
+    assert ev.signal(st)["category"] == "recovering"
+
+
+def test_pending_intents_are_bounded_and_expire():
+    st = gt.ObjectiveState()
+    gt.update_objective(st, V_ALIGN, 1.0)
+    ev = gt.TrajectoryEvaluator()
+    for i in range(gt.PENDING_MAX + 8):
+        ev.add_intent("c%d" % i, "terminal", "terminal(command:str)",
+                      V_ALIGN, 2.0 + i, st)
+    assert len(ev.pending) == gt.PENDING_MAX
+    assert "c0" not in ev.pending
+    ev.add_intent("fresh", "terminal", "terminal(command:str)",
+                  V_ALIGN, 1000.0, st)
+    assert len(ev.pending) <= gt.PENDING_MAX
+    assert "fresh" in ev.pending
+
+
+def test_signal_uses_current_objective_version_and_history_count():
+    st = gt.ObjectiveState()
+    gt.update_objective(st, V_ALIGN, 1.0)
+    ev = gt.TrajectoryEvaluator()
+    ev.add_intent("c1", "read_file", "read_file(path:str)",
+                  V_ALIGN, 2.0, st)
+    ev.complete("c1", "ok", 2.5, st)
+    gt.update_objective(st, V_FOLLOW, 3.0)
+    ev.reevaluate(st)
+    signal = ev.signal(st)
+    assert signal["version"] == st.version == 2
+    assert signal["history_count"] == 1
 
 
 def test_trajectory_persistence_roundtrip(tmp_path: Path):
@@ -78,13 +148,57 @@ def test_trajectory_persistence_roundtrip(tmp_path: Path):
     pers.persist_trajectory(st, ev.operations)
     loaded = pers.load_trajectory_state()
     assert loaded["objective"]["version"] == st.version
+    assert [v["version"] for v in loaded["objective"]["history"]] == [1]
     assert len(loaded["operations"]) == 1
     assert loaded["operations"][0]["call_id"] == "c1"
+    assert loaded["operations"][0]["ended_ts"] == 3.5
+    assert loaded["operations"][0]["historical_category"] == "aligned"
+
+
+def test_unrelated_operation_not_rescued_by_prompt_blend():
+    blended = gt.blend_intention(V_ALIGN, V_ORTHOGONAL, V_ALIGN)
+    assert blended is not None
+    assert (gt.cosine(blended, V_ALIGN) or 0) < gt.ALIGN_THRESHOLD
 
 
 def test_intention_blend_is_not_a_self_echo():
-    op = [0.0, 1.0]
-    blended = gt.blend_intention(V_ALIGN, op)
+    blended = gt.blend_intention(V_ALIGN, V_ORTHOGONAL)
     assert blended is not None
     assert 0.0 < (gt.cosine(blended, V_ALIGN) or 0) < 0.99
     assert gt.blend_intention(V_ALIGN, None) is None
+
+
+def test_shared_signal_matches_evaluator():
+    st = gt.ObjectiveState()
+    gt.update_objective(st, V_ALIGN, 1.0)
+    gt.update_objective(st, V_FOLLOW, 2.0)
+    ev = gt.TrajectoryEvaluator()
+    ev.add_intent("c1", "read_file", "read_file(path:str)",
+                  V_FOLLOW, 3.0, st)
+    ev.complete("c1", "ok", 3.5, st)
+    snapshot = {"objective": st.snapshot(),
+                "operations": [r.to_dict() for r in ev.operations]}
+    assert gt.signal_from_state(snapshot["objective"],
+                                snapshot["operations"]) == ev.signal(st)
+
+
+def test_dashboard_fallback_uses_shared_evaluator(tmp_path: Path):
+    """DB fallback and live engine must produce the identical signal."""
+    import dashboard.plugin_api as api
+
+    db = tmp_path / "iyyh.db"
+    metrics.set_db_path(db)
+    api.set_db_path(db)
+    st = gt.ObjectiveState()
+    gt.update_objective(st, V_ALIGN, 1.0)
+    gt.update_objective(st, V_FOLLOW, 2.0)
+    ev = gt.TrajectoryEvaluator()
+    ev.add_intent("c1", "read_file", "read_file(sem:goal,path:str)",
+                  V_FOLLOW, 3.0, st)
+    ev.complete("c1", "ok", 3.5, st)
+    pers.persist_trajectory(st, ev.operations)
+    loaded = pers.load_trajectory_state()
+    expected = gt.signal_from_state(loaded["objective"],
+                                    loaded["operations"])
+    assert api._pulse_shape()["goal_signal"] == expected
+    assert api._pulse_shape()["goal_signal"] == ev.signal(st)

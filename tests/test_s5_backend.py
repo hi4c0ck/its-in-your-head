@@ -241,6 +241,41 @@ def test_reset_wipes_events_and_idempotent(tmp_path):
     assert second.json()["wiped"]["events"] == 0  # idempotent
 
 
+def test_reset_wipes_goal_trajectory_e2e(tmp_path):
+    """Reset must clear DB rows, engine memory, and stay empty on rehydrate."""
+    c = _client(tmp_path)
+    import engine as _engine
+    from pulse import goal_trajectory as _gt
+    from pulse import persistence as _pers
+
+    st = _gt.ObjectiveState()
+    _gt.update_objective(st, [1.0, 0.0], 1.0)
+    _gt.update_objective(st, [0.9, 0.4], 2.0)
+    ev = _gt.TrajectoryEvaluator()
+    ev.add_intent("call-1", "terminal", "terminal(command:str)",
+                  [1.0, 0.0], 3.0, st)
+    ev.complete("call-1", "ok", 3.5, st)
+    _pers.persist_trajectory(st, ev.operations)
+    eng = _engine.get_engine()
+    eng._objective = st
+    eng._trajectory.operations = list(ev.operations)
+    eng._trajectory.pending["stale-call"] = {"ts": 3.0}
+
+    r = c.post("/reset")
+    assert r.status_code == 200
+    assert r.json()["reset"] is True
+    assert r.json()["wiped"]["pulse_operations"] == 1
+    assert r.json()["wiped"]["pulse_goal_history"] == 2
+    assert eng._objective.version == 0
+    assert eng._objective.history == []
+    assert eng._trajectory.operations == []
+    assert eng._trajectory.pending == {}
+    assert eng._last_tool_turn_id is None
+    # A background hydration must not resurrect the wiped trajectory.
+    eng.ensure_pulse_hydrated()
+    assert eng._trajectory.operations == []
+
+
 def test_reset_does_not_touch_config(tmp_path):
     ctx = FakeCtx(config={"observation.retain_days": 7})
     c = _client(tmp_path, seed=True, ctx=ctx)
@@ -259,6 +294,7 @@ def test_reset_empty_db_ok(tmp_path):
                                    "pattern_affinity_history", "pattern_bank",
                                    "pulse_tools", "pulse_prototypes",
                                    "pulse_goal", "pulse_capsules",
+                                   "pulse_goal_history", "pulse_operations",
                                    "meta_keys"}
     assert all(v == 0 for v in body["wiped"].values())
     # P2.1: a physical-cleanup flag is now reported (True when the TRUNCATE
@@ -302,7 +338,7 @@ def test_reset_wipes_newer_analytical_state(tmp_path):
         keys = dict(
             conn.execute("SELECT key, value FROM meta").fetchall())
         assert keys.get("plugin_settings") == "{}"
-        assert keys.get("schema_version") == "11"
+        assert keys.get("schema_version") == "12"
     finally:
         conn.close()
 

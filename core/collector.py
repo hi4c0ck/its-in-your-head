@@ -319,7 +319,8 @@ def _on_post_tool_call(tool_name=None, args=None, result=None, task_id=None,
             result_chars=len(str(result)) if result is not None else None,
             task_id=task_id or kwargs.get("task_id") or corr["task_id"],
             session_id=corr["session_id"], turn_id=corr["turn_id"],
-            tool_call_id=kwargs.get("tool_call_id")))
+            tool_call_id=kwargs.get("tool_call_id"),
+            operation=events.sanitize_operation(name, args)))
     except Exception:
         logger.exception("its-in-your-head: tool_end capture failed")
 
