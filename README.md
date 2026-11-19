@@ -56,6 +56,28 @@ a per-tool table with live-call volume and goal / good / friction state.
 | `/mirror adaptation [on\|off\|status\|rules]` | directional adaptation state + rules |
 | `/mirror engine [status\|enable\|disable]` | perception tier (Tier-0 default, opt-in ONNX Tier-1) |
 
+## The face changes with your work
+
+The portrait isn't a static avatar — it's a live expression of your working
+state. These are real renders from the portrait engine, driven to each state
+and settled (not mockups):
+
+| rest | open | locked | aligned | tense |
+|:--:|:--:|:--:|:--:|:--:|
+| ![rest](wiki/images/rest.svg) | ![open](wiki/images/open.svg) | ![locked](wiki/images/locked.svg) | ![aligned](wiki/images/aligned.svg) | ![tense](wiki/images/tense.svg) |
+| nothing to read | curious, exploring | analytical, locked in | warm, in resonance | diverging, uncertain |
+
+At strip size — what you actually see at a glance:
+
+| rest | locked |
+|:--:|:--:|
+| ![strip rest](wiki/images/strip-rest.svg) | ![strip locked](wiki/images/strip-locked.svg) |
+
+The two poles read cleanest: *open* (exploring) vs *locked* (focused). The six
+measured dimensions are projected into a few display channels — openness,
+focus, warmth — so the face bends with how you're working, not with what you
+say. The fuller story lives in the [wiki](wiki/capabilities.md).
+
 ## How it works
 
 Observer hooks capture work signals on the hot path (capture + enqueue only —
